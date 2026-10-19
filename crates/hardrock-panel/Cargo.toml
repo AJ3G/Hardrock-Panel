@@ -1,0 +1,24 @@
+[package]
+name = "hardrock-panel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A standalone control panel for HobbyPCB Hardrock amplifiers and the ATU-500"
+
+[dependencies]
+hardrock.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serialport = { version = "4.10", default-features = false }
+# `accesskit` keeps the widgets visible to screen readers; `persistence` keeps
+# the window's place and the settings between runs.
+eframe = { version = "0.36.1", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wgpu",
+    "wayland",
+    "x11",
+    "persistence",
+] }

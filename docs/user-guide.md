@@ -1,0 +1,169 @@
+# Hardrock Panel user guide
+
+![The panel, transmitting into a simulated HR500](images/panel.png)
+
+Hardrock Panel watches and controls a **HobbyPCB Hardrock-500** linear
+amplifier over its USB serial port. It shows the amplifier's meters and
+readings, works out input power, efficiency and gain while you transmit, and
+runs its ATU-500 tuner. The amplifier is still keyed by the radio's PTT line,
+as before; the panel never keys it.
+
+It is the AMP window from SDRoxide, running on its own. It needs no radio
+program.
+
+> **Tested only with the Hardrock-500.** The Hardrock-50 can be chosen and is
+> marked *untested*: it shares the command set, but its limits are scaled
+> from the Hardrock-500's and its built-in tuner is shown as raw steps. Watch
+> the amplifier's own display until it has been tried on a real one.
+>
+> Tested on Windows 11 only.
+
+## Setting it up
+
+1. Plug the amplifier's USB lead in and turn the amplifier on.
+2. Start `hardrock-panel.exe`. On the first run the **Settings** window opens
+   by itself; later, open it with **SETTINGS** at the top left.
+3. Tick **Enable**, then choose the **Model** and the **Port** the amplifier
+   appears as (COM5, for example). If the port isn't listed, press
+   **REFRESH PORTS**.
+4. **Baud** must match the amplifier's menu. HobbyPCB's own control panel
+   needs 115200, so an amplifier that has been used with it is already there.
+5. Press **APPLY**. The status line reads *Connected to the Hardrock-500* when
+   the amplifier answers.
+
+**Only one program can have the port open.** Close HobbyPCB's control panel,
+and turn off SDRoxide's own amplifier link, before connecting here. If the port
+is busy the status line says so.
+
+**SWR warning at** sets where the SWR tile turns red and the meters warn that
+FWD and RFL can't be trusted. It starts at 5.0:1, where SDRoxide warns with its
+default settings.
+
+The settings, the meter picks, and the window's size and place are kept between
+runs.
+
+**From a shortcut.** `hardrock-panel.exe --port COM5` opens straight onto the
+amplifier on COM5, ahead of the saved settings. Add `--baud 38400` for another
+baud rate.
+
+## Band switching
+
+With no radio program beside it, nothing tells the panel the radio's
+frequency, so it never changes the amplifier's band on its own. Switch bands
+with **DN** and **UP**, or let the radio set the band over the amplifier's own
+CAT or ACC input. The line along the top of the window says so.
+
+## The window
+
+**What can be clicked.** Anything in the window that does something when
+clicked shows a pointing hand and a white outline when the mouse is over it.
+If the outline appears, it's a control; if it doesn't, it's only a display.
+PTT / OFF and the TEMP tile, which would otherwise look like a light and a
+reading, also carry a small folded corner at the top right. A button greyed
+out by an interlock (see below) shows no outline, because clicking it does
+nothing.
+
+**Meters.** Two cross-needle meters, each with a white outer needle and a blue
+inner one. Choose what each needle shows with its **TOP** and **BOTTOM**
+pickers: forward power, reflected power, drive, supply volts or drain current.
+They start as FWD over DRV on the left, so the power meter shows the radio's
+drive going in beside the amp's output, and IDD over RFL on the right.
+Picking a reading already on the other needle swaps them. The needles are
+live; they don't hold peaks. Every scale shows its yellow and red stretches,
+and readings that run past the end are marked beyond the arc with their
+values, so the limits are always in view.
+
+**When a scale changes range.** The meters start on their full scales: until
+power is first seen, the amplifier is taken to be in line and ready to make
+full power. Only these change a scale's range, and the legend always says so:
+
+| When | What changes | Legend | Back |
+|---|---|---|---|
+| The power stays at 10 W or less for 2.5 s while transmitting, in line or in bypass | FWD and DRV to 0–10 W, RFL to 0–2 W | *10 W scale* | To full scale at once when the amp is in line and the power goes over 10 W |
+| In OFF (bypass), the power goes over 10 W for 2 s in all, or swings over it twice | FWD and DRV to 0–100 W, RFL to 0–20 W: a 100 W radio running through the bypassed amp | *100 W scale* | Down to the 10 W scale once the power settles at 10 W or less for 2.5 s |
+| The power goes over 100 W, or over 10 W with the amp in line | FWD, DRV and RFL to their full scales | (none) | (this is the start) |
+| Two needles on one meter would sit on top of each other | The inner (bottom) scale only, to ½, ⅕ or 2× its range, whichever parts them, so both can be read | *rescaled* | Once the needles are well apart on the usual scale |
+
+In OFF (bypass) the radio's own power passes straight through the amp, so the
+power counted is the higher of FWD and DRV. Going up to the full scales never
+waits, so a needle is never held pinned at real power; coming down waits for
+the power to settle. A power range and a rescale can apply at once (*10 W
+scale, rescaled*).
+
+**Running barefoot in bypass.** In OFF the DRV tile stays green whatever it
+reads, tuner in or not, because the radio's power passing straight through is
+not a fault. **PTT** is greyed while the drive is over the amplifier's drive
+limit (8 W on the HR500): hover over it to see why, and lower the radio's
+power before putting the amplifier in line.
+
+In OFF the amplifier reports no forward or reflected power and no SWR. With no
+radio to ask, **FWD** shows the amplifier's DRV reading, which measures the
+radio's power at the amplifier's input; in bypass that power goes straight
+through. The legend says *from DRV*. DRV over-reads into a mismatch, so treat
+it as a guide. RFL and SWR stay empty in bypass. In PTT the amplifier's own
+readings are always used.
+
+**Readings.** Seven tiles: FWD, RFL, DRV, VDD, IDD, TEMP and SWR. Each takes
+the amplifier's own colour for that reading: green, yellow or red. A colour
+the amplifier holds after a transmission (it latches red until the next
+key-up) is held here too, with one exception. Until your first transmission
+after the panel connects, a yellow from the amplifier shows green. The HR500
+can start up with DRV yellow, or still hold a yellow from an earlier session,
+with nothing wrong now. A red (a trip) always shows. From your first key-up the
+tiles follow the amplifier's lights exactly, so its own screen and this one can
+differ only before then. SWR has no colour of its own, as on the amplifier,
+except that it turns **red** at or past the SWR warning set in Settings. Click
+**TEMP** to switch between °C and °F; it switches the amplifier's own display
+as well.
+
+**Controls.**
+
+- **PTT / OFF** puts the amplifier in line (green) or in bypass (blue).
+- **ANT** chooses the antenna jack.
+- **DN / UP** step the band.
+
+**Performance.** Input power (volts × amps), efficiency (output over input) and
+gain (output over drive, in dB), worked out only while transmitting. The
+number holds its peak for a second and then falls away; the bar under it is
+live, with the held peak marked on it. This suits FT8 and SSB, where the
+readings move too fast to read.
+
+**Tuner.** A drawing of the ATU-500's network: the inductor and capacitor it
+has switched in, with values, and which side the capacitor is on. When the
+tuner is bypassed, the drawing shows the bypass relays instead.
+
+- **TUNE** starts a tune. It blinks blue while tuning, turns green when tuned
+  and red if the tune fails, with the result and SWR on the line below.
+- **ON / BYP** puts the tuner in line or bypasses it.
+
+The tuner only reports step numbers. The values shown (for example "~0.20 µH ·
+step 3") are an estimate that includes the board's own stray inductance and
+capacitance, judged good to about 10%. How the values were arrived at is in
+[atu-values.md](atu-values.md).
+
+**Resizing.** Drag the window to any size: the panel scales to fit its width
+and height and sits centred in it.
+
+## What the panel won't do while you transmit
+
+Switching a relay with RF on it can damage it, and on the Hardrock it makes the
+amplifier flag reflected power. So while there is RF in the amplifier, the
+panel won't switch the antenna, band or tuner:
+
+- **ANT**, **DN**, **UP** and **ON / BYP** are greyed out, and hovering over
+  them says why. Unkey first.
+- The amplifier is asked whether it is transmitting before any of those is
+  sent, and the command is dropped if it is, or if it doesn't answer.
+- **PTT** can't be switched on (OFF to PTT) while the drive is over the
+  amplifier's drive limit, 8 W on the HR500, as with a 100 W radio running
+  barefoot through the bypassed amp. Lower the drive first.
+
+Each of these is marked *SAFETY INTERLOCK* in the code and explained in
+[safety-interlocks.md](safety-interlocks.md).
+
+## Trips and over-temperature
+
+When the amplifier trips, the status line at the top of the window turns red
+and says *TRIPPED*, naming the reading that tripped it. Above its temperature
+limit it reads *OFF LINE · over temperature*. The amplifier does the
+protecting; the panel only reports it.

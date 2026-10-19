@@ -1,0 +1,14 @@
+[package]
+name = "hardrock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# HobbyPCB Hardrock amplifiers (HR500, HR50) over their USB or ACC serial port:
+# readings, band, keying mode, antenna and the ATU. The settings and status
+# types are in `types`, which the panel draws from.
+[dependencies]
+serialport = { version = "4.10", default-features = false }
+serde.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
