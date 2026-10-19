@@ -10,7 +10,8 @@ as before; the panel never keys it.
 
 It is the AMP window from SDRoxide, running on its own. It needs no radio
 program. It can also read an ELAD FDM-DUO's own power, SWR, dial and settings
-over the radio's CAT port (see [The radio](#the-radio)).
+over the radio's CAT port, set its power, and key its TUNE carrier (see
+[The radio](#the-radio)).
 
 > **Tested only with the Hardrock-500.** The Hardrock-50 can be chosen and is
 > marked *untested*: it shares the command set, but its limits are scaled
@@ -53,7 +54,9 @@ radio.
 ## The radio
 
 The panel can read an **ELAD FDM-DUO** over its CAT port, the one SDRoxide or a
-logger would use. It only reads: it never keys the radio or changes a setting.
+logger would use. Besides reading, it changes only the radio's power setting
+(menu 34) when you move its slider, and keys only the radio's own TUNE carrier
+when you press RIG TUNE.
 
 1. In **Settings**, under **Radio**, tick **Enable**, choose the **Port** the
    radio's CAT appears as (COM3, for example), and the **Baud**. It must match
@@ -74,12 +77,31 @@ amplifier's DRV, which over-reads into a mismatch. In PTT the amplifier's own
 readings are used, and DRV, input power, efficiency and gain are always the
 amplifier's.
 
-![The RADIO window, reading a simulated FDM-DUO](images/radio.png)
+![The radio window, popped out, reading a simulated FDM-DUO](images/radio.png)
 
-**RADIO** at the top left opens the radio's window: its live forward and
-reflected power, SWR, TX POWER (menu 34) and dial, then every setting the
-radio answers over CAT, with its menu number, its meaning and the radio's
-answer as it came. The settings are read when the port opens, when you press
+**RIG TUNE.** With the radio connected, a strip under the top line has
+**RIG TUNE**, the radio's **TX POWER (menu 34)** slider, and how long TUNE may
+run (10 s to start, up to 60 s). Set the power, then press RIG TUNE: the radio
+keys its own TUNE carrier at that power, and the meters show what the
+amplifier does with it. Press it again to unkey. The slider writes menu 34 to
+the radio when you let go, and it stays set, as on the radio's menu.
+
+RIG TUNE is greyed, with the reason on hover, unless the amplifier is
+connected and not tripped and, in PTT, on the radio's band, with the power
+within its 8 W drive limit (so MAX, about 8.3 W, only in OFF). It unkeys by
+itself at the time limit, on a trip, if the drive goes over the limit, if
+either SWR reaches the SWR warning in Settings, if the radio drops to receive
+on a high SWR, and if the panel closes or stops responding. The reason is
+shown after it stops. These are safety interlocks #5 and #6.
+
+Not to be confused with the tuner's **TUNE**, which starts the ATU-500's
+tuning cycle and needs a carrier: RIG TUNE can provide one.
+
+**RADIO** at the top left opens the radio's window: its dial, large, its live forward and
+reflected power, SWR and TX POWER (menu 34), RIG TUNE with its slider, then
+every setting the radio answers over CAT, with its menu number, its meaning and the radio's
+answer as it came. **POP OUT** moves it into a window of its own, and
+**DOCK** brings it back. The settings are read when the port opens, when you press
 **READ AGAIN**, and every 10 seconds between transmissions. Menus that have no
 CAT command, such as 37 `CW IN` and 45 keyer speed, can only be read on the
 radio.

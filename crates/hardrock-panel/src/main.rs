@@ -34,6 +34,7 @@ mod theme;
 mod panel;
 mod radio;
 mod settings;
+mod tune;
 
 use eframe::egui::{self, RichText};
 use hardrock::{AmpAction, AmpConfig, AmpLink, AmpReadings, AmpStatus, Band};
@@ -57,6 +58,10 @@ struct Saved {
     amp: AmpConfig,
     rig: RigConfig,
     swr_warn: f32,
+    /// How long TUNE may run, in seconds.
+    tune_secs: u32,
+    /// The radio's window was popped out into its own.
+    radio_popped: bool,
     /// The meters' needle picks (see [`AmpMeters::saved`]).
     meters: Option<[u8; 4]>,
 }
@@ -67,6 +72,8 @@ impl Default for Saved {
             amp: AmpConfig::default(),
             rig: RigConfig::default(),
             swr_warn: DEFAULT_SWR_WARN,
+            tune_secs: tune::DEFAULT_TUNE_SECS,
+            radio_popped: false,
             meters: None,
         }
     }
@@ -152,6 +159,40 @@ impl App {
             self.rig = Some(RigLink::start(self.saved.rig.clone()));
         }
         self.band_told = None;
+    }
+
+    /// While TUNE is keyed, tell the link the panel still wants it, or stop
+    /// it if interlock #6 says so.
+    fn keep_tune(&self, amp: &AmpStatus, rig: Option<&RigStatus>) {
+        let (Some(link), Some(r)) = (&self.rig, rig) else { return };
+        if r.tuning.is_none() {
+            return;
+        }
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): a TUNE in
+        // progress is stopped the moment the amplifier trips, leaves the
+        // radio's band in line, is driven past its limit, or either SWR
+        // reaches the warning.
+        match tune::tune_must_stop(amp, r, self.saved.swr_warn) {
+            Some(why) => link.tune_stop(Some(why)),
+            None => link.tune_alive(),
+        }
+    }
+
+    /// Act on the TUNE strip.
+    fn do_tune(&mut self, t: tune::TuneOut, amp: &AmpStatus, r: &RigStatus) {
+        let Some(link) = &self.rig else { return };
+        if t.stop {
+            link.tune_stop(None);
+        }
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): checked again
+        // here, not only by the greyed button.
+        if t.start && tune::tune_blocked(amp, r, r.power()).is_none() {
+            let secs = self.saved.tune_secs.clamp(*tune::TUNE_SECS.start(), *tune::TUNE_SECS.end());
+            link.tune_start(std::time::Duration::from_secs(secs.into()));
+        }
+        if let Some(code) = t.power {
+            link.set_power(code);
+        }
     }
 
     /// See whether a band press here sticks. If the amplifier is back on its
@@ -262,6 +303,10 @@ impl eframe::App for App {
         let mut st = self.status();
         let rig = self.rig.as_ref().map(RigLink::status);
         self.follow_band(&st, rig.as_ref());
+        // The amplifier as it reports itself, before the radio's readings
+        // fill it in: what TUNE's interlocks (#6) judge by.
+        let amp_raw = st.clone();
+        self.keep_tune(&amp_raw, rig.as_ref());
         // In bypass the amplifier reports no FWD, RFL or SWR: the radio's own
         // readings fill them, or with no radio FWD falls back to the
         // amplifier's DRV (see `panel::from_rig`).
@@ -317,6 +362,29 @@ impl eframe::App for App {
                 });
             });
 
+        if let Some(r) = rig.as_ref().filter(|r| r.connected) {
+            let blocked = tune::tune_blocked(&amp_raw, r, r.power());
+            let limit = limit_in_line(&amp_raw);
+            let t = egui::Panel::top("tune")
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::BG_DEEP())
+                        .inner_margin(egui::Margin::symmetric(11, 4)),
+                )
+                .show(ui, |ui| {
+                    tune::tune_strip(
+                        ui,
+                        "main",
+                        r,
+                        blocked.as_deref(),
+                        limit,
+                        &mut self.saved.tune_secs,
+                    )
+                })
+                .inner;
+            self.do_tune(t, &amp_raw, r);
+        }
+
         let out = egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
             .show(ui, |ui| {
@@ -340,10 +408,23 @@ impl eframe::App for App {
         }
         if self.show_radio {
             let mut open = true;
-            let mut refresh = false;
-            radio::radio_window(ctx, &mut open, rig.as_ref(), &mut refresh);
-            if refresh && let Some(r) = &self.rig {
+            let args = radio::TuneArgs {
+                blocked: rig.as_ref().and_then(|r| tune::tune_blocked(&amp_raw, r, r.power())),
+                limit_in_line: limit_in_line(&amp_raw),
+                secs: &mut self.saved.tune_secs,
+            };
+            let o =
+                radio::radio_window(ctx, &mut open, self.saved.radio_popped, rig.as_ref(), args);
+            if o.refresh
+                && let Some(r) = &self.rig
+            {
                 r.read_settings();
+            }
+            if let Some(p) = o.pop {
+                self.saved.radio_popped = p;
+            }
+            if let Some(r) = &rig {
+                self.do_tune(o.tune, &amp_raw, r);
             }
             self.show_radio = open;
         }
@@ -390,6 +471,11 @@ fn apply_args(cfg: &mut AmpConfig, rig: &mut RigConfig, mut args: impl Iterator<
             _ => {}
         }
     }
+}
+
+/// The amplifier's drive limit while it is in line (PTT), or `None` in OFF.
+fn limit_in_line(amp: &AmpStatus) -> Option<f32> {
+    amp.readings.filter(|r| r.ptt).map(|_| amp.model.limits().drive_warn_w)
 }
 
 /// The amplifier shows RF: keyed, drive or output (as interlocks 1 and 2).

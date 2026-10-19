@@ -20,8 +20,11 @@ from the radio, it reads from the radio's CAT port itself. It does the following
 - Reads an ELAD FDM-DUO over its CAT port (COM3, 38400 8N1 by default):
   its own forward and reflected power and SWR fill the amplifier's readings
   in bypass, its dial can set the amplifier's band between transmissions, and
-  its menu settings are shown in a RADIO window. Read only: it never keys or
-  changes the radio.
+  its menu settings are shown in a RADIO window that can pop out. RIG TUNE
+  keys the radio's own carrier at its menu 34 power, beside a slider for it,
+  to watch the amplifier, under safety interlocks that unkey it on a trip,
+  high SWR, overdrive or a time limit. Nothing else is ever sent to the radio
+  but reads.
 - Refuses to switch a relay while there may be RF in the amplifier. See
   [safety interlocks](docs/safety-interlocks.md).
 
@@ -89,7 +92,7 @@ command line.
 | Path | What it holds |
 |---|---|
 | `crates/hardrock` | The amplifier's serial protocol and the background link that polls it and holds the interlocks |
-| `crates/rigcat` | The radio's CAT port, read only: the FDM-DUO's power, SWR, dial and settings |
+| `crates/rigcat` | The radio's CAT port: a `Protocol` per radio (the FDM-DUO so far), the link, menu 34 and RIG TUNE |
 | `crates/hardrock-panel` | The window: panel, meters, settings and SDRoxide's look |
 | `docs/` | User guide, [safety interlocks](docs/safety-interlocks.md), [design decisions](docs/design-decisions.md), [ATU values](docs/atu-values.md), [open items](docs/todo.md) |
 | `docs/history/` | The SDRoxide build's notes, test log and bench measurements |

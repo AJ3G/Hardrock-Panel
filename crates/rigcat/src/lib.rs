@@ -1,15 +1,18 @@
-//! A radio's CAT port, read only, for the panel to show what the radio itself
-//! measures of its transmission beside the amplifier's readings.
+//! A radio's CAT port, for the panel: what the radio measures of its own
+//! transmission, its dial and its settings, its transmit power, and its TUNE
+//! carrier.
 //!
-//! Only the ELAD FDM-DUO for now ([`elad`]). [`RigLink`] opens the port on a
-//! thread of its own, reads forward and reflected power and SWR several times
-//! a second, the dial once a second, and the radio's settings when asked. It
-//! never keys the radio or changes a setting (safety interlock #5).
+//! [`Protocol`] is what each radio's dialect provides; [`elad`] is the
+//! FDM-DUO's, the only one so far. Another radio is another module and
+//! another [`RigModel`]. [`RigLink`] runs the port on a thread of its own.
+//! What it may send, and when, is safety interlocks #5 and #6.
 
 pub mod elad;
 mod link;
+pub mod protocol;
 
 pub use link::RigLink;
+pub use protocol::{Frame, FrameKind, Item, PowerStep, Protocol, Reply};
 
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -35,6 +38,18 @@ impl RigModel {
             RigModel::FdmDuo => &elad::BAUDS,
         }
     }
+
+    pub fn default_baud(self) -> u32 {
+        match self {
+            RigModel::FdmDuo => elad::DEFAULT_BAUD,
+        }
+    }
+
+    pub fn protocol(self) -> Box<dyn Protocol> {
+        match self {
+            RigModel::FdmDuo => Box::new(elad::FdmDuo::default()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -56,22 +71,47 @@ impl Default for RigConfig {
             enabled: false,
             model: RigModel::FdmDuo,
             path: String::new(),
-            baud: elad::DEFAULT_BAUD,
+            baud: RigModel::FdmDuo.default_baud(),
             // As in SDRoxide.
             follow_band: true,
         }
     }
 }
 
+/// A power reading.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Watts {
+    pub w: f32,
+    /// False when the radio flags it as not to be trusted.
+    pub valid: bool,
+}
+
+/// An SWR reading.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Swr {
+    pub ratio: f32,
+    pub valid: bool,
+    /// The radio dropped back to receive on a high SWR.
+    pub tripped: bool,
+}
+
 /// One setting as the radio last answered it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SettingRow {
-    pub item: elad::Item,
+    pub item: Item,
     /// The answer, in words; `None` if it didn't parse.
     pub value: Option<String>,
-    /// The answer as it came, without the `;`. `None` if none came; `?` if the
-    /// radio refused the command.
+    /// The answer as it came. `None` if none came; `?` if the radio refused
+    /// the command.
     pub raw: Option<String>,
+}
+
+/// A TUNE carrier in progress.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tuning {
+    pub since: Instant,
+    /// When it unkeys by itself.
+    pub until: Instant,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -83,19 +123,26 @@ pub struct RigStatus {
     pub baud: u32,
     pub freq_hz: Option<u64>,
     pub mode: Option<&'static str>,
-    pub fwd: Option<elad::Watts>,
-    pub rfl: Option<elad::Watts>,
-    pub swr: Option<elad::Swr>,
-    /// Menu 34 `TX POWER`, as last read.
-    pub tx_power: Option<String>,
+    pub fwd: Option<Watts>,
+    pub rfl: Option<Watts>,
+    pub swr: Option<Swr>,
+    /// The radio's transmit power setting (menu 34 on the FDM-DUO), as its
+    /// own code; see `power_steps`.
+    pub power_code: Option<u8>,
+    pub power_steps: &'static [PowerStep],
+    pub power_name: &'static str,
+    pub tuning: Option<Tuning>,
+    /// Why the last TUNE ended, when it wasn't the operator.
+    pub tune_note: Option<String>,
     pub settings: Vec<SettingRow>,
     pub settings_read: Option<Instant>,
 }
 
 impl RigStatus {
     /// The radio says it is putting out power it trusts: the surest sign it
-    /// is transmitting. Below 0.5 W, and in a fold-back, it flags its reading
-    /// and this is false, so the panel also looks at the amplifier's DRV.
+    /// is transmitting. Below 0.5 W, and in a fold-back, the FDM-DUO flags
+    /// its reading and this is false, so the panel also looks at the
+    /// amplifier's DRV.
     pub fn keyed(&self) -> bool {
         self.fwd.is_some_and(|p| p.valid && p.w > 0.0)
     }
@@ -112,5 +159,11 @@ impl RigStatus {
 
     pub fn swr_ratio(&self) -> Option<f32> {
         self.swr.filter(|s| s.valid).map(|s| s.ratio)
+    }
+
+    /// The power step the radio is on.
+    pub fn power(&self) -> Option<&'static PowerStep> {
+        let code = self.power_code?;
+        self.power_steps.iter().find(|p| p.code == code)
     }
 }

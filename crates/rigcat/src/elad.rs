@@ -1,8 +1,8 @@
 //! The ELAD FDM-DUO's CAT port: ASCII, `;`-terminated, 8N1 at one of the four
 //! rates menu 70 `CAT BAUD` offers.
 //!
-//! Only READ forms are here. Nothing in this module can build a frame that
-//! keys the radio or changes a setting (safety interlock #5, in
+//! Reads, menu 34 (`TP`), the radio's own TUNE carrier (`TX2;`) and unkey
+//! (`RX;`), and nothing else (safety interlocks #5 and #6, in
 //! `docs/safety-interlocks.md`). The command forms and value tables are those
 //! SDRoxide's ELAD driver uses (`sdroxide-cat/src/elad.rs`), written from the
 //! *ELAD FDM-DUO User Manual* v2.6 §6 and checked on AJ3G's DUO: `FP` and `RP`
@@ -24,15 +24,8 @@ pub const DIAL: [&str; 2] = ["FA;", "MD;"];
 /// Asked to see whether the radio is there at all.
 pub const PING: &str = "FA;";
 
-/// One row of the settings the radio can be asked for over CAT.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Item {
-    /// The READ frame that asks for it.
-    pub cmd: &'static str,
-    /// The radio's own menu number, where the setting is one of its menus.
-    pub menu: Option<u8>,
-    pub name: &'static str,
-}
+use crate::RigStatus;
+use crate::protocol::{Frame, FrameKind, Incoming, Item, PowerStep, Protocol, Reply};
 
 const fn item(cmd: &'static str, menu: Option<u8>, name: &'static str) -> Item {
     Item { cmd, menu, name }
@@ -57,44 +50,59 @@ pub const SETTINGS: &[Item] = &[
     item("SM0;", None, "S-meter"),
 ];
 
-/// Whether `frame` may be sent to the radio: only the READ frames above.
-///
-/// SAFETY INTERLOCK (docs/safety-interlocks.md, #5): the radio link never
-/// keys the radio or changes its settings. `TX;` keys the transmitter with
-/// no parameter at all, so "a frame with no parameter is a read" is not
-/// safe; and `RC;` clears the RIT offset the same way. Keying the DUO from
-/// here could put power into the amplifier when the operator did not mean to
-/// transmit, on whatever band and antenna it is on. So the link sends only
-/// frames on this list, and refuses anything else even from its own code.
+/// Whether `frame` is one of the READ frames above.
 pub fn is_read(frame: &str) -> bool {
     TELEMETRY.contains(&frame) || DIAL.contains(&frame) || SETTINGS.iter().any(|i| i.cmd == frame)
 }
+
+/// The radio's own TUNE carrier: `TX2;`. `TX;`, `TX0;` and `TX1;` are an
+/// ordinary transmission, of whatever audio is on the radio's input, and are
+/// never sent.
+pub const TUNE: &str = "TX2;";
+pub const UNKEY: &str = "RX;";
+
+/// Whether `frame` may be sent at all.
+///
+/// SAFETY INTERLOCK (docs/safety-interlocks.md, #5): the link sends only the
+/// READ frames above, menu 34's power steps (`TP00;` to `TP09;`), the TUNE
+/// carrier (`TX2;`) and unkey (`RX;`). Anything else is refused, even from
+/// this code: `TX;` keys an ordinary transmission with no parameter at all,
+/// so "a bare command is a read" is not safe, and `RC;` clears the RIT
+/// offset the same way. When the TUNE carrier may be sent is interlock #6.
+pub fn allowed(frame: &str) -> bool {
+    is_read(frame)
+        || frame == TUNE
+        || frame == UNKEY
+        || (0..=TX_POWER_MAX).any(|c| frame == format!("TP{c:02};"))
+}
+
+/// Menu 34's MAX code.
+pub const TX_POWER_MAX: u8 = 9;
+
+/// Menu 34 `TX POWER`, as power steps. MAX is "more than 5 W by an amount
+/// ELAD does not publish"; AJ3G measured the DUO's ceiling at 8.0 to 8.3 W
+/// on 20 m (18 Oct 2026, LP-100A), so it is taken as 8.3 W against the
+/// amplifier's drive limit.
+pub const POWER_STEPS: [PowerStep; 10] = [
+    PowerStep { label: "0.3 W", watts: 0.3, code: 0 },
+    PowerStep { label: "0.5 W", watts: 0.5, code: 1 },
+    PowerStep { label: "1 W", watts: 1.0, code: 2 },
+    PowerStep { label: "1.2 W", watts: 1.2, code: 3 },
+    PowerStep { label: "1.5 W", watts: 1.5, code: 4 },
+    PowerStep { label: "2 W", watts: 2.0, code: 5 },
+    PowerStep { label: "3 W", watts: 3.0, code: 6 },
+    PowerStep { label: "4 W", watts: 4.0, code: 7 },
+    PowerStep { label: "5 W", watts: 5.0, code: 8 },
+    PowerStep { label: "MAX", watts: 8.3, code: 9 },
+];
 
 /// The prefix of the answer to a READ frame: its command letters.
 pub fn reply_prefix(frame: &str) -> &str {
     &frame[..2.min(frame.len())]
 }
 
-/// A power reading from `FP` or `RP`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Watts {
-    pub w: f32,
-    /// False when the radio flags it (`!`) as not to be trusted: in receive,
-    /// below 0.5 W, and as TUNE ramps up and down.
-    pub valid: bool,
-}
-
-/// An SWR reading from `WR`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Swr {
-    pub ratio: f32,
-    pub valid: bool,
-    /// The radio dropped back to receive on a high SWR.
-    pub tripped: bool,
-}
-
 /// `FP` / `RP` body: a flag (space or `!`), then six digits of milliwatts.
-pub fn parse_watts(body: &str) -> Option<Watts> {
+pub fn parse_watts(body: &str) -> Option<crate::Watts> {
     let mut chars = body.chars();
     let valid = match chars.next()? {
         ' ' => true,
@@ -102,11 +110,11 @@ pub fn parse_watts(body: &str) -> Option<Watts> {
         _ => return None,
     };
     let mw: u32 = chars.as_str().trim().parse().ok()?;
-    Some(Watts { w: mw as f32 / 1000.0, valid })
+    Some(crate::Watts { w: mw as f32 / 1000.0, valid })
 }
 
 /// `WR` body: the high-SWR trip flag, a space or `!`, then `nn.nn`.
-pub fn parse_swr(body: &str) -> Option<Swr> {
+pub fn parse_swr(body: &str) -> Option<crate::Swr> {
     let mut chars = body.chars();
     let tripped = chars.next()? == '1';
     let valid = match chars.next()? {
@@ -116,7 +124,7 @@ pub fn parse_swr(body: &str) -> Option<Swr> {
     };
     let ratio: f32 = chars.as_str().trim().parse().ok()?;
     // Below 1:1 is a misread frame, not a match.
-    Some(Swr { ratio, valid: valid && ratio >= 1.0, tripped })
+    Some(crate::Swr { ratio, valid: valid && ratio >= 1.0, tripped })
 }
 
 /// `FA` / `FB` body: eleven digits of hertz.
@@ -135,10 +143,6 @@ pub fn mode_name(digit: char) -> Option<&'static str> {
         _ => return None,
     })
 }
-
-/// Menu 34 `TX POWER`'s numbered steps, in watts, indexed by `TP`'s value.
-/// 09 is MAX.
-pub const TX_POWER_STEPS_W: [f32; 9] = [0.3, 0.5, 1.0, 1.2, 1.5, 2.0, 3.0, 4.0, 5.0];
 
 /// `RF` filter widths, in Hz: SSB by index, CW by (width, index), AM by index.
 const RF_SSB_HZ: &[u32] = &[
@@ -230,11 +234,8 @@ pub fn describe(prefix: &str, body: &str) -> Option<String> {
             .into(),
         ),
         "TP" => {
-            let code: usize = body.trim().parse().ok()?;
-            match code {
-                9 => Some("MAX".into()),
-                c => TX_POWER_STEPS_W.get(c).map(|w| format!("{w} W")),
-            }
+            let code: u8 = body.trim().parse().ok()?;
+            POWER_STEPS.iter().find(|p| p.code == code).map(|p| p.label.to_string())
         }
         "RF" => {
             let mut c = body.chars();
@@ -277,15 +278,121 @@ pub fn describe(prefix: &str, body: &str) -> Option<String> {
     }
 }
 
+/// The FDM-DUO's dialect.
+#[derive(Default)]
+pub struct FdmDuo {
+    buf: String,
+}
+
+impl Protocol for FdmDuo {
+    fn ping(&self) -> Frame {
+        Frame::read(PING)
+    }
+
+    fn telemetry(&self) -> Vec<Frame> {
+        TELEMETRY.iter().map(|f| Frame::read(*f)).collect()
+    }
+
+    fn dial(&self) -> Vec<Frame> {
+        DIAL.iter().map(|f| Frame::read(*f)).collect()
+    }
+
+    fn settings(&self) -> &'static [Item] {
+        SETTINGS
+    }
+
+    fn read(&self, item: &Item) -> Frame {
+        Frame::read(item.cmd)
+    }
+
+    fn reply_key(&self, frame: &Frame) -> Option<String> {
+        (frame.kind == FrameKind::Read)
+            .then(|| reply_prefix(&String::from_utf8_lossy(&frame.bytes)).to_string())
+    }
+
+    fn deframe(&mut self, bytes: &[u8]) -> Vec<Incoming> {
+        self.buf.push_str(&String::from_utf8_lossy(bytes));
+        let mut out = Vec::new();
+        while let Some(i) = self.buf.find(';') {
+            let msg: String = self.buf.drain(..=i).collect();
+            let msg = msg.trim_end_matches(';').trim_start_matches(['\r', '\n']);
+            if msg == "?" {
+                out.push(Incoming::Refused);
+            } else if msg.len() >= 2 && msg.is_char_boundary(2) {
+                let (k, b) = msg.split_at(2);
+                out.push(Incoming::Reply(Reply { key: k.to_string(), body: b.to_string() }));
+            }
+        }
+        out
+    }
+
+    fn apply(&self, s: &mut RigStatus, r: &Reply) {
+        let b = r.body.as_str();
+        match r.key.as_str() {
+            "FP" => s.fwd = parse_watts(b),
+            "RP" => s.rfl = parse_watts(b),
+            "WR" => s.swr = parse_swr(b),
+            "FA" => s.freq_hz = parse_freq(b).or(s.freq_hz),
+            "MD" => s.mode = b.chars().next().and_then(mode_name),
+            "TP" => s.power_code = b.trim().parse().ok().filter(|c| *c <= TX_POWER_MAX),
+            _ => {}
+        }
+    }
+
+    fn describe(&self, r: &Reply) -> Option<String> {
+        describe(&r.key, &r.body)
+    }
+
+    fn raw(&self, r: &Reply) -> String {
+        format!("{}{}", r.key, r.body)
+    }
+
+    fn allowed(&self, frame: &Frame) -> bool {
+        std::str::from_utf8(&frame.bytes).is_ok_and(allowed)
+    }
+
+    fn power_steps(&self) -> &'static [PowerStep] {
+        &POWER_STEPS
+    }
+
+    fn power_name(&self) -> &'static str {
+        "TX POWER (menu 34)"
+    }
+
+    fn set_power(&self, code: u8) -> Frame {
+        Frame::new(format!("TP{:02};", code.min(TX_POWER_MAX)), FrameKind::SetPower)
+    }
+
+    fn key_tune(&self) -> Frame {
+        Frame::new(TUNE, FrameKind::Key)
+    }
+
+    fn unkey(&self) -> Frame {
+        Frame::new(UNKEY, FrameKind::Unkey)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Swr, Watts};
 
     #[test]
-    fn nothing_that_keys_or_sets_the_radio_can_be_sent() {
-        for f in ["TX;", "TX0;", "TX2;", "RX;", "RC;", "TP09;", "AN1;", "TI1;", "FA00014074000;"] {
-            assert!(!is_read(f), "{f} must be refused");
+    fn only_reads_menu_34_tune_and_unkey_can_be_sent() {
+        // An ordinary transmission, a cleared RIT, or any other setting: never.
+        for f in ["TX;", "TX0;", "TX1;", "RC;", "AN1;", "TI1;", "FA00014074000;", "TP10;", "TP9;"] {
+            assert!(!allowed(f), "{f} must be refused");
         }
+        for f in ["TX2;", "RX;", "TP00;", "TP08;", "TP09;"] {
+            assert!(allowed(f), "{f}");
+            assert!(!is_read(f));
+        }
+        let d = FdmDuo::default();
+        assert_eq!(d.key_tune(), Frame::new("TX2;", FrameKind::Key));
+        assert_eq!(d.unkey().kind, FrameKind::Unkey);
+        assert_eq!(d.set_power(9).bytes, b"TP09;");
+        assert_eq!(d.set_power(42).bytes, b"TP09;");
+        assert!(d.reply_key(&d.key_tune()).is_none());
         for f in TELEMETRY.iter().chain(DIAL.iter()).chain(SETTINGS.iter().map(|i| &i.cmd)) {
             assert!(is_read(f));
             // A READ ends at its command letters (SM carries its fixed 0).
@@ -293,6 +400,20 @@ mod tests {
             assert!(!f.starts_with("TX") && !f.starts_with("RX"));
         }
         assert!(is_read(PING));
+    }
+
+    #[test]
+    fn answers_split_across_reads_are_put_back_together() {
+        let mut d = FdmDuo::default();
+        assert!(d.deframe(b"FP 0060").is_empty());
+        assert_eq!(
+            d.deframe(b"91;?;SM00011;"),
+            vec![
+                Incoming::Reply(Reply { key: "FP".into(), body: " 006091".into() }),
+                Incoming::Refused,
+                Incoming::Reply(Reply { key: "SM".into(), body: "00011".into() }),
+            ]
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Hardrock amplifier: safety interlocks
 
-Every place the panel refuses or delays something because doing it would be unsafe for the amplifier. #1, #2 and #4 came over unchanged from the AMP window in SDRoxide, where they were first written and bench-tested. #3 came over when the panel gained its own radio link, and #5 is new with that link. Each is marked in the code with `SAFETY INTERLOCK` and its number here. AJ3G asked (17 Oct 2026) that every such block say what it blocks and why.
+Every place the panel refuses or delays something because doing it would be unsafe for the amplifier. #1, #2 and #4 came over unchanged from the AMP window in SDRoxide, where they were first written and bench-tested. #3 came over when the panel gained its own radio link, and #5 and #6 are new with that link. Each is marked in the code with `SAFETY INTERLOCK` and its number here. AJ3G asked (17 Oct 2026) that every such block say what it blocks and why.
 
 Before removing or loosening any of these, read why it is there.
 
@@ -35,12 +35,20 @@ Before removing or loosening any of these, read why it is there.
 - **Why:** in OFF (bypass) the radio's own power goes straight through to the tuner, so an operator can run a 100 W radio barefoot through the bypassed amp (AJ3G, 18 Oct 2026). Switching to PTT with that still applied would drive the amplifier far past its trip level and can damage the VRF2944 output devices.
 - **What the operator sees:** the PTT/OFF button greys while the drive is over the limit, and hovering says "Lower the drive first", with the drive and the limit. In bypass the DRV reading and tile stay green whatever they read, ATU in or not (AJ3G), because high drive there is not a fault.
 
-## 5. The radio link never keys the radio or changes its settings
+## 5. The radio link sends only reads, the power setting, and its TUNE carrier
 
-- **Where:** `crates/rigcat/src/elad.rs`, `is_read()`, and `crates/rigcat/src/link.rs`, `Rig::query()`.
-- **Blocks:** every frame to the radio that is not one of the READ frames listed in `elad.rs` (`FP;`, `RP;`, `WR;`, `FA;`, `MD;` and the settings reads).
-- **Why:** `TX;` keys the FDM-DUO with no parameter at all, so "a bare command is a read" is not safe, and `RC;` clears the RIT offset the same way. Keying the radio from the panel could put power into the amplifier when the operator did not mean to transmit, on whatever band and antenna it is on; changing a setting would leave the radio changed after the panel closes. So the link sends only frames on the list and refuses anything else, even from its own code. Tested by `nothing_that_keys_or_sets_the_radio_can_be_sent` and `a_frame_that_is_not_a_read_never_reaches_the_radio`. `tools/fake_duo.py` prints any frame that is not a read.
-- **What the operator sees:** nothing; the radio is keyed and set up on the radio, as before.
+- **Where:** `crates/rigcat/src/elad.rs`, `allowed()`, and `crates/rigcat/src/link.rs`, `Rig::write()`. Each radio's protocol has its own list (`Protocol::allowed`).
+- **Blocks:** every frame to the radio except the READ frames listed in `elad.rs`, menu 34's power steps (`TP00;` to `TP09;`), the radio's own TUNE carrier (`TX2;`) and unkey (`RX;`).
+- **Why:** `TX;` (and `TX0;`, `TX1;`) keys an ordinary transmission of whatever audio is on the radio's input, with no parameter at all, so "a bare command is a read" is not safe; `RC;` clears the RIT offset the same way. Keying the radio, or changing a setting, could put power into the amplifier when the operator did not mean to transmit, or leave the radio changed after the panel closes. So the link sends only what is on the list, and refuses anything else even from its own code. Menu 34 is written only when the operator moves its slider; the TUNE carrier is sent only under #6. Tested by `only_reads_menu_34_tune_and_unkey_can_be_sent`, `a_frame_not_on_the_list_never_reaches_the_radio` and, for the whole TUNE sequence, `tune_keys_the_carrier_and_unkeys_when_the_panel_stops_asking`. `tools/fake_duo.py` prints anything it should never be sent.
+- **Changed:** AJ3G, 19 Oct 2026. It was "reads only" until he asked for TUNE with a power slider and menu 34 beside it.
+
+## 6. RIG TUNE keys only when the amplifier is ready for it, and always unkeys
+
+- **Where:** `crates/hardrock-panel/src/tune.rs`, `tune_blocked()` and `tune_must_stop()`; `crates/hardrock-panel/src/main.rs`, `keep_tune()` and `do_tune()`; `crates/rigcat/src/link.rs`, `run()`.
+- **Blocks keying when:** the radio or the amplifier isn't connected (the amplifier's state can't be checked); the amplifier has tripped; or, with the amplifier in line (PTT), the radio is not on the amplifier's band (the carrier would meet the wrong low-pass filter at full gain), the radio's frequency is in no band the amplifier covers, or the power step is over the amplifier's drive limit (8 W on the HR500, as #4; menu 34's MAX is taken as 8.3 W, what AJ3G measured as the DUO's ceiling, so MAX is refused in line). The power slider also won't write a step over the drive limit while the amplifier is in line.
+- **Unkeys when:** any of those becomes true; the drive goes over the limit in line; the amplifier's SWR (in line) or the radio's SWR reaches the SWR warning setting; the radio drops to receive on a high SWR; the time limit set beside the button runs out (1 to 60 s, 10 s to start; the link refuses more than 60 s whatever it is asked); the panel stops telling the link it still wants the carrier for more than a second (frozen or closed); the radio stops answering; the panel closes, or the settings are applied, which drops the link. Unkey is sent twice.
+- **Why:** the carrier goes through the amplifier: in PTT the HR500 turns a few watts into hundreds. A carrier left on, or keyed into the wrong filter, a trip or a bad load, is the fastest way to damage the output devices and the relays. The checks are made by the panel before keying and ten times a second while keyed, and the link's own time limit and watchdog stand behind them in case the panel cannot.
+- **What the operator sees:** RIG TUNE greyed, with the reason on hover; while keyed, the seconds left; after an automatic stop, why.
 
 ## Not interlocks, but related
 

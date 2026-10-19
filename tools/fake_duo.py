@@ -6,9 +6,10 @@ panel's RADIO link without a radio. Linux and macOS only.
     python3 tools/fake_duo.py --keyed      # transmitting about 6 W, SWR 1.32
     python3 tools/fake_duo.py --freq 7074000
 
-It answers the READ commands the panel sends with fixed readings, `?;` to
-anything else, and prints every command that is not a read, which should
-never happen.
+It answers the READ commands the panel sends with fixed readings, takes
+menu 34 (`TPnn;`), keys its TUNE carrier on `TX2;` at menu 34's power and
+unkeys on `RX;`, and answers `?;` to anything else. It prints every command
+that changes something, and flags any it should never be sent.
 """
 
 import os
@@ -16,7 +17,8 @@ import select
 import sys
 import tty
 
-keyed = "--keyed" in sys.argv
+state = {"keyed": "--keyed" in sys.argv, "tp": 9}
+STEPS_MW = [300, 500, 1000, 1200, 1500, 2000, 3000, 4000, 5000, 8000]
 freq = int(sys.argv[sys.argv.index("--freq") + 1]) if "--freq" in sys.argv else 14_074_000
 
 master, slave = os.openpty()
@@ -33,13 +35,13 @@ READS = {
     "RT": lambda: "RT0",
     "AN": lambda: "AN1",
     "TI": lambda: "TI1",
-    "TP": lambda: "TP09",
+    "TP": lambda: f"TP{state['tp']:02}",
     "SM0": lambda: "SM00011",
     "DT": lambda: "DT0",
     "VS": lambda: "VS01.22",
-    "FP": lambda: "FP 006091" if keyed else "FP!000000",
-    "RP": lambda: "RP 000120" if keyed else "RP!000000",
-    "WR": lambda: "WR0 01.32" if keyed else "WR0!00.00",
+    "FP": lambda: f"FP {STEPS_MW[state['tp']]:06}" if state["keyed"] else "FP!000000",
+    "RP": lambda: f"RP {STEPS_MW[state['tp']] // 50:06}" if state["keyed"] else "RP!000000",
+    "WR": lambda: "WR0 01.32" if state["keyed"] else "WR0!00.00",
 }
 
 buf = ""
@@ -50,8 +52,17 @@ while True:
         cmd, buf = buf.split(";", 1)
         cmd = cmd.strip().upper()
         reply = READS.get(cmd)
-        if reply is None:
-            print(f"NOT A READ: {cmd};", file=sys.stderr, flush=True)
+        if cmd.startswith("TP") and len(cmd) == 4:
+            state["tp"] = int(cmd[2:])
+            print(f"menu 34 set to {cmd[2:]}", file=sys.stderr, flush=True)
+        elif cmd == "TX2":
+            state["keyed"] = True
+            print("TUNE keyed", file=sys.stderr, flush=True)
+        elif cmd == "RX":
+            state["keyed"] = False
+            print("unkeyed", file=sys.stderr, flush=True)
+        elif reply is None:
+            print(f"SHOULD NEVER BE SENT: {cmd};", file=sys.stderr, flush=True)
             os.write(master, b"?;")
         else:
             os.write(master, (reply() + ";").encode())

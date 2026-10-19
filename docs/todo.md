@@ -10,8 +10,13 @@ when the panel was part of SDRoxide and still apply.
   LP-100A, the band following the dial, and what `DT` and `VS` answer.
 - **More DUO settings.** Only the reads in the command table SDRoxide used are
   listed. With the full FDM-DUO manual, add any other READ it has.
-- **Other radios.** `crates/rigcat` has one model; each new one needs its own
-  module, with its READ frames on the allow-list (interlock #5).
+- **Other radios.** `crates/rigcat` has one model; each new one (Kenwood,
+  Yaesu, Icom) is a module implementing `Protocol`, with every frame it may
+  send on its own allow-list (interlock #5), and appears in the pop-out.
+- **RIG TUNE on the bench.** Measure what the DUO's `TX2;` carrier puts out at
+  each menu 34 step, against the LP-100A, in OFF first, then in PTT.
+- **Audio drive (optional).** A smooth Drive slider, as SDRoxide had, by
+  playing a tone into the DUO's USB audio with menu 34 as the ceiling.
 - **A fuller simulated amplifier.** `tools/fake_hr500.py` answers with fixed
   readings, idle or keyed. Add a trip and a tune, so every part of the panel
   can be shown without an amplifier.
