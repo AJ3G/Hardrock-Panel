@@ -9,7 +9,8 @@ runs its ATU-500 tuner. The amplifier is still keyed by the radio's PTT line,
 as before; the panel never keys it.
 
 It is the AMP window from SDRoxide, running on its own. It needs no radio
-program.
+program. It can also read an ELAD FDM-DUO's own power, SWR, dial and settings
+over the radio's CAT port (see [The radio](#the-radio)).
 
 > **Tested only with the Hardrock-500.** The Hardrock-50 can be chosen and is
 > marked *untested*: it shares the command set, but its limits are scaled
@@ -33,7 +34,9 @@ program.
 
 **Only one program can have the port open.** Close HobbyPCB's control panel,
 and turn off SDRoxide's own amplifier link, before connecting here. If the port
-is busy the status line says so.
+is busy the status line says it is in use by another program, and the panel
+connects by itself as soon as that program lets it go: there is no need to
+unplug anything.
 
 **SWR warning at** sets where the SWR tile turns red and the meters warn that
 FWD and RFL can't be trusted. It starts at 5.0:1, where SDRoxide warns with its
@@ -44,14 +47,55 @@ runs.
 
 **From a shortcut.** `hardrock-panel.exe --port COM5` opens straight onto the
 amplifier on COM5, ahead of the saved settings. Add `--baud 38400` for another
-baud rate.
+baud rate. `--radio COM3` (and `--radio-baud 57600`) does the same for the
+radio.
+
+## The radio
+
+The panel can read an **ELAD FDM-DUO** over its CAT port, the one SDRoxide or a
+logger would use. It only reads: it never keys the radio or changes a setting.
+
+1. In **Settings**, under **Radio**, tick **Enable**, choose the **Port** the
+   radio's CAT appears as (COM3, for example), and the **Baud**. It must match
+   the radio's menu 70 `CAT BAUD`; the DUO ships at 38400. The port is always
+   8N1.
+2. Press **APPLY**. The line along the top reads *ELAD FDM-DUO connected*.
+
+As with the amplifier, only one program can have the radio's CAT port open:
+close SDRoxide, FDM-SW2 or a logger that uses it first.
+
+**What it gives the panel.** In OFF (bypass), the amplifier reports no FWD,
+RFL or SWR. With the radio connected these are the radio's own: its forward
+and reflected power (`FP`, `RP`) and its SWR (`WR`), shown while it
+transmits. The legends say *from the rig*. Below 0.5 W, in receive, and when
+it folds back into a bad load, the DUO flags its readings as not to be
+trusted; the panel then shows FWD and RFL as flagged rather than borrowing the
+amplifier's DRV, which over-reads into a mismatch. In PTT the amplifier's own
+readings are used, and DRV, input power, efficiency and gain are always the
+amplifier's.
+
+![The RADIO window, reading a simulated FDM-DUO](images/radio.png)
+
+**RADIO** at the top left opens the radio's window: its live forward and
+reflected power, SWR, TX POWER (menu 34) and dial, then every setting the
+radio answers over CAT, with its menu number, its meaning and the radio's
+answer as it came. The settings are read when the port opens, when you press
+**READ AGAIN**, and every 10 seconds between transmissions. Menus that have no
+CAT command, such as 37 `CW IN` and 45 keyer speed, can only be read on the
+radio.
 
 ## Band switching
 
-With no radio program beside it, nothing tells the panel the radio's
-frequency, so it never changes the amplifier's band on its own. Switch bands
-with **DN** and **UP**, or let the radio set the band over the amplifier's own
-CAT or ACC input. The line along the top of the window says so.
+With the radio connected and **Amplifier follows the radio's band** ticked (it
+is, to start), the amplifier's band follows the radio's dial, as in SDRoxide.
+It changes only between transmissions: while there is RF in the amplifier the
+change waits, and goes out once you unkey. Untick it if the amplifier already
+gets its band over its own CAT or ACC cable.
+
+With no radio connected, nothing tells the panel the radio's frequency, so it
+never changes the amplifier's band on its own. Switch bands with **DN** and
+**UP**, or let the radio set the band over the amplifier's own CAT or ACC
+input. The line along the top of the window says which applies.
 
 ## The window
 
@@ -96,8 +140,9 @@ not a fault. **PTT** is greyed while the drive is over the amplifier's drive
 limit (8 W on the HR500): hover over it to see why, and lower the radio's
 power before putting the amplifier in line.
 
-In OFF the amplifier reports no forward or reflected power and no SWR. With no
-radio to ask, **FWD** shows the amplifier's DRV reading, which measures the
+In OFF the amplifier reports no forward or reflected power and no SWR. With
+the radio connected they are the radio's own (see [The radio](#the-radio)).
+With no radio to ask, **FWD** shows the amplifier's DRV reading, which measures the
 radio's power at the amplifier's input; in bypass that power goes straight
 through. The legend says *from DRV*. DRV over-reads into a mismatch, so treat
 it as a guide. RFL and SWR stay empty in bypass. In PTT the amplifier's own
@@ -157,6 +202,9 @@ panel won't switch the antenna, band or tuner:
 - **PTT** can't be switched on (OFF to PTT) while the drive is over the
   amplifier's drive limit, 8 W on the HR500, as with a 100 W radio running
   barefoot through the bypassed amp. Lower the drive first.
+
+- The amplifier's band is not changed to follow the radio until the
+  transmission ends.
 
 Each of these is marked *SAFETY INTERLOCK* in the code and explained in
 [safety-interlocks.md](safety-interlocks.md).

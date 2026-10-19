@@ -1,0 +1,14 @@
+[package]
+name = "rigcat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# A radio's CAT port, read only: the ELAD FDM-DUO's forward and reflected
+# power, SWR, dial and menu settings, for the panel to show beside the
+# amplifier's. Other radios are to be added as further modules.
+[dependencies]
+serialport = { version = "4.10", default-features = false }
+serde.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true

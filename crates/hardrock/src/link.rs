@@ -45,6 +45,8 @@ const TEMP_POLL_TX: Duration = Duration::from_secs(10);
 const TEMP_STALE: Duration = Duration::from_secs(15);
 /// How long after a C/F toggle the scale is read on every poll.
 const SCALE_SETTLE: Duration = Duration::from_secs(3);
+/// How often a band change held back by interlock #3 is tried again.
+const BAND_RETRY: Duration = Duration::from_millis(500);
 /// Missed answers in a row before the link is called lost and reopened.
 const MISSES: u32 = 4;
 /// Longest wait between tries at reopening the port. Trying is cheap and
@@ -216,6 +218,7 @@ impl AmpLink {
     }
 
     /// Tell the amplifier the radio's frequency; it picks its band from it.
+    /// Held until the amplifier shows no RF (interlock #3), then sent.
     pub fn set_frequency(&self, hz: u64) {
         if let Some(tx) = &self.tx {
             let _ = tx.try_send(Msg::Frequency(hz));
@@ -260,6 +263,24 @@ fn open(cfg: &AmpConfig) -> crate::Result<Amp<Box<dyn serialport::SerialPort>>> 
 /// What the operator is told when the port won't open or the amp won't answer.
 fn open_error(path: &str, e: &crate::Error) -> String {
     match e {
+        // serialport reports a port another program holds ("Access is
+        // denied" on Windows) as NoDevice, the same as one that isn't there.
+        // AJ3G, 19 Oct 2026: told "COM5 not found" with the amplifier plugged
+        // in, he unplugged it and reinstalled before it connected. A port that
+        // is still listed is there, so it is busy.
+        crate::Error::Serial(se)
+            if se.kind() == serialport::ErrorKind::NoDevice && port_listed(path) =>
+        {
+            in_use(path)
+        }
+        crate::Error::Serial(se)
+            if matches!(
+                se.kind(),
+                serialport::ErrorKind::Io(std::io::ErrorKind::PermissionDenied)
+            ) =>
+        {
+            in_use(path)
+        }
         crate::Error::Serial(se) if se.kind() == serialport::ErrorKind::NoDevice => {
             format!("{path} not found. Check the amplifier's USB lead.")
         }
@@ -275,6 +296,20 @@ fn open_error(path: &str, e: &crate::Error) -> String {
         }
         _ => format!("{path}: {e}"),
     }
+}
+
+/// Whether the system lists `path` as a serial port.
+fn port_listed(path: &str) -> bool {
+    serialport::available_ports()
+        .map(|v| v.iter().any(|p| p.port_name.eq_ignore_ascii_case(path)))
+        .unwrap_or(false)
+}
+
+fn in_use(path: &str) -> String {
+    format!(
+        "{path} is in use by another program: HobbyPCB's control panel, SDRoxide's amplifier \
+         link, or a second copy of this panel. Close it and this connects by itself."
+    )
 }
 
 fn worker(cfg: AmpConfig, rx: Receiver<Msg>, status: Arc<Mutex<AmpStatus>>) {
@@ -352,6 +387,9 @@ fn run<P: std::io::Read + std::io::Write>(
     // When the operator last switched PTT/OFF, so the amplifier dropping to
     // OFF by itself mid-transmission can be told from a click.
     let mut ptt_set_at: Option<Instant> = None;
+    // The radio's frequency waiting to be sent (#3), and when to try next.
+    let mut want_hz: Option<u64> = None;
+    let mut next_band_try = Instant::now();
     loop {
         match rx.recv_timeout(POLL) {
             Err(RecvTimeoutError::Disconnected) => return false,
@@ -387,10 +425,32 @@ fn run<P: std::io::Read + std::io::Write>(
                     scale_wanted = Some((c, Instant::now() + SCALE_SETTLE));
                 }
             }
-            Ok(Msg::Frequency(hz)) => {
-                let _ = amp.set_frequency(hz);
-            }
+            Ok(Msg::Frequency(hz)) => want_hz = Some(hz),
             Err(RecvTimeoutError::Timeout) => {}
+        }
+
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #3): the radio's
+        // frequency, which sets the amplifier's band, is never sent while
+        // there is RF in the amplifier. A band change switches the low-pass
+        // filter relays; under power that arcs the contacts and can leave the
+        // output devices driving an open or wrong filter. It is held and sent
+        // once the amplifier shows no transmission, no drive and no output.
+        // As in #1, no answer to the status read counts as "not safe".
+        if let Some(hz) = want_hz
+            && Instant::now() >= next_band_try
+        {
+            next_band_try = Instant::now() + BAND_RETRY;
+            match amp.status() {
+                Ok(s)
+                    if !(s.lights().is_some_and(|l| l.tx)
+                        || s.forward_w >= 1.0
+                        || s.drive_w >= 0.1) =>
+                {
+                    let _ = amp.set_frequency(hz);
+                    want_hz = None;
+                }
+                _ => debug!("hardrock: band change held: transmitting or no answer"),
+            }
         }
 
         let settling = scale_wanted.filter(|&(_, until)| Instant::now() < until);

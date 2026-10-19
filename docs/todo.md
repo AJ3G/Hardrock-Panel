@@ -5,9 +5,13 @@ when the panel was part of SDRoxide and still apply.
 
 - **An installer.** Releases are a zipped `.exe` for now. An `.msi` with a
   Start-menu shortcut would suit most users better.
-- **Radio link, optional.** A CAT connection to the radio so the band follows
-  it, as it does in SDRoxide. Whatever sets the band must keep safety
-  interlock #3: never during a transmission.
+- **The FDM-DUO on the bench.** The radio link is tested against
+  `tools/fake_duo.py` only. Check FWD, RFL and SWR in bypass against the
+  LP-100A, the band following the dial, and what `DT` and `VS` answer.
+- **More DUO settings.** Only the reads in the command table SDRoxide used are
+  listed. With the full FDM-DUO manual, add any other READ it has.
+- **Other radios.** `crates/rigcat` has one model; each new one needs its own
+  module, with its READ frames on the allow-list (interlock #5).
 - **A fuller simulated amplifier.** `tools/fake_hr500.py` answers with fixed
   readings, idle or keyed. Add a trip and a tune, so every part of the panel
   can be shown without an amplifier.

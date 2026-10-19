@@ -1,9 +1,10 @@
-//! The settings window: which amplifier, on which port, and where the SWR
-//! warning starts. The live panel is the main window; this only sets the link
+//! The settings window: which amplifier and which radio, on which ports, and
+//! where the SWR warning starts. The live panel is the main window; this only sets the link
 //! up.
 
 use eframe::egui::{self, ComboBox, RichText};
 use hardrock::{AMP_BAUD_RATES, AmpConfig, AmpModel, AmpStatus};
+use rigcat::{RigConfig, RigModel, RigStatus};
 
 use crate::chrome::StyledCombo;
 use crate::{chrome, theme};
@@ -14,7 +15,6 @@ pub(crate) fn settings_amp_tab(
     swr_warn: &mut f32,
     status: &AmpStatus,
     serial_ports: &[String],
-    apply: &mut bool,
 ) {
     ui.label(RichText::new("Amplifier").size(14.0).strong().color(theme::CYAN()));
     ui.add_space(4.0);
@@ -113,19 +113,106 @@ pub(crate) fn settings_amp_tab(
         ui.label("Status");
         ui.label(RichText::new(text).color(col));
     });
-    ui.add_space(6.0);
-    if chrome::chip_accent(
+}
+
+/// The APPLY button under both sections: saves both and reopens both ports.
+pub(crate) fn apply_button(ui: &mut egui::Ui) -> bool {
+    chrome::chip_accent(
         ui,
         false,
         RichText::new(" APPLY ").strong(),
         theme::GREEN(),
         theme::INK_ON_CYAN(),
     )
-    .on_hover_text("Save and (re)open the amplifier's port")
+    .on_hover_text("Save, and (re)open the amplifier's and the radio's ports")
     .clicked()
-    {
-        *apply = true;
-    }
+}
+
+pub(crate) fn settings_radio_tab(
+    ui: &mut egui::Ui,
+    cfg: &mut RigConfig,
+    amp_port: &str,
+    status: Option<&RigStatus>,
+    serial_ports: &[String],
+) {
+    ui.label(RichText::new("Radio").size(14.0).strong().color(theme::CYAN()));
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(
+            "The radio's CAT port, read only. The panel reads the radio's own forward and \
+             reflected power and SWR, which fill FWD, RFL and SWR while the amplifier is in OFF \
+             (bypass), its dial, which can set the amplifier's band, and its menu settings, under \
+             RADIO. It never keys the radio or changes a setting. Only one program can have the \
+             port open, so close SDRoxide, FDM-SW2 or a logger using it first.",
+        )
+        .weak(),
+    );
+    ui.add_space(8.0);
+    chrome::checkbox(ui, &mut cfg.enabled, "Enable");
+    ui.add_space(4.0);
+    egui::Grid::new("rig-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+        ui.label("Model");
+        enum_combo(ui, "rig-model", &mut cfg.model, &RigModel::ALL, RigModel::label);
+        ui.end_row();
+
+        ui.label("Port");
+        let shown =
+            if cfg.path.is_empty() { "— choose —".to_string() } else { cfg.path.clone() };
+        ComboBox::from_id_salt("rig-port").width(200.0).selected_text(shown).show_styled(
+            ui,
+            |ui| {
+                for p in serial_ports {
+                    if ui.selectable_label(&cfg.path == p, p).clicked() {
+                        cfg.path = p.clone();
+                    }
+                }
+            },
+        );
+        ui.end_row();
+        if !cfg.path.is_empty() && cfg.path.eq_ignore_ascii_case(amp_port) {
+            ui.label("");
+            ui.label(
+                RichText::new("This is the amplifier's port. Choose the radio's own CAT port.")
+                    .color(theme::ALERT()),
+            );
+            ui.end_row();
+        }
+
+        ui.label("Baud");
+        ComboBox::from_id_salt("rig-baud")
+            .width(200.0)
+            .selected_text(format!("{} 8N1", cfg.baud))
+            .show_styled(ui, |ui| {
+                for &b in cfg.model.bauds() {
+                    if ui.selectable_label(cfg.baud == b, format!("{b} 8N1")).clicked() {
+                        cfg.baud = b;
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Must match menu 70 CAT BAUD on the radio. The FDM-DUO ships at 38400.");
+        ui.end_row();
+    });
+    ui.add_space(4.0);
+    chrome::checkbox(ui, &mut cfg.follow_band, "Amplifier follows the radio's band").on_hover_text(
+        "Sends the radio's frequency to the amplifier when it moves to another band, \
+             as SDRoxide does. Held until the amplifier shows no RF, so a band relay never \
+             switches mid-transmission. Leave it off if the amplifier already gets the band \
+             over its own CAT or ACC cable.",
+    );
+    ui.add_space(8.0);
+    let (text, col) = match status {
+        None => ("Off".to_string(), theme::TEXT()),
+        Some(s) if s.connected => (format!("Connected to the {}", s.model.label()), theme::GREEN()),
+        Some(s) => match &s.error {
+            Some(e) => (e.clone(), theme::ALERT()),
+            None => ("Connecting…".to_string(), theme::YELLOW()),
+        },
+    };
+    ui.horizontal(|ui| {
+        ui.label("Status");
+        ui.label(RichText::new(text).color(col));
+    });
 }
 
 fn enum_combo<T: PartialEq + Copy>(

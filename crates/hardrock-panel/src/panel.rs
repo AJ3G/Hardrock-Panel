@@ -70,7 +70,7 @@ pub(crate) struct RigFill {
     /// FWD: `Some("rig")` measured by the radio, `Some("flagged")` a radio
     /// that measures watts but has flagged this reading, `Some("DRV")` the
     /// amplifier's drive reading.
-    fwd: Option<&'static str>,
+    pub(crate) fwd: Option<&'static str>,
     /// RFL: `Some("rig")` measured by the radio, `Some("flagged")` as for
     /// FWD, `Some("SWR")` worked out from FWD and the radio's SWR.
     rfl: Option<&'static str>,
