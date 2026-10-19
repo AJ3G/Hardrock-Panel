@@ -55,26 +55,44 @@ pub fn is_read(frame: &str) -> bool {
     TELEMETRY.contains(&frame) || DIAL.contains(&frame) || SETTINGS.iter().any(|i| i.cmd == frame)
 }
 
-/// The radio's own TUNE carrier: `TX2;`. `TX;`, `TX0;` and `TX1;` are an
-/// ordinary transmission, of whatever audio is on the radio's input, and are
-/// never sent.
+/// The radio's own TUNE carrier: `TX2;`.
 pub const TUNE: &str = "TX2;";
+/// An ordinary transmission, of whatever audio is on the radio's transmit
+/// input (menu 32). `TX0;` and `TX1;` are the same and are never sent.
+pub const KEY_AUDIO: &str = "TX;";
 pub const UNKEY: &str = "RX;";
+/// Menu 32 `TX IN` to the USB audio input.
+pub const USB_AUDIO: &str = "TI1;";
 
 /// Whether `frame` may be sent at all.
 ///
 /// SAFETY INTERLOCK (docs/safety-interlocks.md, #5): the link sends only the
 /// READ frames above, menu 34's power steps (`TP00;` to `TP09;`), the TUNE
-/// carrier (`TX2;`) and unkey (`RX;`). Anything else is refused, even from
-/// this code: `TX;` keys an ordinary transmission with no parameter at all,
-/// so "a bare command is a read" is not safe, and `RC;` clears the RIT
-/// offset the same way. When the TUNE carrier may be sent is interlock #6.
+/// carrier (`TX2;`), the ordinary transmission (`TX;`), menu 32 to USB audio
+/// (`TI1;`) and unkey (`RX;`). Anything else is refused, even from this code:
+/// `RC;` clears the RIT offset with no parameter at all, so "a bare command
+/// is a read" is not safe. When the carrier may be keyed is interlock #6;
+/// `TX;` also needs interlock #7, in the link.
 pub fn allowed(frame: &str) -> bool {
     is_read(frame)
         || frame == TUNE
+        || frame == KEY_AUDIO
         || frame == UNKEY
+        || frame == USB_AUDIO
         || (0..=TX_POWER_MAX).any(|c| frame == format!("TP{c:02};"))
 }
+
+/// The share of full transmit audio, as a power fraction, that Drive 100%
+/// sends the FDM-DUO, as in SDRoxide (`DUO_AUDIO_POWER_CEILING` there).
+///
+/// AJ3G measured it on 20 m on 18 Oct 2026 with an LP-100A, menu 34 at MAX:
+/// 0.94 W at 1% of full audio, 2.08 W at 5%, 3.72 W at 10%, 5.39 W at 15%,
+/// 6.85 W at 20%, then 8.0 to 8.3 W from 24% up. A straight line to about
+/// 8 W at 24%, and nothing above it, so Drive is scaled into that 24%: 100%
+/// is about the full output of the menu 34 setting, 50% about half. With menu
+/// 34 at 5 W the line was about 0.7 times as steep and capped near 6 W, with
+/// the knee in the same place.
+pub const AUDIO_CEILING: f32 = 0.24;
 
 /// Menu 34's MAX code.
 pub const TX_POWER_MAX: u8 = 9;
@@ -335,6 +353,7 @@ impl Protocol for FdmDuo {
             "FA" => s.freq_hz = parse_freq(b).or(s.freq_hz),
             "MD" => s.mode = b.chars().next().and_then(mode_name),
             "TP" => s.power_code = b.trim().parse().ok().filter(|c| *c <= TX_POWER_MAX),
+            "TI" => s.tx_input = describe("TI", b),
             _ => {}
         }
     }
@@ -370,6 +389,43 @@ impl Protocol for FdmDuo {
     fn unkey(&self) -> Frame {
         Frame::new(UNKEY, FrameKind::Unkey)
     }
+
+    fn key_audio(&self) -> Option<Frame> {
+        Some(Frame::new(KEY_AUDIO, FrameKind::KeyAudio))
+    }
+
+    fn audio_reads(&self) -> Vec<Frame> {
+        vec![Frame::read("TI;"), Frame::read("MD;")]
+    }
+
+    /// Menu 32 on USB audio, so the microphone is not what goes out, and the
+    /// mode USB or LSB, where a tone is a single clean carrier. In CW, FM or
+    /// AM, `TX;` would send something else.
+    fn audio_ready(&self, s: &RigStatus) -> Result<(), String> {
+        match s.tx_input.as_deref() {
+            Some("USB audio") => {}
+            Some(other) => {
+                return Err(format!(
+                    "The radio's TX IN (menu 32) is on {other}: TUNE would send that. Set it to \
+                     USB audio (the USB AUDIO button does)."
+                ));
+            }
+            None => return Err("The radio's TX IN (menu 32) hasn't been read.".into()),
+        }
+        match s.mode {
+            Some("USB" | "LSB") => Ok(()),
+            Some(m) => Err(format!("The radio is in {m}. TUNE with drive needs USB or LSB.")),
+            None => Err("The radio's mode hasn't been read.".into()),
+        }
+    }
+
+    fn audio_input(&self) -> Option<Frame> {
+        Some(Frame::new(USB_AUDIO, FrameKind::SetInput))
+    }
+
+    fn audio_ceiling(&self) -> f32 {
+        AUDIO_CEILING
+    }
 }
 
 #[cfg(test)]
@@ -378,12 +434,13 @@ mod tests {
     use crate::{Swr, Watts};
 
     #[test]
-    fn only_reads_menu_34_tune_and_unkey_can_be_sent() {
-        // An ordinary transmission, a cleared RIT, or any other setting: never.
-        for f in ["TX;", "TX0;", "TX1;", "RC;", "AN1;", "TI1;", "FA00014074000;", "TP10;", "TP9;"] {
+    fn only_reads_menu_34_menu_32_to_usb_and_keying_can_be_sent() {
+        // The microphone as input, a cleared RIT, or any other setting: never.
+        for f in ["TX0;", "TX1;", "RC;", "AN1;", "TI0;", "TI2;", "FA00014074000;", "TP10;", "TP9;"]
+        {
             assert!(!allowed(f), "{f} must be refused");
         }
-        for f in ["TX2;", "RX;", "TP00;", "TP08;", "TP09;"] {
+        for f in ["TX2;", "TX;", "TI1;", "RX;", "TP00;", "TP08;", "TP09;"] {
             assert!(allowed(f), "{f}");
             assert!(!is_read(f));
         }
@@ -393,6 +450,8 @@ mod tests {
         assert_eq!(d.set_power(9).bytes, b"TP09;");
         assert_eq!(d.set_power(42).bytes, b"TP09;");
         assert!(d.reply_key(&d.key_tune()).is_none());
+        assert_eq!(d.key_audio(), Some(Frame::new("TX;", FrameKind::KeyAudio)));
+        assert!(d.reply_key(&d.key_audio().unwrap()).is_none());
         for f in TELEMETRY.iter().chain(DIAL.iter()).chain(SETTINGS.iter().map(|i| &i.cmd)) {
             assert!(is_read(f));
             // A READ ends at its command letters (SM carries its fixed 0).
@@ -449,5 +508,24 @@ mod tests {
         assert_eq!(describe("SP", "0").unwrap(), "Off");
         assert!(describe("TP", "12").is_none());
         assert!(describe("ZZ", "1").is_none());
+    }
+
+    #[test]
+    fn tune_with_drive_needs_usb_audio_and_a_sideband() {
+        let d = FdmDuo::default();
+        let mut s = RigStatus::default();
+        let r = |k: &str, b: &str| Reply { key: k.into(), body: b.into() };
+        assert!(d.audio_ready(&s).is_err());
+        d.apply(&mut s, &r("TI", "0"));
+        d.apply(&mut s, &r("MD", "2"));
+        assert!(d.audio_ready(&s).unwrap_err().contains("Microphone"));
+        d.apply(&mut s, &r("TI", "2"));
+        assert!(d.audio_ready(&s).is_err(), "Auto may still take the microphone");
+        d.apply(&mut s, &r("TI", "1"));
+        assert_eq!(d.audio_ready(&s), Ok(()));
+        d.apply(&mut s, &r("MD", "3"));
+        assert!(d.audio_ready(&s).unwrap_err().contains("CW"));
+        d.apply(&mut s, &r("MD", "1"));
+        assert_eq!(d.audio_ready(&s), Ok(()));
     }
 }

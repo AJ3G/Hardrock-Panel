@@ -10,7 +10,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use tracing::{debug, info, warn};
 
 use crate::protocol::{Frame, FrameKind, Incoming, Protocol, Reply};
-use crate::{RigConfig, RigStatus, SettingRow, Tuning};
+use crate::{Keying, RigConfig, RigStatus, SettingRow, Tuning};
 
 /// How often power and SWR are read. Three short frames at 38400 baud take a
 /// few milliseconds each way.
@@ -37,8 +37,10 @@ enum Msg {
     ReadSettings,
     /// Set the radio's transmit power step (menu 34 on the FDM-DUO).
     SetPower(u8),
-    /// Key the TUNE carrier for at most this long.
-    TuneStart(Duration),
+    /// Key TUNE, this way, for at most this long.
+    TuneStart(Duration, Keying),
+    /// Put the radio's transmit audio on its USB input.
+    UsbAudio,
     /// The panel still wants the carrier.
     TuneAlive,
     /// Unkey, and why.
@@ -63,6 +65,7 @@ impl RigLink {
             baud: cfg.baud,
             power_steps: proto.power_steps(),
             power_name: proto.power_name(),
+            audio_ceiling: proto.audio_ceiling(),
             ..RigStatus::default()
         }));
         let st = status.clone();
@@ -93,12 +96,20 @@ impl RigLink {
         self.send(Msg::SetPower(code));
     }
 
-    /// Key the radio's TUNE carrier for at most `max` (and never more than
-    /// [`TUNE_MAX`]). The caller must call [`RigLink::tune_alive`] at least
-    /// once a second while it wants the carrier, and checks interlock #6
-    /// before calling this.
-    pub fn tune_start(&self, max: Duration) {
-        self.send(Msg::TuneStart(max.min(TUNE_MAX)));
+    /// Key TUNE for at most `max` (and never more than [`TUNE_MAX`]). The
+    /// caller must call [`RigLink::tune_alive`] at least once a second while
+    /// it wants it, and checks interlock #6 before calling this. With
+    /// [`Keying::Audio`] the caller's tone must already be playing; the link
+    /// reads the radio's input and mode first and keys only if they pass
+    /// (interlock #7).
+    pub fn tune_start(&self, max: Duration, keying: Keying) {
+        self.send(Msg::TuneStart(max.min(TUNE_MAX), keying));
+    }
+
+    /// Set the radio's transmit audio to its USB input (menu 32 on the
+    /// FDM-DUO).
+    pub fn use_usb_audio(&self) {
+        self.send(Msg::UsbAudio);
     }
 
     pub fn tune_alive(&self) {
@@ -156,11 +167,14 @@ struct Rig<P: Read + Write> {
     /// Answers that came while waiting for a different one, for the caller
     /// to fold in.
     strays: Vec<Reply>,
+    /// The next ordinary transmission may be sent: interlock #7's reads have
+    /// just passed. Cleared by sending it.
+    armed: bool,
 }
 
 impl<P: Read + Write> Rig<P> {
     fn new(port: P, proto: Box<dyn Protocol>) -> Self {
-        Rig { port, proto, pending: Default::default(), strays: Vec::new() }
+        Rig { port, proto, pending: Default::default(), strays: Vec::new(), armed: false }
     }
 
     fn write(&mut self, frame: &Frame) -> Result<(), Error> {
@@ -169,6 +183,14 @@ impl<P: Read + Write> Rig<P> {
         // `elad::allowed` for why.
         if !self.proto.allowed(frame) {
             warn!("rigcat: refused to send {:?}", String::from_utf8_lossy(&frame.bytes));
+            return Err(Error::NotAllowed);
+        }
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #7): an ordinary
+        // transmission sends whatever audio is on the radio's input, so it
+        // goes only straight after the reads that show that input is the
+        // computer's and the mode a sideband (see `key_audio`).
+        if frame.kind == FrameKind::KeyAudio && !std::mem::take(&mut self.armed) {
+            warn!("rigcat: refused an ordinary transmission without its checks");
             return Err(Error::NotAllowed);
         }
         self.port.write_all(&frame.bytes)?;
@@ -325,6 +347,7 @@ fn worker(
                         baud: s.baud,
                         power_steps: s.power_steps,
                         power_name: s.power_name,
+                        audio_ceiling: s.audio_ceiling,
                         tune_note: s.tune_note.take(),
                         settings: std::mem::take(&mut s.settings),
                         settings_read: s.settings_read,
@@ -359,6 +382,35 @@ fn worker(
 struct TuneState {
     tuning: Tuning,
     alive: Instant,
+}
+
+/// The ordinary transmission, once the radio has been read and shows it
+/// would send the computer's audio (interlock #7); the reason if not.
+fn key_audio<P: Read + Write>(
+    rig: &mut Rig<P>,
+    status: &Mutex<RigStatus>,
+) -> Result<Frame, String> {
+    let Some(f) = rig.proto.key_audio() else {
+        return Err("This radio can't be keyed with the panel's audio.".into());
+    };
+    // Read now, not from the last settings read: the operator may have
+    // changed menu 32 or the mode on the radio since.
+    for r in rig.proto.audio_reads() {
+        let got = rig.query(&r);
+        let strays = std::mem::take(&mut rig.strays);
+        set(status, |s| {
+            for x in strays.iter().chain(got.as_ref().ok()) {
+                rig.proto.apply(s, x);
+            }
+        });
+        if got.is_err() {
+            return Err("The radio didn't answer the check of its TX input and mode.".into());
+        }
+    }
+    let s = status.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    rig.proto.audio_ready(&s)?;
+    rig.armed = true;
+    Ok(f)
 }
 
 /// Unkey, best effort: twice, in case the first is lost.
@@ -412,15 +464,30 @@ fn run<P: Read + Write>(
                 next_settings = Instant::now();
                 asked = true;
             }
-            Ok(Msg::TuneStart(max)) => {
-                if tune.is_none() {
+            Ok(Msg::UsbAudio) => {
+                if let Some(f) = rig.proto.audio_input() {
+                    if let Err(e) = rig.send(&f) {
+                        warn!("rigcat: TX input: {e:?}");
+                    }
+                    next_settings = Instant::now();
+                    asked = true;
+                }
+            }
+            Ok(Msg::TuneStart(max, keying)) if tune.is_none() => {
+                let key = match keying {
+                    Keying::Carrier => Ok(rig.proto.key_tune()),
+                    Keying::Audio => key_audio(&mut rig, status),
+                };
+                if let Err(why) = &key {
+                    info!("rigcat: TUNE not keyed: {why}");
+                    set(status, |s| s.tune_note = Some(why.clone()));
+                }
+                if let Ok(f) = key {
                     let now = Instant::now();
-                    let f = rig.proto.key_tune();
-                    debug_assert_eq!(f.kind, FrameKind::Key);
                     match rig.send(&f) {
                         Ok(()) => {
-                            let tuning = Tuning { since: now, until: now + max };
-                            info!("rigcat: TUNE keyed for at most {max:?}");
+                            let tuning = Tuning { since: now, until: now + max, keying };
+                            info!("rigcat: TUNE ({keying:?}) keyed for at most {max:?}");
                             tune = Some(TuneState { tuning, alive: now });
                             set(status, |s| {
                                 s.tuning = Some(tuning);
@@ -431,6 +498,8 @@ fn run<P: Read + Write>(
                     }
                 }
             }
+            // One at a time.
+            Ok(Msg::TuneStart(..)) => {}
             Ok(Msg::TuneAlive) => {
                 if let Some(t) = &mut tune {
                     t.alive = Instant::now();
@@ -561,6 +630,8 @@ mod tests {
         sent: Vec<String>,
         out: VecDeque<u8>,
         pending: String,
+        /// Menu 32 is on the microphone.
+        mic: bool,
     }
 
     impl Write for FakeDuo {
@@ -575,7 +646,9 @@ mod tests {
                     "WR;" => Some("WR0 01.02;"),
                     "TP;" => Some("TP09;"),
                     "MD;" => Some("MD2;"),
-                    c if c.starts_with("TP") || c == "TX2;" || c == "RX;" => None,
+                    "TI;" if self.mic => Some("TI0;"),
+                    "TI;" => Some("TI1;"),
+                    c if c.starts_with("TP") || ["TX2;", "TX;", "TI1;", "RX;"].contains(&c) => None,
                     _ => Some("?;"),
                 };
                 if let Some(r) = reply {
@@ -615,21 +688,28 @@ mod tests {
     #[test]
     fn a_frame_not_on_the_list_never_reaches_the_radio() {
         let mut r = rig();
-        for f in ["TX;", "TX0;", "TX1;", "RC;", "AN2;"] {
+        for f in ["TX0;", "TX1;", "RC;", "AN2;", "TI0;"] {
             assert!(matches!(r.send(&Frame::new(f, FrameKind::Key)), Err(Error::NotAllowed)));
         }
+        // An ordinary transmission is on the list, but not without its checks.
+        let tx = Frame::new("TX;", FrameKind::KeyAudio);
+        assert!(matches!(r.send(&tx), Err(Error::NotAllowed)));
         assert!(r.port.sent.is_empty());
     }
 
     /// `run` on a pretend DUO, on its own thread. The handle gives back
     /// every frame the radio was sent, once the channel is closed.
     fn running() -> (Sender<Msg>, Arc<Mutex<RigStatus>>, JoinHandle<Vec<String>>) {
+        running_on(FakeDuo::default())
+    }
+
+    fn running_on(duo: FakeDuo) -> (Sender<Msg>, Arc<Mutex<RigStatus>>, JoinHandle<Vec<String>>) {
         let (tx, rx) = bounded(16);
         let st = Arc::new(Mutex::new(RigStatus::default()));
         let s2 = st.clone();
         let h = thread::spawn(move || {
             let sent = Arc::new(Mutex::new(Vec::new()));
-            let port = Tapped { inner: FakeDuo::default(), sent: sent.clone() };
+            let port = Tapped { inner: duo, sent: sent.clone() };
             let _ = run(Rig::new(port, Box::new(FdmDuo::default())), &rx, &s2);
             sent.lock().unwrap().clone()
         });
@@ -686,7 +766,7 @@ mod tests {
     fn tune_keys_the_carrier_and_unkeys_when_the_panel_stops_asking() {
         let (tx, st, h) = running();
         tx.send(Msg::SetPower(2)).unwrap();
-        tx.send(Msg::TuneStart(Duration::from_secs(30))).unwrap();
+        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Carrier)).unwrap();
         thread::sleep(Duration::from_millis(300));
         assert!(st.lock().unwrap().tuning.is_some());
         // No TuneAlive: after a second the link unkeys by itself.
@@ -706,17 +786,54 @@ mod tests {
     #[test]
     fn tune_stops_at_its_time_limit_and_when_the_link_is_dropped() {
         let (tx, st, h) = running();
-        tx.send(Msg::TuneStart(Duration::from_millis(400))).unwrap();
+        tx.send(Msg::TuneStart(Duration::from_millis(400), Keying::Carrier)).unwrap();
         for _ in 0..8 {
             tx.send(Msg::TuneAlive).unwrap();
             thread::sleep(Duration::from_millis(100));
         }
         assert_eq!(st.lock().unwrap().tune_note.as_deref(), Some("time limit reached"));
-        tx.send(Msg::TuneStart(Duration::from_secs(30))).unwrap();
+        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Carrier)).unwrap();
         thread::sleep(Duration::from_millis(200));
         drop(tx);
         let sent = h.join().unwrap();
         assert_eq!(sent.iter().filter(|c| *c == "TX2;").count(), 2);
         assert_eq!(sent.last().map(String::as_str), Some("RX;"));
+    }
+
+    #[test]
+    fn tune_with_drive_reads_the_input_and_mode_then_keys_an_ordinary_transmission() {
+        let (tx, st, h) = running();
+        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Audio)).unwrap();
+        for _ in 0..3 {
+            tx.send(Msg::TuneAlive).unwrap();
+            thread::sleep(Duration::from_millis(100));
+        }
+        let s = st.lock().unwrap().clone();
+        assert_eq!(s.tuning.map(|t| t.keying), Some(Keying::Audio));
+        tx.send(Msg::TuneStop(None)).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        drop(tx);
+        let sent = h.join().unwrap();
+        let key = sent.iter().position(|c| c == "TX;").unwrap();
+        // The checks come straight before it.
+        assert_eq!(&sent[key - 2..key], ["TI;", "MD;"]);
+        assert!(sent[key..].contains(&"RX;".to_string()));
+        assert!(!sent.iter().any(|c| c == "TX2;"));
+    }
+
+    #[test]
+    fn tune_with_drive_is_refused_while_the_radio_takes_the_microphone() {
+        let (tx, st, h) = running_on(FakeDuo { mic: true, ..FakeDuo::default() });
+        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Audio)).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        let s = st.lock().unwrap().clone();
+        assert!(s.tuning.is_none());
+        assert!(s.tune_note.as_deref().is_some_and(|n| n.contains("menu 32")), "{s:?}");
+        tx.send(Msg::UsbAudio).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        drop(tx);
+        let sent = h.join().unwrap();
+        assert!(!sent.iter().any(|c| c == "TX;"));
+        assert!(sent.contains(&"TI1;".to_string()));
     }
 }

@@ -469,6 +469,9 @@ pub struct AmpStatus {
     pub alerts: AmpAlerts,
     /// `None` when no tuner is fitted.
     pub atu: Option<AtuReadout>,
+    /// The amplifier's own TX light: keyed by its PTT input. `None` on
+    /// firmware that sends no lights.
+    pub transmitting: Option<bool>,
 }
 
 /// The band names `HRBN` codes stand for, 1 = 10 m … 10 = 160 m.

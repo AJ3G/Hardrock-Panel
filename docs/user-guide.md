@@ -55,8 +55,8 @@ radio.
 
 The panel can read an **ELAD FDM-DUO** over its CAT port, the one SDRoxide or a
 logger would use. Besides reading, it changes only the radio's power setting
-(menu 34) when you move its slider, and keys only the radio's own TUNE carrier
-when you press RIG TUNE.
+(menu 34) when you press a power button and its TX IN (menu 32) when you press
+USB AUDIO, and keys the radio only when you press TX TUNE or RIG TUNE.
 
 1. In **Settings**, under **Radio**, tick **Enable**, choose the **Port** the
    radio's CAT appears as (COM3, for example), and the **Baud**. It must match
@@ -79,26 +79,47 @@ amplifier's.
 
 ![The radio window, popped out, reading a simulated FDM-DUO](images/radio.png)
 
-**RIG TUNE.** With the radio connected, a strip under the top line has
-**RIG TUNE**, the radio's **TX POWER (menu 34)** slider, and how long TUNE may
-run (10 s to start, up to 60 s). Set the power, then press RIG TUNE: the radio
-keys its own TUNE carrier at that power, and the meters show what the
-amplifier does with it. Press it again to unkey. The slider writes menu 34 to
-the radio when you let go, and it stays set, as on the radio's menu.
+**TUNE.** With the radio connected, a strip under the top line has two ways to
+key the radio, its power buttons, the **Tune** slider, and how long TUNE may
+run (10 s to start, up to 60 s).
 
-RIG TUNE is greyed, with the reason on hover, unless the amplifier is
-connected and not tripped and, in PTT, on the radio's band, with the power
-within its 8 W drive limit (so MAX, about 8.3 W, only in OFF). It unkeys by
-itself at the time limit, on a trip, if the drive goes over the limit, if
-either SWR reaches the SWR warning in Settings, if the radio drops to receive
-on a high SWR, and if the panel closes or stops responding. The reason is
-shown after it stops. These are safety interlocks #5 and #6.
+- **1W, 3W, 5W, MAX** set the radio's menu 34 `TX POWER`, as SDRoxide's
+  buttons did. It stays set after the panel closes, as on the radio's menu, and
+  is the ceiling for every program that transmits. Use MAX with the HR500 in
+  line, and bring the power down with the slider.
+- **Tune** sets TX TUNE's power within the button's setting: 50% of 5W is about
+  2.5 W. The panel shows what it should come to; the meters show what it is.
+  It can be moved while keyed.
+- **TX TUNE** plays a 1 kHz tone into the radio's USB audio and keys the radio
+  as its PTT does, which also keys the amplifier through the PTT line, as
+  SDRoxide's TUNE did. It needs the radio's TX IN (menu 32) on USB audio (a
+  yellow line with **USB AUDIO** appears if it isn't) and the radio in USB or
+  LSB. The tone plays on **TUNE sound** under Settings, Radio: the radio's own
+  USB audio unless you choose another.
+- **RIG TUNE** keys the radio's own TUNE carrier at the full button setting,
+  with no tone. The FDM-DUO may not key its PTT output for it, so the HR500 may
+  stay in receive; use TX TUNE to watch the amplifier.
+
+Press either again to unkey. They are greyed, with the reason on hover, unless
+the amplifier is connected and not tripped and, in PTT, on the radio's band,
+with the power within its 8 W drive limit (so RIG TUNE at MAX, about 8.3 W,
+only in OFF, and TX TUNE at MAX up to 96%). They unkey by themselves at the
+time limit, on a trip, if the drive goes over the limit, if either SWR reaches
+the SWR warning in Settings, if the radio drops to receive on a high SWR, and
+if the panel closes or stops responding. The reason is shown after it stops.
+These are safety interlocks #5, #6 and #7.
+
+**When the amplifier doesn't key.** If the radio transmits for more than a
+moment with the amplifier in PTT and the amplifier's own TX light stays off,
+the top line says so in yellow. The HR500 keys only from its PTT input (the RCA
+jack, or pin 4 of ACC); check the cable from the radio and the radio's PTT
+output setting.
 
 Not to be confused with the tuner's **TUNE**, which starts the ATU-500's
-tuning cycle and needs a carrier: RIG TUNE can provide one.
+tuning cycle and needs a carrier: TX TUNE or RIG TUNE can provide one.
 
 **RADIO** at the top left opens the radio's window: its dial, large, its live forward and
-reflected power, SWR and TX POWER (menu 34), RIG TUNE with its slider, then
+reflected power, SWR, TX POWER (menu 34) and TX IN (menu 32), the TUNE strip, then
 every setting the radio answers over CAT, with its menu number, its meaning and the radio's
 answer as it came. **POP OUT** moves it into a window of its own, and
 **DOCK** brings it back. The settings are read when the port opens, when you press

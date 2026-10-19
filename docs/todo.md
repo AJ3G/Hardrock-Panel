@@ -13,10 +13,12 @@ when the panel was part of SDRoxide and still apply.
 - **Other radios.** `crates/rigcat` has one model; each new one (Kenwood,
   Yaesu, Icom) is a module implementing `Protocol`, with every frame it may
   send on its own allow-list (interlock #5), and appears in the pop-out.
+- **TX TUNE on the bench.** Check the HR500 keys with it (decision 17), and
+  that the Tune slider's watts match the LP-100A at each power button, in OFF
+  first, then in PTT. The panel's tone has not been measured against
+  SDRoxide's.
 - **RIG TUNE on the bench.** Measure what the DUO's `TX2;` carrier puts out at
-  each menu 34 step, against the LP-100A, in OFF first, then in PTT.
-- **Audio drive (optional).** A smooth Drive slider, as SDRoxide had, by
-  playing a tone into the DUO's USB audio with menu 34 as the ceiling.
+  each menu 34 step, and whether the DUO keys its PTT output for it.
 - **A fuller simulated amplifier.** `tools/fake_hr500.py` answers with fixed
   readings, idle or keyed. Add a trip and a tune, so every part of the panel
   can be shown without an amplifier.

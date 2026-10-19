@@ -20,11 +20,13 @@ from the radio, it reads from the radio's CAT port itself. It does the following
 - Reads an ELAD FDM-DUO over its CAT port (COM3, 38400 8N1 by default):
   its own forward and reflected power and SWR fill the amplifier's readings
   in bypass, its dial can set the amplifier's band between transmissions, and
-  its menu settings are shown in a RADIO window that can pop out. RIG TUNE
-  keys the radio's own carrier at its menu 34 power, beside a slider for it,
-  to watch the amplifier, under safety interlocks that unkey it on a trip,
-  high SWR, overdrive or a time limit. Nothing else is ever sent to the radio
-  but reads.
+  its menu settings are shown in a RADIO window that can pop out. SDRoxide's
+  1W / 3W / 5W / MAX buttons set its menu 34, and TX TUNE keys it as its PTT
+  does (keying the amplifier too) with a tone into its USB audio at the Tune
+  slider's level; RIG TUNE keys its own carrier. Both run under safety
+  interlocks that unkey on a trip, high SWR, overdrive or a time limit, and
+  TX TUNE only with the radio's input on USB audio. Nothing else is ever sent
+  to the radio but reads.
 - Refuses to switch a relay while there may be RF in the amplifier. See
   [safety interlocks](docs/safety-interlocks.md).
 
@@ -92,8 +94,8 @@ command line.
 | Path | What it holds |
 |---|---|
 | `crates/hardrock` | The amplifier's serial protocol and the background link that polls it and holds the interlocks |
-| `crates/rigcat` | The radio's CAT port: a `Protocol` per radio (the FDM-DUO so far), the link, menu 34 and RIG TUNE |
-| `crates/hardrock-panel` | The window: panel, meters, settings and SDRoxide's look |
+| `crates/rigcat` | The radio's CAT port: a `Protocol` per radio (the FDM-DUO so far), the link, menu 34, menu 32 and TUNE |
+| `crates/hardrock-panel` | The window: panel, meters, settings, TUNE and its tone, and SDRoxide's look |
 | `docs/` | User guide, [safety interlocks](docs/safety-interlocks.md), [design decisions](docs/design-decisions.md), [ATU values](docs/atu-values.md), [open items](docs/todo.md) |
 | `docs/history/` | The SDRoxide build's notes, test log and bench measurements |
 | `tools/` | The simulated amplifier and radio |

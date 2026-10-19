@@ -19,6 +19,13 @@ pub enum FrameKind {
     SetPower,
     /// Keys the radio's own TUNE carrier. Sent only by the TUNE routine.
     Key,
+    /// Keys an ordinary transmission of whatever audio is on the radio's
+    /// transmit input: the panel's tone, for TUNE with drive. Sent only by
+    /// the TUNE routine, and only once interlock #7's reads have passed.
+    KeyAudio,
+    /// Puts the radio's transmit audio on its USB input (the FDM-DUO's menu
+    /// 32), when the operator asks.
+    SetInput,
     /// Unkeys. Always safe to send.
     Unkey,
 }
@@ -109,4 +116,20 @@ pub trait Protocol: Send {
     /// The radio's TUNE carrier, at its power setting.
     fn key_tune(&self) -> Frame;
     fn unkey(&self) -> Frame;
+
+    /// An ordinary transmission of the audio on the radio's transmit input,
+    /// which keys the radio's PTT output as its PTT does; `None` where the
+    /// radio has no way to take its transmit audio from the computer.
+    fn key_audio(&self) -> Option<Frame>;
+    /// What is read just before [`Protocol::key_audio`], for
+    /// [`Protocol::audio_ready`].
+    fn audio_reads(&self) -> Vec<Frame>;
+    /// Whether, as last read, an ordinary transmission would send the
+    /// computer's audio and nothing else (interlock #7). The reason if not.
+    fn audio_ready(&self, s: &RigStatus) -> Result<(), String>;
+    /// Put the radio's transmit audio on its USB input.
+    fn audio_input(&self) -> Option<Frame>;
+    /// The share of full audio, as a power fraction, that Drive 100% sends:
+    /// where the radio stops putting out more power for more audio.
+    fn audio_ceiling(&self) -> f32;
 }

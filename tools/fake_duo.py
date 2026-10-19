@@ -5,9 +5,12 @@ panel's RADIO link without a radio. Linux and macOS only.
     python3 tools/fake_duo.py              # receiving on 14.074 MHz USB
     python3 tools/fake_duo.py --keyed      # transmitting about 6 W, SWR 1.32
     python3 tools/fake_duo.py --freq 7074000
+    python3 tools/fake_duo.py --mic        # menu 32 TX IN on the microphone
+    python3 tools/fake_duo.py --mode 3     # in CW
 
 It answers the READ commands the panel sends with fixed readings, takes
-menu 34 (`TPnn;`), keys its TUNE carrier on `TX2;` at menu 34's power and
+menu 34 (`TPnn;`) and menu 32 to USB audio (`TI1;`), keys its TUNE carrier
+on `TX2;` and an ordinary transmission on `TX;`, both at menu 34's power,
 unkeys on `RX;`, and answers `?;` to anything else. It prints every command
 that changes something, and flags any it should never be sent.
 """
@@ -17,7 +20,12 @@ import select
 import sys
 import tty
 
-state = {"keyed": "--keyed" in sys.argv, "tp": 9}
+state = {
+    "keyed": "--keyed" in sys.argv,
+    "tp": 9,
+    "ti": 0 if "--mic" in sys.argv else 1,
+    "md": sys.argv[sys.argv.index("--mode") + 1] if "--mode" in sys.argv else "2",
+}
 STEPS_MW = [300, 500, 1000, 1200, 1500, 2000, 3000, 4000, 5000, 8000]
 freq = int(sys.argv[sys.argv.index("--freq") + 1]) if "--freq" in sys.argv else 14_074_000
 
@@ -29,12 +37,12 @@ READS = {
     "FA": lambda: f"FA{freq:011}",
     "FB": lambda: "FB00007074000",
     "FR": lambda: "FR0",
-    "MD": lambda: "MD2",
+    "MD": lambda: f"MD{state['md']}",
     "RF": lambda: "RF208",
     "SP": lambda: "SP0",
     "RT": lambda: "RT0",
     "AN": lambda: "AN1",
-    "TI": lambda: "TI1",
+    "TI": lambda: f"TI{state['ti']}",
     "TP": lambda: f"TP{state['tp']:02}",
     "SM0": lambda: "SM00011",
     "DT": lambda: "DT0",
@@ -58,6 +66,12 @@ while True:
         elif cmd == "TX2":
             state["keyed"] = True
             print("TUNE keyed", file=sys.stderr, flush=True)
+        elif cmd == "TX":
+            state["keyed"] = True
+            print(f"keyed (TX), TI{state['ti']} MD{state['md']}", file=sys.stderr, flush=True)
+        elif cmd == "TI1":
+            state["ti"] = 1
+            print("menu 32 set to USB audio", file=sys.stderr, flush=True)
         elif cmd == "RX":
             state["keyed"] = False
             print("unkeyed", file=sys.stderr, flush=True)

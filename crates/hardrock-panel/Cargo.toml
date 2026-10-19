@@ -13,6 +13,8 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serialport = { version = "4.10", default-features = false }
+# TUNE's tone, into the radio's USB audio.
+cpal = "0.18.2"
 # `accesskit` keeps the widgets visible to screen readers; `persistence` keeps
 # the window's place and the settings between runs.
 eframe = { version = "0.36.1", default-features = false, features = [

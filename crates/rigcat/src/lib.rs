@@ -1,6 +1,6 @@
 //! A radio's CAT port, for the panel: what the radio measures of its own
 //! transmission, its dial and its settings, its transmit power, and its TUNE
-//! carrier.
+//! carrier or an ordinary transmission of the panel's tone.
 //!
 //! [`Protocol`] is what each radio's dialect provides; [`elad`] is the
 //! FDM-DUO's, the only one so far. Another radio is another module and
@@ -106,12 +106,25 @@ pub struct SettingRow {
     pub raw: Option<String>,
 }
 
-/// A TUNE carrier in progress.
+/// How TUNE keys the radio.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Keying {
+    /// An ordinary transmission (`TX;` on the FDM-DUO) of the panel's tone at
+    /// the Drive level, through the radio's USB audio. It keys the radio's
+    /// PTT output to the amplifier, as SDRoxide's TUNE did.
+    #[default]
+    Audio,
+    /// The radio's own TUNE carrier (`TX2;`), at its power setting.
+    Carrier,
+}
+
+/// A TUNE in progress.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tuning {
     pub since: Instant,
     /// When it unkeys by itself.
     pub until: Instant,
+    pub keying: Keying,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -131,6 +144,11 @@ pub struct RigStatus {
     pub power_code: Option<u8>,
     pub power_steps: &'static [PowerStep],
     pub power_name: &'static str,
+    /// Where the radio takes its transmit audio from (menu 32 on the
+    /// FDM-DUO), in words.
+    pub tx_input: Option<String>,
+    /// See [`Protocol::audio_ceiling`].
+    pub audio_ceiling: f32,
     pub tuning: Option<Tuning>,
     /// Why the last TUNE ended, when it wasn't the operator.
     pub tune_note: Option<String>,

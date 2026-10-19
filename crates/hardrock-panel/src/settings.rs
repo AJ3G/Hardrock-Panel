@@ -134,16 +134,19 @@ pub(crate) fn settings_radio_tab(
     amp_port: &str,
     status: Option<&RigStatus>,
     serial_ports: &[String],
+    sounds: &[String],
+    audio_out: &mut Option<String>,
 ) {
     ui.label(RichText::new("Radio").size(14.0).strong().color(theme::CYAN()));
     ui.add_space(4.0);
     ui.label(
         RichText::new(
-            "The radio's CAT port, read only. The panel reads the radio's own forward and \
-             reflected power and SWR, which fill FWD, RFL and SWR while the amplifier is in OFF \
-             (bypass), its dial, which can set the amplifier's band, and its menu settings, under \
-             RADIO. It never keys the radio or changes a setting. Only one program can have the \
-             port open, so close SDRoxide, FDM-SW2 or a logger using it first.",
+            "The radio's CAT port. The panel reads the radio's own forward and reflected power \
+             and SWR, which fill FWD, RFL and SWR while the amplifier is in OFF (bypass), its \
+             dial, which can set the amplifier's band, and its menu settings, under RADIO. It \
+             keys the radio only for TX TUNE and RIG TUNE, and changes only menu 34 (the power \
+             buttons) and menu 32 (USB AUDIO), when you press them. Only one program can have \
+             the port open, so close SDRoxide, FDM-SW2 or a logger using it first.",
         )
         .weak(),
     );
@@ -191,6 +194,33 @@ pub(crate) fn settings_radio_tab(
             })
             .response
             .on_hover_text("Must match menu 70 CAT BAUD on the radio. The FDM-DUO ships at 38400.");
+        ui.end_row();
+
+        ui.label("TUNE sound");
+        let auto = crate::audio::radio_device(sounds);
+        let shown = match (audio_out.as_ref(), &auto) {
+            (Some(d), _) => d.clone(),
+            (None, Some(a)) => format!("The radio's: {a}"),
+            (None, None) => "— none found —".to_string(),
+        };
+        ComboBox::from_id_salt("rig-sound")
+            .width(260.0)
+            .selected_text(shown)
+            .show_styled(ui, |ui| {
+                if ui.selectable_label(audio_out.is_none(), "The radio's own USB audio").clicked() {
+                    *audio_out = None;
+                }
+                for d in sounds {
+                    if ui.selectable_label(audio_out.as_ref() == Some(d), d).clicked() {
+                        *audio_out = Some(d.clone());
+                    }
+                }
+            })
+            .response
+            .on_hover_text(
+                "Where TUNE plays its tone: the radio's USB audio (FDM-DUO Audio), as for a \
+                 digital-mode program. Taken at once, without APPLY.",
+            );
         ui.end_row();
     });
     ui.add_space(4.0);

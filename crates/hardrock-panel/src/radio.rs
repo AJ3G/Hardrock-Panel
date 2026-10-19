@@ -1,20 +1,13 @@
 //! The radio's window: what the radio itself reports over its CAT port,
-//! TUNE and its power setting, and every setting the radio answers a READ
+//! TUNE, its power buttons and the Tune slider, and every setting the radio answers a READ
 //! for, with its menu number where it is one of the radio's menus. It sits
 //! over the panel, or pops out into a window of its own.
 
 use eframe::egui::{self, RichText};
 use rigcat::RigStatus;
 
-use crate::tune::{TuneOut, tune_strip};
+use crate::tune::{TuneArgs, TuneOut, tune_strip};
 use crate::{chrome, theme};
-
-/// What the TUNE strip needs that the radio's status doesn't carry.
-pub(crate) struct TuneArgs<'a> {
-    pub blocked: Option<String>,
-    pub limit_in_line: Option<f32>,
-    pub secs: &'a mut u32,
-}
 
 #[derive(Default)]
 pub(crate) struct RadioOut {
@@ -150,6 +143,9 @@ fn radio_body(
         ui.label(s.power_name);
         ui.label(s.power().map_or("—", |p| p.label));
         ui.end_row();
+        ui.label("TX IN (menu 32)");
+        ui.label(s.tx_input.as_deref().unwrap_or("—"));
+        ui.end_row();
         ui.label("Dial");
         let dial = match (s.freq_hz, s.mode) {
             (Some(hz), m) => {
@@ -170,7 +166,7 @@ fn radio_body(
     );
 
     ui.add_space(8.0);
-    out.tune = tune_strip(ui, "radio", s, tune.blocked.as_deref(), tune.limit_in_line, tune.secs);
+    out.tune = tune_strip(ui, s, tune);
 
     ui.add_space(8.0);
     ui.separator();

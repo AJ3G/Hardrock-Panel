@@ -525,9 +525,11 @@ fn run<P: std::io::Read + std::io::Write>(
                     }
                     was_keyed = keyed;
                 }
+                let tx_light = s.lights().map(|l| l.tx);
                 set(status, |st| {
                     st.readings = Some(r);
                     st.alerts = alerts;
+                    st.transmitting = tx_light;
                 });
             }
             Err(e) => {

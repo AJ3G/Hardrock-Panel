@@ -31,6 +31,7 @@ mod style;
 #[allow(dead_code, unused_imports)]
 mod theme;
 
+mod audio;
 mod panel;
 mod radio;
 mod settings;
@@ -38,8 +39,9 @@ mod tune;
 
 use eframe::egui::{self, RichText};
 use hardrock::{AmpAction, AmpConfig, AmpLink, AmpReadings, AmpStatus, Band};
-use rigcat::{RigConfig, RigLink, RigStatus};
+use rigcat::{Keying, RigConfig, RigLink, RigStatus};
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 use panel::{AmpMeters, TxMeters};
 
@@ -60,6 +62,11 @@ struct Saved {
     swr_warn: f32,
     /// How long TUNE may run, in seconds.
     tune_secs: u32,
+    /// The Tune slider: TUNE's level within the radio's power setting, 0 to 1.
+    drive: f32,
+    /// The sound output TUNE's tone plays on; `None` picks the radio's own
+    /// USB audio by its name.
+    audio_out: Option<String>,
     /// The radio's window was popped out into its own.
     radio_popped: bool,
     /// The meters' needle picks (see [`AmpMeters::saved`]).
@@ -73,6 +80,8 @@ impl Default for Saved {
             rig: RigConfig::default(),
             swr_warn: DEFAULT_SWR_WARN,
             tune_secs: tune::DEFAULT_TUNE_SECS,
+            drive: tune::DEFAULT_DRIVE,
+            audio_out: None,
             radio_popped: false,
             meters: None,
         }
@@ -99,7 +108,21 @@ struct App {
     /// The last band press here was undone by the amplifier: its band is
     /// set by the radio's cable (decision 13).
     band_held: bool,
+    /// TUNE's tone, and the sound outputs it can play on.
+    tone: audio::Tone,
+    sounds: Vec<String>,
+    /// When the tone was started for a TUNE not yet keyed.
+    tone_asked: Option<Instant>,
+    /// Why the tone wouldn't play, last time.
+    tone_error: Option<String>,
+    /// Since when the radio has been seen transmitting.
+    rig_keyed_since: Option<Instant>,
 }
+
+/// How long the radio is given to show a TUNE keyed before its tone is
+/// stopped again, and to be seen transmitting before the amplifier's PTT is
+/// looked at.
+const KEY_SETTLE: Duration = Duration::from_millis(1500);
 
 /// How long after DN or UP the amplifier is given to show the new band. The
 /// HR500 reads a radio's band lines three or four times a second, so a band
@@ -135,6 +158,37 @@ impl App {
             amp_was_connected: false,
             band_press: None,
             band_held: false,
+            tone: audio::Tone::default(),
+            sounds: audio::output_devices(),
+            tone_asked: None,
+            tone_error: None,
+            rig_keyed_since: None,
+        }
+    }
+
+    /// The sound output TUNE's tone plays on: the one chosen, or the radio's
+    /// own USB audio.
+    fn tone_device(&self) -> Option<String> {
+        self.saved.audio_out.clone().or_else(|| audio::radio_device(&self.sounds))
+    }
+
+    fn tone_gain(&self, r: &RigStatus) -> f32 {
+        audio::gain_for(self.saved.drive, r.audio_ceiling)
+    }
+
+    /// What the TUNE strip shows, for both of its copies.
+    fn tune_args(&mut self, amp: &AmpStatus, r: &RigStatus) -> tune::TuneArgs<'_> {
+        let dev = self.tone_device();
+        let tone = tune::planned_watts(r, Keying::Audio, self.saved.drive);
+        let carrier = tune::planned_watts(r, Keying::Carrier, self.saved.drive);
+        tune::TuneArgs {
+            tone_blocked: tune::tone_blocked(r, dev.as_deref())
+                .or_else(|| tune::tune_blocked(amp, r, tone)),
+            carrier_blocked: tune::tune_blocked(amp, r, carrier),
+            limit_in_line: limit_in_line(amp),
+            secs: &mut self.saved.tune_secs,
+            drive: &mut self.saved.drive,
+            tone_error: self.tone_error.clone(),
         }
     }
 
@@ -155,6 +209,7 @@ impl App {
         }
         self.saved.rig = self.draft_rig.clone();
         self.rig = None;
+        self.tone.stop();
         if self.saved.rig.enabled {
             self.rig = Some(RigLink::start(self.saved.rig.clone()));
         }
@@ -162,17 +217,31 @@ impl App {
     }
 
     /// While TUNE is keyed, tell the link the panel still wants it, or stop
-    /// it if interlock #6 says so.
-    fn keep_tune(&self, amp: &AmpStatus, rig: Option<&RigStatus>) {
-        let (Some(link), Some(r)) = (&self.rig, rig) else { return };
-        if r.tuning.is_none() {
-            return;
+    /// it if interlock #6 says so. Keep the tone at the Tune slider's level,
+    /// and stop it once TUNE has unkeyed.
+    fn keep_tune(&mut self, amp: &AmpStatus, rig: Option<&RigStatus>) {
+        let tuning = rig.and_then(|r| r.tuning);
+        let waiting = self.tone_asked.is_some_and(|t| t.elapsed() < KEY_SETTLE);
+        if tuning.is_some() {
+            self.tone_asked = None;
+        } else if !waiting && self.tone.playing() {
+            // After the link's unkey, never before it.
+            self.tone.stop();
         }
+        let (Some(link), Some(r), Some(t)) = (&self.rig, rig, tuning) else { return };
+        if t.keying == Keying::Audio {
+            self.tone.set_gain(self.tone_gain(r));
+        }
+        let watts = tune::planned_watts(r, t.keying, self.saved.drive);
         // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): a TUNE in
         // progress is stopped the moment the amplifier trips, leaves the
-        // radio's band in line, is driven past its limit, or either SWR
-        // reaches the warning.
-        match tune::tune_must_stop(amp, r, self.saved.swr_warn) {
+        // radio's band in line, is driven past its limit (or the Tune slider
+        // is raised past it), or either SWR reaches the warning.
+        let why = tune::tune_must_stop(amp, r, self.saved.swr_warn, watts).or_else(|| {
+            (t.keying == Keying::Audio && !self.tone.playing())
+                .then(|| "the tone stopped playing".to_string())
+        });
+        match why {
             Some(why) => link.tune_stop(Some(why)),
             None => link.tune_alive(),
         }
@@ -180,19 +249,74 @@ impl App {
 
     /// Act on the TUNE strip.
     fn do_tune(&mut self, t: tune::TuneOut, amp: &AmpStatus, r: &RigStatus) {
-        let Some(link) = &self.rig else { return };
-        if t.stop {
+        if self.rig.is_none() {
+            return;
+        }
+        if t.stop
+            && let Some(link) = &self.rig
+        {
             link.tune_stop(None);
         }
-        // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): checked again
-        // here, not only by the greyed button.
-        if t.start && tune::tune_blocked(amp, r, r.power()).is_none() {
-            let secs = self.saved.tune_secs.clamp(*tune::TUNE_SECS.start(), *tune::TUNE_SECS.end());
-            link.tune_start(std::time::Duration::from_secs(secs.into()));
+        let secs = self.saved.tune_secs.clamp(*tune::TUNE_SECS.start(), *tune::TUNE_SECS.end());
+        let max = Duration::from_secs(secs.into());
+        // SAFETY INTERLOCKS (docs/safety-interlocks.md, #6 and #7): checked
+        // again here, not only by the greyed buttons.
+        match t.start {
+            Some(Keying::Carrier) => {
+                let watts = tune::planned_watts(r, Keying::Carrier, self.saved.drive);
+                if tune::tune_blocked(amp, r, watts).is_none()
+                    && let Some(link) = &self.rig
+                {
+                    link.tune_start(max, Keying::Carrier);
+                }
+            }
+            Some(Keying::Audio) => {
+                let watts = tune::planned_watts(r, Keying::Audio, self.saved.drive);
+                let dev = self.tone_device();
+                if tune::tune_blocked(amp, r, watts).is_none()
+                    && tune::tone_blocked(r, dev.as_deref()).is_none()
+                    && let Some(dev) = dev
+                {
+                    // The tone first, then the key: keyed with no tone, the
+                    // radio would send nothing, but never anything else.
+                    match self.tone.start(&dev, self.tone_gain(r)) {
+                        Ok(()) => {
+                            self.tone_error = None;
+                            self.tone_asked = Some(Instant::now());
+                            if let Some(link) = &self.rig {
+                                link.tune_start(max, Keying::Audio);
+                            }
+                        }
+                        Err(e) => self.tone_error = Some(e),
+                    }
+                }
+            }
+            None => {}
         }
-        if let Some(code) = t.power {
-            link.set_power(code);
+        if let Some(link) = &self.rig {
+            if let Some(code) = t.power {
+                link.set_power(code);
+            }
+            if t.usb_audio {
+                link.use_usb_audio();
+            }
         }
+    }
+
+    /// The radio is transmitting, the amplifier is in line and has had time
+    /// to key, and its own TX light says it hasn't: the radio's PTT line is
+    /// not reaching it.
+    fn ptt_missing(&mut self, amp: &AmpStatus, rig: Option<&RigStatus>) -> Option<Keying> {
+        let r = rig.filter(|r| r.connected)?;
+        let keyed = r.keyed() || r.tuning.is_some();
+        if !keyed {
+            self.rig_keyed_since = None;
+            return None;
+        }
+        let since = *self.rig_keyed_since.get_or_insert_with(Instant::now);
+        let in_line = amp.connected && amp.readings.is_some_and(|x| x.ptt);
+        (since.elapsed() >= KEY_SETTLE && in_line && amp.transmitting == Some(false))
+            .then(|| r.tuning.map_or(Keying::Audio, |t| t.keying))
     }
 
     /// See whether a band press here sticks. If the amplifier is back on its
@@ -262,10 +386,14 @@ impl App {
                 egui::ScrollArea::vertical().max_height(room).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         if chrome::chip(ui, false, "REFRESH PORTS")
-                            .on_hover_text("Look again for serial ports, after plugging the amp in")
+                            .on_hover_text(
+                                "Look again for serial ports and sound outputs, after plugging \
+                                 the amp or the radio in",
+                            )
                             .clicked()
                         {
                             self.ports = serial_ports();
+                            self.sounds = audio::output_devices();
                         }
                     });
                     ui.add_space(6.0);
@@ -285,6 +413,8 @@ impl App {
                         &self.draft.serial.path,
                         rig,
                         &self.ports,
+                        &self.sounds,
+                        &mut self.saved.audio_out,
                     );
                 });
                 ui.add_space(8.0);
@@ -307,6 +437,7 @@ impl eframe::App for App {
         // fill it in: what TUNE's interlocks (#6) judge by.
         let amp_raw = st.clone();
         self.keep_tune(&amp_raw, rig.as_ref());
+        let ptt_missing = self.ptt_missing(&amp_raw, rig.as_ref());
         // In bypass the amplifier reports no FWD, RFL or SWR: the radio's own
         // readings fill them, or with no radio FWD falls back to the
         // amplifier's DRV (see `panel::from_rig`).
@@ -337,7 +468,20 @@ impl eframe::App for App {
                         self.show_radio = !self.show_radio;
                     }
                     ui.add_space(8.0);
-                    let (text, col) = if self.band_held {
+                    let (text, col) = if let Some(k) = ptt_missing {
+                        let more = if k == Keying::Carrier {
+                            " RIG TUNE may not key the radio's PTT output: try TUNE."
+                        } else {
+                            ""
+                        };
+                        (
+                            format!(
+                                "The radio is transmitting and the HR500 isn't keyed: its PTT \
+                                 line isn't reaching the amplifier.{more}"
+                            ),
+                            theme::YELLOW(),
+                        )
+                    } else if self.band_held {
                         (
                             "Band held by the radio's cable. To switch it here, set the HR500's \
                              Transceiver menu to None."
@@ -348,7 +492,17 @@ impl eframe::App for App {
                         radio_notice(rig.as_ref(), self.saved.rig.follow_band)
                     };
                     let notice = ui.label(RichText::new(text).size(11.0).color(col));
-                    if self.band_held {
+                    if ptt_missing.is_some() {
+                        notice.on_hover_text(
+                            "The amplifier is in PTT and its TX light is off while the radio \
+                             transmits. The HR500 keys only from its PTT input (the RCA jack, \
+                             or pin 4 of ACC); there is no serial command to key it. Check \
+                             that the cable from the FDM-DUO carries the radio's PTT output to \
+                             that pin, and that the radio's PTT output is turned on in its \
+                             menu. SDRoxide keyed the radio with an ordinary transmission \
+                             (TX), which the panel's TUNE also uses.",
+                        );
+                    } else if self.band_held {
                         notice.on_hover_text(
                             "DN or UP was pressed and the amplifier went straight back to its \
                              band. With its Transceiver menu set to a radio (ELAD FDM DUO here), \
@@ -363,24 +517,16 @@ impl eframe::App for App {
             });
 
         if let Some(r) = rig.as_ref().filter(|r| r.connected) {
-            let blocked = tune::tune_blocked(&amp_raw, r, r.power());
-            let limit = limit_in_line(&amp_raw);
+            let mut args = self.tune_args(&amp_raw, r);
             let t = egui::Panel::top("tune")
                 .frame(
                     egui::Frame::new()
-                        .fill(theme::BG_DEEP())
+                        // The panel's own fill, on which a slider's empty
+                        // track shows.
+                        .fill(theme::PANEL())
                         .inner_margin(egui::Margin::symmetric(11, 4)),
                 )
-                .show(ui, |ui| {
-                    tune::tune_strip(
-                        ui,
-                        "main",
-                        r,
-                        blocked.as_deref(),
-                        limit,
-                        &mut self.saved.tune_secs,
-                    )
-                })
+                .show(ui, |ui| tune::tune_strip(ui, r, &mut args))
                 .inner;
             self.do_tune(t, &amp_raw, r);
         }
@@ -408,13 +554,10 @@ impl eframe::App for App {
         }
         if self.show_radio {
             let mut open = true;
-            let args = radio::TuneArgs {
-                blocked: rig.as_ref().and_then(|r| tune::tune_blocked(&amp_raw, r, r.power())),
-                limit_in_line: limit_in_line(&amp_raw),
-                secs: &mut self.saved.tune_secs,
-            };
-            let o =
-                radio::radio_window(ctx, &mut open, self.saved.radio_popped, rig.as_ref(), args);
+            let popped = self.saved.radio_popped;
+            let none = RigStatus::default();
+            let args = self.tune_args(&amp_raw, rig.as_ref().unwrap_or(&none));
+            let o = radio::radio_window(ctx, &mut open, popped, rig.as_ref(), args);
             if o.refresh
                 && let Some(r) = &self.rig
             {
