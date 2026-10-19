@@ -5,6 +5,7 @@ panel without an amplifier. Linux and macOS only.
     python3 tools/fake_hr500.py            # prints the port to choose
     python3 tools/fake_hr500.py --keyed    # transmitting at about 400 W
     python3 tools/fake_hr500.py --off --drive 6   # in OFF, 6 W passing through
+    python3 tools/fake_hr500.py --held     # band held by a radio's band lines
 
 It answers the commands the panel sends with fixed, plausible readings. It
 does not model the amplifier: buttons change the band, mode, antenna and
@@ -17,6 +18,9 @@ import sys
 import tty
 
 keyed = "--keyed" in sys.argv
+# As with the Transceiver menu on a radio that sets the band over its cable:
+# a band set over the port is put straight back.
+held = "--held" in sys.argv
 drive = float(sys.argv[sys.argv.index("--drive") + 1]) if "--drive" in sys.argv else 0.0
 state = {"band": 5, "mode": 0 if "--off" in sys.argv else 1, "ant": 1, "atu": 1}
 
@@ -64,7 +68,7 @@ def answer(cmd):
         return "HRTRS;"
     for key, prefix in (("band", "HRBN"), ("mode", "HRMD"), ("ant", "HRAN")):
         if cmd.startswith(prefix):
-            if len(cmd) > len(prefix):
+            if len(cmd) > len(prefix) and not (held and key == "band"):
                 state[key] = int(cmd[len(prefix):])
             return f"{prefix}{state[key]};"
     return None

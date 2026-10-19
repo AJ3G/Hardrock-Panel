@@ -36,7 +36,7 @@ mod radio;
 mod settings;
 
 use eframe::egui::{self, RichText};
-use hardrock::{AmpConfig, AmpLink, AmpReadings, AmpStatus, Band};
+use hardrock::{AmpAction, AmpConfig, AmpLink, AmpReadings, AmpStatus, Band};
 use rigcat::{RigConfig, RigLink, RigStatus};
 use serde::{Deserialize, Serialize};
 
@@ -87,7 +87,17 @@ struct App {
     /// the amplifier was connected then, so a reconnect sends it again.
     band_told: Option<Band>,
     amp_was_connected: bool,
+    /// A band button pressed here, when, and the band the amplifier was on.
+    band_press: Option<(std::time::Instant, Option<u8>)>,
+    /// The last band press here was undone by the amplifier: its band is
+    /// set by the radio's cable (decision 13).
+    band_held: bool,
 }
+
+/// How long after DN or UP the amplifier is given to show the new band. The
+/// HR500 reads a radio's band lines three or four times a second, so a band
+/// the cable holds is back well inside this.
+const BAND_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -116,6 +126,8 @@ impl App {
             ports: serial_ports(),
             band_told: None,
             amp_was_connected: false,
+            band_press: None,
+            band_held: false,
         }
     }
 
@@ -140,6 +152,31 @@ impl App {
             self.rig = Some(RigLink::start(self.saved.rig.clone()));
         }
         self.band_told = None;
+    }
+
+    /// See whether a band press here sticks. If the amplifier is back on its
+    /// old band once it has had time to switch, something else sets its
+    /// band: on AJ3G's station, the FDM-DUO over the cable between them, with
+    /// the HR500's Transceiver menu on ELAD FDM DUO. The firmware has no
+    /// command to change that menu, so the panel says where to (decision 13).
+    fn watch_band(&mut self, st: &AmpStatus, actions: &[AmpAction]) {
+        let r = st.readings;
+        let pressed = actions
+            .iter()
+            .any(|a| matches!(a, AmpAction::BandUp | AmpAction::BandDown | AmpAction::SetBand(_)));
+        // A press refused for RF (interlocks 1 and 2) is not the cable's doing.
+        if pressed && st.connected && r.is_some_and(|r| !rf_present(&r)) {
+            self.band_press = Some((std::time::Instant::now(), r.and_then(|r| r.band)));
+        }
+        if let Some((at, before)) = self.band_press
+            && at.elapsed() >= BAND_SETTLE
+        {
+            self.band_press = None;
+            let now = r.and_then(|r| r.band);
+            if before.is_some() && now.is_some() {
+                self.band_held = now == before;
+            }
+        }
     }
 
     /// Keep the amplifier's band on the radio's, when asked to. The link holds
@@ -255,8 +292,28 @@ impl eframe::App for App {
                         self.show_radio = !self.show_radio;
                     }
                     ui.add_space(8.0);
-                    let (text, col) = radio_notice(rig.as_ref(), self.saved.rig.follow_band);
-                    ui.label(RichText::new(text).size(11.0).color(col));
+                    let (text, col) = if self.band_held {
+                        (
+                            "Band held by the radio's cable. To switch it here, set the HR500's \
+                             Transceiver menu to None."
+                                .to_string(),
+                            theme::YELLOW(),
+                        )
+                    } else {
+                        radio_notice(rig.as_ref(), self.saved.rig.follow_band)
+                    };
+                    let notice = ui.label(RichText::new(text).size(11.0).color(col));
+                    if self.band_held {
+                        notice.on_hover_text(
+                            "DN or UP was pressed and the amplifier went straight back to its \
+                             band. With its Transceiver menu set to a radio (ELAD FDM DUO here), \
+                             the HR500 takes its band from the radio's cable and puts back any \
+                             other. Its firmware has no command to change that menu, so it is \
+                             set on the amplifier: MENU, Transceiver, None. With the FDM-DUO \
+                             connected under SETTINGS, the panel can follow the radio's band \
+                             instead, and that can be turned off.",
+                        );
+                    }
                 });
             });
 
@@ -274,6 +331,7 @@ impl eframe::App for App {
                 link.action(a);
             }
         }
+        self.watch_band(&st, &out.actions);
         if out.settings {
             self.show_settings = true;
         }

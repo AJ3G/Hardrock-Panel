@@ -92,6 +92,16 @@ It changes only between transmissions: while there is RF in the amplifier the
 change waits, and goes out once you unkey. Untick it if the amplifier already
 gets its band over its own CAT or ACC cable.
 
+**A radio cabled to the amplifier.** If the radio is also wired to the
+amplifier's ACC jack (the FDM-DUO's EXT IO, for example) and the HR500's
+**Transceiver** menu names that radio, the amplifier takes its band from the
+cable and puts back any other, whatever the panel's setting. The panel can't
+change that menu: the amplifier has no command for it. If DN or UP doesn't
+hold, the line along the top turns yellow and says so. To control the band
+from the panel, set the amplifier's menu to **Transceiver: None** and connect
+the radio under SETTINGS; **Amplifier follows the radio's band** then does
+what the cable did, and can be turned off.
+
 With no radio connected, nothing tells the panel the radio's frequency, so it
 never changes the amplifier's band on its own. Switch bands with **DN** and
 **UP**, or let the radio set the band over the amplifier's own CAT or ACC
