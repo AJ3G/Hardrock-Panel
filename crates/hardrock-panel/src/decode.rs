@@ -622,10 +622,8 @@ fn body(ui: &mut egui::Ui, d: &mut Decode, s: &mut DecodeSettings, rx: &Rx, wsjt
                     }
                 }
             }
-            Family::Wsjt | Family::Link => {
-                if chrome::chip(ui, false, "Clear").clicked() {
-                    d.rows.clear();
-                }
+            Family::Wsjt | Family::Link if chrome::chip(ui, false, "Clear").clicked() => {
+                d.rows.clear();
             }
             _ => {}
         }
