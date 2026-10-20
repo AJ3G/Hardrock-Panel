@@ -108,6 +108,13 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
         if rx.error.is_some() && chrome::chip(ui, false, "TRY AGAIN").clicked() {
             out.reopen = true;
         }
+        if let Some(log) = elad_iq::diagnostics()
+            && chrome::chip(ui, false, "COPY ELAD LOG")
+                .on_hover_text("Copy the ELAD driver's session log, for a bug report")
+                .clicked()
+        {
+            ui.ctx().copy_text(log);
+        }
         if chrome::chip(ui, false, "SETTINGS").on_hover_text("Where the I/Q comes from").clicked() {
             out.settings = true;
         }
