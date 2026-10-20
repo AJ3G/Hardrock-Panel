@@ -391,7 +391,7 @@ impl BpskCore {
         taps.iter_mut().for_each(|t| *t /= sum);
 
         let mut hist = VecDeque::new();
-        hist.extend(std::iter::repeat(Complex32::new(0.0, 0.0)).take(sps as usize + 2));
+        hist.extend(std::iter::repeat_n(Complex32::new(0.0, 0.0), sps as usize + 2));
         BpskCore {
             sps,
             ph: 0.0,

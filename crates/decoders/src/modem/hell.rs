@@ -25,9 +25,9 @@ use std::f64::consts::{PI, TAU};
 
 use super::types::HellVariant;
 
+use super::hell_font::{COLS, ROWS, glyph};
 use sdr::Complex32;
 use sdr::fir::{ComplexFir, bandpass_taps};
-use super::hell_font::{COLS, ROWS, glyph};
 
 /// Dot rows in one scanned column.
 pub const HELL_ROWS: usize = ROWS;

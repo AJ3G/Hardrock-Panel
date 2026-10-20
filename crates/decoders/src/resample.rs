@@ -104,9 +104,10 @@ impl<T: Sample> Resampler<T> {
         self.out_rate
     }
 
-    /// The filter's delay, in output samples.
+    /// The filter's delay, in output samples: output `k` stands for the input
+    /// at `k - delay()` output samples after the first input sample.
     pub fn delay(&self) -> f64 {
-        (self.width as f64 / 2.0) / self.step
+        (self.width as f64 / 2.0 + 1.0) / self.step
     }
 
     /// Resample `input`, appending to `out`.

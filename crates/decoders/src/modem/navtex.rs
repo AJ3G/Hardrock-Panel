@@ -39,9 +39,9 @@
 
 use std::collections::VecDeque;
 
+use super::rtty::Integrator;
 use sdr::Complex32;
 use sdr::fir::{ComplexFir, bandpass_taps};
-use super::rtty::Integrator;
 
 /// The audio centre a NAVTEX signal is expected at, in Hz.
 ///

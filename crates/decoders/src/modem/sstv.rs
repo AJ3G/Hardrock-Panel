@@ -19,11 +19,11 @@ use std::f64::consts::TAU;
 
 use super::types::SstvMode;
 
-use sdr::Complex32;
-use sdr::fir::{ComplexFir, bandpass_taps};
 use super::sstv_slant::{
     FreqTrack, Geometry, Line, LineFit, LineTiming, MIN_FILL, SyncMap, measure_sync, robust_timing,
 };
+use sdr::Complex32;
+use sdr::fir::{ComplexFir, bandpass_taps};
 
 const BLACK_HZ: f64 = 1500.0;
 const WHITE_HZ: f64 = 2300.0;
@@ -269,7 +269,7 @@ fn line_segments(mode: SstvMode, w: u16, line: u16) -> Vec<Seg> {
             // Y full width; one chroma per line, alternating even=Cr / odd=Cb
             // (4:2:0). 150 ms/line. Separator frequency signals which chroma.
             let cw = w / 2;
-            let even = line % 2 == 0;
+            let even = line.is_multiple_of(2);
             let (chan, sep_hz) = if even { (Cr, 1500.0) } else { (Cb, 2300.0) };
             vec![
                 Seg::Tone { hz: SYNC_HZ, dur: 0.009 },
@@ -1149,7 +1149,7 @@ impl SstvRx {
         }
 
         // A whole symbol has arrived; see whether the stream so far is an ID.
-        if self.fsk_state.bits.len() % 6 != 0 {
+        if !self.fsk_state.bits.len().is_multiple_of(6) {
             return;
         }
         let symbols: Vec<u8> = self

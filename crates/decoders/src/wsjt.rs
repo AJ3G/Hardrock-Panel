@@ -202,32 +202,44 @@ pub fn decode_slot(
         WsjtMode::Ft8 => {
             let pcm = to_i16(audio);
             let ht = &session.hashes;
-            DecodeRequest::<mfsk_core::Ft8>::new(&pcm, AUDIO_MIN_HZ, AUDIO_MAX_HZ, SYNC_MIN, MAX_CAND)
-                .osd(true)
-                .sic_rounds(2)
-                .decode()
-                .results
-                .into_iter()
-                .filter_map(|r| {
-                    let text = wsjt77::unpack77_with_hash(r.message77(), ht)?;
-                    Some(mk(r.snr_db, r.dt_sec, r.freq_hz, text))
-                })
-                .collect()
+            DecodeRequest::<mfsk_core::Ft8>::new(
+                &pcm,
+                AUDIO_MIN_HZ,
+                AUDIO_MAX_HZ,
+                SYNC_MIN,
+                MAX_CAND,
+            )
+            .osd(true)
+            .sic_rounds(2)
+            .decode()
+            .results
+            .into_iter()
+            .filter_map(|r| {
+                let text = wsjt77::unpack77_with_hash(r.message77(), ht)?;
+                Some(mk(r.snr_db, r.dt_sec, r.freq_hz, text))
+            })
+            .collect()
         }
         WsjtMode::Ft4 => {
             let pcm = to_i16(audio);
             let ht = &session.hashes;
-            DecodeRequest::<mfsk_core::Ft4>::new(&pcm, AUDIO_MIN_HZ, AUDIO_MAX_HZ, SYNC_MIN, MAX_CAND)
-                .osd(true)
-                .sic_rounds(2)
-                .decode()
-                .results
-                .into_iter()
-                .filter_map(|r| {
-                    let text = wsjt77::unpack77_with_hash(r.message77(), ht)?;
-                    Some(mk(r.snr_db, r.dt_sec, r.freq_hz, text))
-                })
-                .collect()
+            DecodeRequest::<mfsk_core::Ft4>::new(
+                &pcm,
+                AUDIO_MIN_HZ,
+                AUDIO_MAX_HZ,
+                SYNC_MIN,
+                MAX_CAND,
+            )
+            .osd(true)
+            .sic_rounds(2)
+            .decode()
+            .results
+            .into_iter()
+            .filter_map(|r| {
+                let text = wsjt77::unpack77_with_hash(r.message77(), ht)?;
+                Some(mk(r.snr_db, r.dt_sec, r.freq_hz, text))
+            })
+            .collect()
         }
         WsjtMode::Fst4(p) => {
             let pcm = to_i16(audio);

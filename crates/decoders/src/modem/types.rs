@@ -3,11 +3,11 @@
 
 //! The SSTV modes and Hellschreiber variants the modems are configured with.
 
-
 /// One SSTV transmission mode. `Mode::Sstv` is the radio mode; this picks the
 /// specific line format used for encode/decode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SstvMode {
+    #[default]
     Scottie1,
     Scottie2,
     ScottieDx,
@@ -34,12 +34,6 @@ pub enum SstvMode {
     Pd180,
     Pd240,
     Pd290,
-}
-
-impl Default for SstvMode {
-    fn default() -> Self {
-        SstvMode::Scottie1
-    }
 }
 
 impl SstvMode {

@@ -6,7 +6,18 @@
 //!   WEFAX and more), ported from SDRoxide.
 //! * [`resample`]: from the `sdr` crate's 48 kHz audio and wide I/Q to the
 //!   rates the decoders want.
+pub mod freq;
+pub mod image;
 pub mod modem;
 pub mod resample;
 pub mod slot;
+pub mod worker;
 pub mod wsjt;
+
+pub use freq::FreqCal;
+pub use image::{ImageUpdate, RgbaImage};
+pub use worker::{
+    ImageCmd, ImageDecoder, ImageEvent, ImageMode, TextDecoder, TextEvent, TextMode, WsjtConfig,
+    WsjtDecoder, WsjtSlot,
+};
+pub use wsjt::{Fst4Period, Q65Mode, WsjtDecode, WsjtMode, WsprSpot};

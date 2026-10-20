@@ -114,9 +114,8 @@ fn figure_char(v: u8) -> Option<char> {
 }
 
 fn letter_code(c: char) -> Option<u8> {
-    ('A'..='Z')
-        .contains(&c)
-        .then(|| ())
+    c.is_ascii_uppercase()
+        .then_some(())
         .and_then(|_| (0u8..32).find(|&v| letter_char(v) == Some(c)))
 }
 fn figure_code(c: char) -> Option<u8> {

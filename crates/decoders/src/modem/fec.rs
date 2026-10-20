@@ -47,12 +47,12 @@ impl ConvEnc {
 pub fn conv_encode(bits: &[u8]) -> Vec<u8> {
     let mut s = 0usize;
     let mut out = Vec::with_capacity((bits.len() + K - 1) * 2);
-    for &b in bits.iter().chain(std::iter::repeat(&0u8).take(K - 1)) {
+    for &b in bits.iter().chain(std::iter::repeat_n(&0u8, K - 1)) {
         let b = b & 1;
         let (o1, o2) = outputs(s, b);
         out.push(o1);
         out.push(o2);
-        s = (((s << 1) | b as usize) & (NSTATES - 1)) as usize;
+        s = ((s << 1) | b as usize) & (NSTATES - 1);
     }
     out
 }
@@ -82,15 +82,15 @@ pub fn viterbi_decode(coded: &[u8], terminated: bool) -> Vec<u8> {
         let r1 = coded[2 * step];
         let r2 = coded[2 * step + 1];
         let mut npm = vec![u32::MAX / 2; NSTATES];
-        for s in 0..NSTATES {
-            if pm[s] >= u32::MAX / 2 {
+        for (s, &pms) in pm.iter().enumerate() {
+            if pms >= u32::MAX / 2 {
                 continue;
             }
             for b in 0u8..2 {
                 let (o1, o2) = outputs(s, b);
                 let bm = (o1 ^ r1) as u32 + (o2 ^ r2) as u32;
                 let ns = ((s << 1) | b as usize) & (NSTATES - 1);
-                let cand = pm[s] + bm;
+                let cand = pms + bm;
                 if cand < npm[ns] {
                     npm[ns] = cand;
                     trace[step * NSTATES + ns] = b;
