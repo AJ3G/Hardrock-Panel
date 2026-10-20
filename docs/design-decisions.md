@@ -377,7 +377,7 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 
 ## 36. The scope's SCF view shows cyclic features, on the GPU, from a narrow lane by default
 
-**Status:** drafted by the SCF worker, 20 Oct 2026, for the integrator to confirm.
+**Decided:** AJ3G, 20 Oct 2026, asked for a real-time cyclostationary feature detector by SSCA or FAM in WGSL. The narrow-lane default and N′ = 1024 come from the measurements below: N′ = 64 could not see FT8 or CW at all.
 
 **What the panel does.** The scope's top view has a fourth choice, *SCF*, beside Spectrum, 3D FFT and Both. It shows the spectral coherence (or the SCF itself) over frequency f and cycle frequency α, by the strip spectral correlation analyser (SSCA), as a terrain in the 3D view's perspective and palette or as a heat map, with axes in Hz and a readout of the strongest cycle frequencies (5σ over the median α row, each cell judged against its own f column), marked on the plane and labelled with a known mode whose symbol rate matches ("~FT8 rate": a rate, not an identification; nothing is reported before 8 blocks, or all of them if fewer are averaged). x·x* finds symbol and keying rates (α = k·Rs, with |α| < 3Δα left out because it is the PSD); x·x finds carriers (α = 2fc). It shows what is there and its parameters; it decodes nothing.
 
