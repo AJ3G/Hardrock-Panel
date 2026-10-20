@@ -45,6 +45,7 @@ pub mod palette;
 mod persistence;
 pub mod pointer;
 mod rows;
+pub mod scf;
 pub mod settings;
 pub mod view;
 
@@ -162,6 +163,7 @@ pub struct Scope {
     /// Recent frame times, for the frame-rate readout.
     frame_times: VecDeque<f64>,
     xvtr_text: String,
+    scf: scf::Scf,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -208,6 +210,7 @@ impl Scope {
             peak_cols: Vec::new(),
             frame_times: VecDeque::new(),
             xvtr_text,
+            scf: scf::Scf::new(render_state),
         }
     }
 
@@ -243,7 +246,15 @@ impl Scope {
     pub fn retire(&self, render_state: Option<&RenderState>) {
         if let Some(rs) = render_state {
             gpu::retire(rs, self.id);
+            scf::draw::retire(rs, self.id);
         }
+    }
+
+    /// Run the SCF view's engine while it is shown, on the pipeline's I/Q
+    /// tap (`set_tap` installs or, with `None`, removes the sink). Call every
+    /// frame the scope is drawn.
+    pub fn scf_tap(&mut self, set_tap: &mut dyn FnMut(Option<scf::IqSink>)) {
+        self.scf.run(self.settings.top == settings::TopView::Scf, set_tap);
     }
 
     fn map(&self) -> FreqMap {
@@ -258,7 +269,8 @@ impl Scope {
 
         let span = span_of(snap);
         let cur_view = view::view(span, self.want_view);
-        let upload = self.take_frames(snap, span, cur_view, now);
+        let scf_on = self.settings.top == settings::TopView::Scf;
+        let upload = if scf_on { None } else { self.take_frames(snap, span, cur_view, now) };
 
         // The receiver past 0.45 of the span: ask for a new centre, once a
         // second at most while it is on its way.
@@ -267,7 +279,18 @@ impl Scope {
         let v = view::view(span, self.want_view);
 
         let cx = paint::Ctx { span, view: v, map: self.map(), rig, now };
-        paint::tft(self, ui, &cx, snap, upload, &mut out);
+        if scf_on {
+            let f = scf::Frame {
+                snap,
+                palette: self.settings.palette,
+                height: self.settings.height,
+                map: self.map(),
+                id: self.id,
+            };
+            self.scf.ui(ui, &mut self.settings.scf, f);
+        } else {
+            paint::tft(self, ui, &cx, snap, upload, &mut out);
+        }
         controls::soft_keys(self, ui, snap, &mut out);
         controls::rows(self, ui, &cx, &mut out);
 
