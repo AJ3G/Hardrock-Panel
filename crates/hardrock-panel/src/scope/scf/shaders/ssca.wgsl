@@ -279,7 +279,7 @@ fn wrap(s: i32, m: u32) -> u32 {
 
 // The averaged estimate at signed strip point (k, q), as the SCF or as the
 // coherence: |S|² over the powers at f1 = k/N' and f2 (−q/N for x·x*, q/N
-// for x·x).
+// for x·x), the latter interpolated between channel centres.
 fn value(ks: i32, qs: i32) -> f32 {
     let k = wrap(ks, p.nc);
     let s = acc[k * p.n + wrap(qs, p.n)];
@@ -290,12 +290,15 @@ fn value(ks: i32, qs: i32) -> f32 {
     if (p.conj == 0u) {
         f2 = -f2;
     }
-    let k2 = wrap(i32(round(f2 * f32(p.nc))), p.nc);
-    return s / max(psd[k] * psd[k2], 1.0e-30);
+    let x = f2 * f32(p.nc);
+    let ka = floor(x);
+    let t = x - ka;
+    let p2 = mix(psd[wrap(i32(ka), p.nc)], psd[wrap(i32(ka) + 1, p.nc)], t);
+    return s / max(psd[k] * p2, 1.0e-30);
 }
 
 // One thread a grid cell: the strongest strip point inside it, or, when the
-// cell is finer than the strips, the one nearest its middle. Row a is α,
+// cell is finer than the strips, the nearest at its α. Row a is α,
 // column f; the grid is what the terrain's vertex shader reads.
 @compute @workgroup_size(256)
 fn map_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
@@ -339,12 +342,21 @@ fn map_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
         }
     }
     if (!found) {
+        // Finer than the strips: on each channel line through the cell, the
+        // point at the cell's α (α is what is resolved finely).
         let fc = f0 + 0.5 * df;
         let ac = a0 + 0.5 * da;
-        let kc = i32(round(nc * (fc + 0.5 * ac)));
-        let qc = i32(round(nn * (0.5 * ac - fc)));
-        if (kc >= kmin && kc <= kmax && qc >= qmin && qc <= qmax) {
-            best = value(kc, qc);
+        var kl = k_lo;
+        var kh = k_hi;
+        if (kl > kh) {
+            kl = i32(round(nc * (fc + 0.5 * ac)));
+            kh = kl;
+        }
+        for (var k = kl; k <= kh; k = k + k_stride) {
+            let q = i32(round(nn * (ac - f32(k) / nc)));
+            if (k >= kmin && k <= kmax && q >= qmin && q <= qmax) {
+                best = max(best, value(k, q));
+            }
         }
     }
     // 10·log10(v) = 10·log10(2)·log2(v).

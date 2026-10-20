@@ -245,7 +245,7 @@ pub fn supported(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
         && l.max_storage_buffers_per_shader_stage >= 5
         && l.max_compute_workgroup_storage_size >= SHARED_FFT * 8
         && l.max_compute_invocations_per_workgroup >= 256
-        && l.max_storage_buffer_binding_size as u64 >= MAX_POINTS as u64 * 8
+        && l.max_storage_buffer_binding_size >= MAX_POINTS as u64 * 8
 }
 
 impl Engine {

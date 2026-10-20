@@ -258,8 +258,15 @@ fn the_gpu_matches_the_cpu_reference() {
         return;
     };
     eprintln!("GPU: {:?}", dev.0.get_info().name);
-    // One-pass strips (N ≤ 2048) and the four-step FFT, odd and even log2.
-    for (n, nc, conj) in [(1024u32, 32u32, false), (8192, 64, true), (2048, 16, false)] {
+    // One-pass strips (N ≤ 2048) and the four-step FFT, odd and even log2;
+    // grid cells coarser than the strip points and (the last) finer.
+    for (n, nc, conj, a_hi) in [
+        (1024u32, 32u32, false, 0.5f32),
+        (8192, 64, true, 0.5),
+        (2048, 16, false, 0.5),
+        // (Dyadic ranges, so f32 and f64 round the cells alike.)
+        (4096, 64, false, 1.0 / 256.0),
+    ] {
         let mut rng = Rng::new(n as u64);
         let blocks = 3;
         let len = n as usize * blocks + nc as usize;
@@ -267,7 +274,7 @@ fn the_gpu_matches_the_cpu_reference() {
             mix(&bpsk(len, 1.0, 1.0 / 20.0, 0.1, 1.0, false, &mut rng), &noise(len, 0.5, &mut rng));
         let (ga, gf) = (64u32, nc);
         let cfg = EngineCfg { n, nc, grid_f: gf, grid_a: ga, taper: Taper::Hamming };
-        let a_range = (0.0f32, 0.5f32);
+        let a_range = (0.0f32, a_hi);
         let f_range = (-0.5f32, 0.5f32);
         let bp = BlockParams { conj, measure: Measure::Coherence, beta: 1.0, a_range, f_range };
         let e = run_gpu(&dev, cfg, &x, bp, 4);
@@ -298,5 +305,48 @@ fn the_gpu_matches_the_cpu_reference() {
             }
         }
         assert_eq!(bad, 0, "N {n}: {bad} of {} grid cells differ", grid.len());
+    }
+}
+
+#[test]
+fn the_threads_find_psk31_in_the_narrow_lane() {
+    use super::{LaneKind, Runtime, ScfSettings, Want, lock};
+    use std::sync::atomic::Ordering;
+    let Some((_, device, queue)) = gpu() else {
+        eprintln!("no wgpu adapter here: the threads' test skipped");
+        return;
+    };
+    // A 48 kS/s span; the receiver's passband centre 1.5 kHz up, and a
+    // PSK31-rate BPSK 300 Hz above that.
+    let fs = 48_000.0;
+    let s =
+        ScfSettings { lane: LaneKind::Narrow, lane_hz: 3000, avg_blocks: 8, ..Default::default() };
+    let rt = Runtime::start(device, queue, Want { s, shift_hz: 1500.0, reset: 0 });
+    let sh = rt.shared.clone();
+    let mut rng = Rng::new(9);
+    let len = (fs * 12.0) as usize;
+    let x = mix(&bpsk(len, fs, 31.25, 1800.0, 0.3, false, &mut rng), &noise(len, 1.0, &mut rng));
+    let iq = interleave(&x);
+    for c in iq.chunks(2 * 4800) {
+        sh.seen_ms.store(sh.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+        rt.tap_tx.send((c.to_vec(), fs)).unwrap();
+    }
+    let t = std::time::Instant::now();
+    loop {
+        sh.seen_ms.store(sh.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+        let st = lock(&sh.status).clone();
+        if st.blocks >= 7 && !st.features.is_empty() {
+            assert_eq!(st.lane_rate, 3000.0);
+            let f = &st.features[0];
+            assert!((f.alpha_hz - 31.25).abs() < 0.8, "{:?}", st.features);
+            assert_eq!(f.mode, Some("PSK31"));
+            // At +300 Hz in the lane. The coherence spreads a strong signal
+            // over the channels its window's leakage reaches, so within a
+            // couple of channels (47 Hz each).
+            assert!((f.f_hz - 300.0).abs() < 120.0, "{f:?}");
+            break;
+        }
+        assert!(t.elapsed().as_secs() < 60, "no feature: {} blocks, {:?}", st.blocks, st.error);
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }

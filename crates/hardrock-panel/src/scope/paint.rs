@@ -102,7 +102,7 @@ pub(super) fn tft(
     // Which callback carries this frame's rows: the first one on screen.
     let mut upload = upload;
     let surface_h = match sc.settings.top {
-        TopView::Spectrum => 0.0,
+        TopView::Spectrum | TopView::Scf => 0.0,
         TopView::Surface => spec_plot.height(),
         TopView::Both => (spec_plot.height() * 0.55).round(),
     };

@@ -181,8 +181,12 @@ impl Averaged {
         if !self.conj {
             f2 = -f2;
         }
-        let k2 = wrap((f2 * self.nc as f64).round_ties_even() as i64, self.nc);
-        s / (self.psd[kk] * self.psd[k2]).max(1e-30)
+        let x = f2 * self.nc as f64;
+        let ka = x.floor();
+        let t = x - ka;
+        let pa = self.psd[wrap(ka as i64, self.nc)];
+        let pb = self.psd[wrap(ka as i64 + 1, self.nc)];
+        s / (self.psd[kk] * (pa + (pb - pa) * t)).max(1e-30)
     }
 
     /// Every strip point: (α, f, value), cycles per sample.
@@ -250,10 +254,18 @@ impl Averaged {
                 if !found {
                     let fc = f0 + 0.5 * df;
                     let ac = a0 + 0.5 * da;
-                    let kc = (nc * (fc + 0.5 * ac)).round_ties_even() as i64;
-                    let qc = (nn * (0.5 * ac - fc)).round_ties_even() as i64;
-                    if (kmin..=kmax).contains(&kc) && (qmin..=qmax).contains(&qc) {
-                        best = self.value(kc, qc, measure);
+                    let (mut kl, mut kh) = (k_lo, k_hi);
+                    if kl > kh {
+                        kl = (nc * (fc + 0.5 * ac)).round_ties_even() as i64;
+                        kh = kl;
+                    }
+                    let mut k = kl;
+                    while k <= kh {
+                        let q = (nn * (ac - k as f64 / nc)).round_ties_even() as i64;
+                        if (kmin..=kmax).contains(&k) && (qmin..=qmax).contains(&q) {
+                            best = best.max(self.value(k, q, measure));
+                        }
+                        k += k_stride;
                     }
                 }
                 out[ai * grid_f + fi] = 10.0 * best.max(1e-30).log10();

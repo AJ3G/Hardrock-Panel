@@ -19,21 +19,25 @@ pub enum TopView {
     Surface,
     /// Both: the 3D surface above the flat trace, on one frequency axis.
     Both,
+    /// The spectral correlation function's (f, α) plane ([`super::scf`]).
+    Scf,
 }
 
 impl TopView {
-    pub const ALL: [TopView; 3] = [TopView::Spectrum, TopView::Surface, TopView::Both];
+    pub const ALL: [TopView; 4] =
+        [TopView::Spectrum, TopView::Surface, TopView::Both, TopView::Scf];
 
     pub fn label(self) -> &'static str {
         match self {
             TopView::Spectrum => "Spectrum",
             TopView::Surface => "3D FFT",
             TopView::Both => "Both",
+            TopView::Scf => "SCF",
         }
     }
 
     pub fn has_surface(self) -> bool {
-        self != TopView::Spectrum
+        !matches!(self, TopView::Spectrum | TopView::Scf)
     }
 
     pub fn has_trace(self) -> bool {
@@ -263,6 +267,8 @@ pub struct ScopeSettings {
     /// Frequency calibration, parts per million: what the radio's reference
     /// is off by. 0 for a GPS-disciplined reference.
     pub ppm: f64,
+    /// The SCF view's own settings.
+    pub scf: super::scf::ScfSettings,
 }
 
 impl Default for ScopeSettings {
@@ -298,6 +304,7 @@ impl Default for ScopeSettings {
             band_plan: true,
             transverter_hz: 0.0,
             ppm: 0.0,
+            scf: Default::default(),
         }
     }
 }
@@ -332,6 +339,7 @@ impl ScopeSettings {
     /// Bring anything out of range (a hand-edited file, an older version)
     /// back in.
     pub fn sanitise(&mut self) {
+        self.scf.sanitise();
         if !self.floor_dbm.is_finite() || !self.ceil_dbm.is_finite() {
             let d = ScopeSettings::default();
             self.floor_dbm = d.floor_dbm;

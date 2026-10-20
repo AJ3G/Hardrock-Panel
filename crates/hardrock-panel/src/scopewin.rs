@@ -5,7 +5,7 @@
 
 use eframe::egui::{self, RichText};
 
-use crate::rx::{DUO_AUDIO_MAX_RATE, IqChoice, Rx, RxSettings};
+use crate::rx::{DUO_AUDIO_MAX_RATE, IqBlock, IqChoice, IqSink, Rx, RxSettings};
 use crate::scope::{Scope, ScopeOut, ScopeRig};
 use crate::{chrome, theme};
 
@@ -199,6 +199,10 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
     }
     let snap = rx.snapshot();
     out.scope = Some(scope.ui(ui, &snap, a.rig));
+    scope.scf_tap(&mut |sink| {
+        let sink = sink.map(|s| Box::new(move |b: &IqBlock| s(b.iq, b.rate)) as IqSink);
+        rx.taps.set_iq("scf", sink);
+    });
     if snap.spectrum_drops > 0 {
         ui.label(
             RichText::new(format!(
