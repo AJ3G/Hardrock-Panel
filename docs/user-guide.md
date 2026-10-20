@@ -183,6 +183,15 @@ input. The line along the top of the window says which applies.
 
 ## The window
 
+**Its look.** With the FDM-DUO chosen under SETTINGS the window is drawn as
+the screen of ELAD's DUO-ART 120 amplifier, to match the radio: the meters
+as white dials, a blue status line (mode, band, antenna, where the band
+comes from, the tuner), a green diagnostic line, a message line with any
+warning on the left and the tuner's state on the right, and the controls as
+six soft keys under the screen, each with its label above it. Everything
+below is the same in either look; only the drawing changes. Without a
+radio the window keeps its own look.
+
 **What can be clicked.** Anything in the window that does something when
 clicked shows a pointing hand and a white outline when the mouse is over it.
 If the outline appears, it's a control; if it doesn't, it's only a display.
