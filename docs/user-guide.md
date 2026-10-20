@@ -20,6 +20,15 @@ over the radio's CAT port, set its power, and key its TUNE carrier (see
 >
 > Tested on Windows 11 only.
 
+**The ELAD look.** With the ELAD FDM-DUO chosen as the radio under SETTINGS,
+the whole panel (the top bar, the TUNE strip, SETTINGS, SCOPE, DECODE and
+every key, field and menu) wears ELAD's graphite and blue, to match the
+radio's face and the DUO-ART screen of the AMP window. With no radio, or
+another, it keeps SDRoxide's look. `--theme elad` or `--theme sdroxide` on
+the command line forces either; `--demo` shows the ELAD look.
+
+![The panel in the ELAD look](images/panel-elad.png)
+
 ## Setting it up
 
 1. Plug the amplifier's USB lead in and turn the amplifier on.
@@ -326,6 +335,27 @@ on the receiver, and takes split off again when the receiver is back on VFO A.
 It needs both the CAT link and the ELAD's I/Q. Turn it off to leave split to
 you; a split the panel made is taken off.
 
+**The band plan** along the bottom of the spectrum shows the band's segments
+on its top row and, below them, the data modes' dial frequencies: FT8, FT4,
+WSPR, JT65, JT9, FST4/FST4W, Q65, MSK144 on 6 m, JS8, PSK31, RTTY, SSTV, WEFAX
+and NAVTEX, and behind a converter the airband and marine data channels. Each
+is a tick with the mode's passband shaded out from it (FT8: the dial to 3 kHz
+above it). Point at one to see it; click it to tune there in that mode. The
+**Data** keys go to their mode's frequency on the band you are on (or the
+nearest band, with a note when it has none there).
+
+![The band plan's mode markers](images/scope-bandplan.png)
+
+**Filter edges in the waterfall.** The passband's edges run down the waterfall
+too, with handles at the top: drag one to widen or narrow the filter, as on
+the spectrum. Drag inside the passband to tune, carrying it along.
+
+**Receiver DSP**, under SETTINGS, *Scope and receiver*: the decimator (CIC +
+FIR to start, or half-band), the passband's shape (Soft, Sharp or Brick wall,
+with the audio delay each costs: about 9, 24 and 64 ms), the listening AGC's
+attack, decay, hang and target, and the target of the decoders' own AGC.
+Taken at once and kept; **DEFAULTS** puts them back.
+
 **While transmitting** the scope tunes nothing: clicks, drags, the wheel, the
 band plan and the data-mode keys are locked, VFO A and B and split are left
 alone, and the top bar says so. Zoom, markers and the display still work.
@@ -338,11 +368,21 @@ alone, and the top bar says so. Zoom, markers and the display still work.
 **DECODE**, on the top bar, opens the panel's own decoders. Pick a mode and
 press **RUN**; it keeps decoding with the window closed until **STOP**.
 
+**Snap the radio to the mode** (on to start): picking a mode takes the
+panel's receiver and the DUO to its frequency on the band you are on (or the
+nearest band), in its sideband, with the receiver's passband set for its
+decoder (200–3000 Hz for FT8 and FT4, 1400–1600 Hz for WSPR, narrow for PSK31
+and RTTY), the DUO's own filter to match (up to 192 kHz, or over CAT with no
+I/Q), and the decoder's audio (RTTY's mark and space on USB, NAVTEX on its
+1700 Hz centre). The line under the mode keys says what it did. Olivia, THOR
+and HFDL have no calling frequency: tune to them by hand. Nothing is changed
+while the radio transmits; the line says so. **POP OUT** puts DECODE in a
+window of its own, **DOCK** brings it back.
+
 - **WSJT**: FT8, FT4, WSPR, JT65, JT9, FST4-60 and Q65-30A, from the
   receiver's audio in UTC slots. Each decode shows its UTC, SNR, DT (a
-  drifting PC clock shows here), audio frequency and RF frequency. Put the
-  receiver on the mode's dial frequency (the scope's **Data** keys do it) in
-  USB.
+  drifting PC clock shows here), audio frequency and RF frequency. Picking
+  the mode puts the receiver on its dial frequency in USB (see above).
 - **Keyboard**: RTTY (45.45 baud, 170 Hz), PSK31, NAVTEX, Olivia 8/500 and
   THOR16, as running text. Set the audio frequency the signal sits at.
 - **Pictures**: SSTV (its mode from the picture's header) and WEFAX (choose

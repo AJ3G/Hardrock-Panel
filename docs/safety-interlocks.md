@@ -94,7 +94,8 @@ Before removing or loosening any of these, read why it is there.
 - **Blocks while transmitting:** click-to-tune, dragging the receiver marker or a filter edge, wheel steps, band-plan clicks, the data-mode keys (which set the frequency, mode and passband), and asking for a new IQ centre (VFO A). While transmitting, a press on the scope can only pan the view. Zoom, markers and display settings still work.
 - **Why:** the scope's outputs move the radio. Moving VFO A or the receiver while keyed changes the transmit frequency under load, and in split it moves `FB` (decision 22), possibly out of the amplifier's band or the band plan.
 - **What the operator sees:** over the spectrum the pointer becomes a not-allowed cursor and the top bar reads "tuning locked while transmitting"; the data-mode keys are greyed, with the reason on hover.
-- **Added:** AJ3G, 20 Oct 2026, with the scope. Tested by `a_press_drags_what_it_grabbed_unless_transmitting` and `the_centre_follows_the_receiver_but_not_while_transmitting`.
+- **Also (decision 39):** the band-plan strip's mode markers, dragging the passband or its edges in the waterfall, and DECODE's snap to a mode (`App::snap_to()` in `main.rs`, which refuses while transmitting and says so, naming #5 and #9).
+- **Added:** AJ3G, 20 Oct 2026, with the scope. Tested by `a_press_drags_what_it_grabbed_unless_transmitting` and `the_centre_follows_the_receiver_but_not_while_transmitting`. Also `dragging_the_passband_tunes_by_the_pointers_travel`.
 
 ## 10. The ELAD's I/Q is opened and moved over USB only between transmissions
 
