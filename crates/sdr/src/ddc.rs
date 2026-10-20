@@ -428,9 +428,6 @@ mod tests {
                 ddc.set_offset_hz(12_345.0);
                 let (ripple, rejection, at) = measure(&ddc);
                 let (_, far, far_at) = measure_from(&ddc, 168_000.0);
-                let block: Vec<Complex32> = (0..65_536)
-                    .map(|i| Complex32::new((i % 7) as f32 * 0.1, (i % 5) as f32 * 0.1))
-                    .collect();
                 let ns = time_ns_per_sample(&mut ddc);
                 println!(
                     "| {} | {} | {} | {ripple:.5} | {rejection:.1} ({at:.0}) | \

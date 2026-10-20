@@ -10,18 +10,18 @@
 //! relative to it (negative = below the dial, which is what selects the lower
 //! sideband).
 
-use crate::fir::{ComplexFir, RealFir, bandpass_taps};
+use crate::fir::RealFir;
+use crate::passband::{FilterShape, Passband, passband_taps};
 use crate::types::Complex32;
 
-/// Taps in every passband filter: at 48 kHz a Blackman-Harris window this long
-/// has a transition of about 600 Hz, so the opposite sideband is far down by
-/// the time it is a voice's width away.
-pub const PASSBAND_TAPS: usize = 331;
-
 pub trait Demodulator: Send {
-    /// Consume channel-rate IQ, append audio samples at the same rate.
-    fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>);
-    fn set_filter(&mut self, lo_hz: f32, hi_hz: f32);
+    /// Consume channel-rate IQ, append audio samples at the same rate to
+    /// `out`, and the audio's envelope — what the AGC levels by — to `env`,
+    /// one value per audio sample.
+    fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>, env: &mut Vec<f32>);
+    /// The passband, `[lo, hi]` Hz from the dial, and how steep its skirts
+    /// are.
+    fn set_filter(&mut self, lo_hz: f32, hi_hz: f32, shape: FilterShape);
     /// Post-filter, pre-AGC signal power (dBFS, 0 dB being a complex sample of
     /// magnitude 1) for the S-meter.
     fn power_dbfs(&self) -> f32;
@@ -66,16 +66,16 @@ impl PowerMeter {
 /// of amplitude `A`.
 pub struct SsbDemod {
     rate: f64,
-    fir: ComplexFir,
+    fir: Passband,
     filtered: Vec<Complex32>,
     power: PowerMeter,
 }
 
 impl SsbDemod {
-    pub fn new(rate: f64, lo: f32, hi: f32) -> Self {
+    pub fn new(rate: f64, lo: f32, hi: f32, shape: FilterShape) -> Self {
         SsbDemod {
             rate,
-            fir: ComplexFir::new(bandpass_taps(PASSBAND_TAPS, lo as f64, hi as f64, rate)),
+            fir: Passband::new(passband_taps(lo as f64, hi as f64, rate, shape)),
             filtered: Vec::new(),
             power: PowerMeter::new(rate),
         }
@@ -83,15 +83,21 @@ impl SsbDemod {
 }
 
 impl Demodulator for SsbDemod {
-    fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>) {
+    /// The envelope is `|z|`, the magnitude of the filtered signal whose real
+    /// part is the audio. With the passband on one side of the dial that is
+    /// the audio's true envelope — constant on a steady tone of any pitch —
+    /// so the AGC holds a tone exactly at its target rather than at its
+    /// sampled peaks.
+    fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>, env: &mut Vec<f32>) {
         self.filtered.clear();
         self.fir.process(iq, &mut self.filtered);
         self.power.update(&self.filtered);
         out.extend(self.filtered.iter().map(|z| z.re));
+        env.extend(self.filtered.iter().map(|z| z.norm()));
     }
 
-    fn set_filter(&mut self, lo: f32, hi: f32) {
-        self.fir.set_taps(bandpass_taps(PASSBAND_TAPS, lo as f64, hi as f64, self.rate));
+    fn set_filter(&mut self, lo: f32, hi: f32, shape: FilterShape) {
+        self.fir.set_taps(passband_taps(lo as f64, hi as f64, self.rate, shape));
     }
 
     fn power_dbfs(&self) -> f32 {
@@ -124,17 +130,17 @@ impl DcBlock {
 /// AM: envelope detector after the band-pass, DC blocked.
 pub struct AmDemod {
     rate: f64,
-    fir: ComplexFir,
+    fir: Passband,
     dc: DcBlock,
     filtered: Vec<Complex32>,
     power: PowerMeter,
 }
 
 impl AmDemod {
-    pub fn new(rate: f64, lo: f32, hi: f32) -> Self {
+    pub fn new(rate: f64, lo: f32, hi: f32, shape: FilterShape) -> Self {
         AmDemod {
             rate,
-            fir: ComplexFir::new(bandpass_taps(PASSBAND_TAPS, lo as f64, hi as f64, rate)),
+            fir: Passband::new(passband_taps(lo as f64, hi as f64, rate, shape)),
             dc: DcBlock::new(20.0, rate),
             filtered: Vec::new(),
             power: PowerMeter::new(rate),
@@ -143,15 +149,17 @@ impl AmDemod {
 }
 
 impl Demodulator for AmDemod {
-    fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>) {
+    fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>, env: &mut Vec<f32>) {
         self.filtered.clear();
         self.fir.process(iq, &mut self.filtered);
         self.power.update(&self.filtered);
+        let start = out.len();
         out.extend(self.filtered.iter().map(|z| self.dc.run(z.norm())));
+        env.extend(out[start..].iter().map(|s| s.abs()));
     }
 
-    fn set_filter(&mut self, lo: f32, hi: f32) {
-        self.fir.set_taps(bandpass_taps(PASSBAND_TAPS, lo as f64, hi as f64, self.rate));
+    fn set_filter(&mut self, lo: f32, hi: f32, shape: FilterShape) {
+        self.fir.set_taps(passband_taps(lo as f64, hi as f64, self.rate, shape));
     }
 
     fn power_dbfs(&self) -> f32 {
@@ -169,7 +177,7 @@ const NFM_HPF_POLES: usize = 4;
 /// for the sub-audible signalling and an audio low-pass.
 pub struct FmDemod {
     rate: f64,
-    fir: ComplexFir,
+    fir: Passband,
     lpf: RealFir,
     /// One-pole high-pass sections, which also block the DC an off-tune
     /// carrier leaves on the discriminator.
@@ -182,10 +190,10 @@ pub struct FmDemod {
 }
 
 impl FmDemod {
-    pub fn new(rate: f64, lo: f32, hi: f32) -> Self {
+    pub fn new(rate: f64, lo: f32, hi: f32, shape: FilterShape) -> Self {
         FmDemod {
             rate,
-            fir: ComplexFir::new(bandpass_taps(PASSBAND_TAPS, lo as f64, hi as f64, rate)),
+            fir: Passband::new(passband_taps(lo as f64, hi as f64, rate, shape)),
             lpf: RealFir::lowpass(63, 3600.0, rate),
             hpf: (0..NFM_HPF_POLES).map(|_| DcBlock::new(NFM_HPF_HZ, rate)).collect(),
             prev: Complex32::new(1.0, 0.0),
@@ -198,7 +206,8 @@ impl FmDemod {
 }
 
 impl Demodulator for FmDemod {
-    fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>) {
+    fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>, env: &mut Vec<f32>) {
+        let start = out.len();
         self.filtered.clear();
         self.fir.process(iq, &mut self.filtered);
         self.power.update(&self.filtered);
@@ -211,10 +220,11 @@ impl Demodulator for FmDemod {
             self.listen.push(self.hpf.iter_mut().fold(s, |v, hp| hp.run(v)));
         }
         self.lpf.process(&self.listen, out);
+        env.extend(out[start..].iter().map(|s| s.abs()));
     }
 
-    fn set_filter(&mut self, lo: f32, hi: f32) {
-        self.fir.set_taps(bandpass_taps(PASSBAND_TAPS, lo as f64, hi as f64, self.rate));
+    fn set_filter(&mut self, lo: f32, hi: f32, shape: FilterShape) {
+        self.fir.set_taps(passband_taps(lo as f64, hi as f64, self.rate, shape));
     }
 
     fn power_dbfs(&self) -> f32 {

@@ -1,11 +1,17 @@
 //! One software receiver inside the span, SDR Console style: the radio's centre
 //! stays where it is and this tunes anywhere within the I/Q it delivers.
 //!
-//! The chain is SDRoxide's: an NCO moves the dial to DC at the device rate, a
-//! ladder of half-band /2 stages takes the rate down to 384 or 192 kHz, one FIR
-//! decimator lands on exactly 48 kHz, and the demodulator's band-pass sets the
-//! passband there. Every ELAD rate is 192 kHz times a power of two, so the
-//! audio is 48 kHz with no resampling.
+//! The chain: an f64 NCO moves the dial to DC at the device rate, a
+//! decimator ([`DecimatorKind`]: CIC and compensating FIR, or SDRoxide's
+//! half-band ladder) takes the rate down to exactly 48 kHz, flat to 20 kHz
+//! and 100 dB clean of aliases, and the demodulator's band-pass
+//! ([`FilterShape`]) sets the passband there. Every ELAD rate is 192 kHz times
+//! a power of two, so the audio is 48 kHz with no resampling.
+//!
+//! Two AGCs level the same demodulated audio: one for listening, set by the
+//! operator, and one for the decoders ([`Receiver::decoder_audio`]), held at
+//! a fixed level whatever the listening AGC, the manual gain or the volume
+//! are doing.
 //!
 //! # Levels
 //!
@@ -14,9 +20,10 @@
 //! uses — and, demodulated in a sideband mode with the AGC off at 0 dB gain,
 //! comes out as a tone of amplitude `A`.
 
-use crate::agc::Agc;
-use crate::ddc::Ddc;
+use crate::agc::{Agc, AgcParams};
+use crate::ddc::{Ddc, DecimatorKind};
 use crate::demod::{AmDemod, Demodulator, FmDemod, SsbDemod};
+use crate::passband::FilterShape;
 use crate::types::{AgcMode, Complex32, MAX_MANUAL_GAIN_DB, Mode};
 
 /// The audio rate, in Hz.
@@ -26,8 +33,9 @@ pub const AUDIO_RATE: f64 = 48_000.0;
 /// DDC delivers.
 pub const SUPPORTED_RATES: [u32; 6] = elad_iq::ELAD_SAMPLE_RATES;
 
-/// How [`Receiver`] decimates from `in_rate`: the number of half-band /2
-/// stages, the factor of the final FIR decimator, and the rate that comes out.
+/// How [`DecimatorKind::HalfBand`] decimates from `in_rate`: the number of
+/// half-band /2 stages, the factor of the final FIR decimator, and the rate
+/// that comes out.
 pub fn decimation_plan(in_rate: f64) -> (usize, usize, f64) {
     let mut rate = in_rate;
     let mut halfbands = 0;
@@ -43,16 +51,22 @@ pub fn decimation_plan(in_rate: f64) -> (usize, usize, f64) {
 pub struct Receiver {
     rate: f64,
     ddc: Ddc,
+    decimator: DecimatorKind,
     offset_hz: f64,
     mode: Mode,
     passband: (f32, f32),
+    shape: FilterShape,
     demod: Box<dyn Demodulator>,
     agc: Agc,
     agc_mode: AgcMode,
     gain_db: f32,
     calibration_db: f32,
-    iq: Vec<Complex32>,
+    decoder_agc: Agc,
     channel: Vec<Complex32>,
+    /// The demodulator's envelope for the block, which both AGCs level by.
+    env: Vec<f32>,
+    /// The decoders' audio from the last block.
+    decoder: Vec<f32>,
 }
 
 impl Receiver {
@@ -60,19 +74,25 @@ impl Receiver {
     pub fn new(sample_rate: f64) -> Self {
         let mode = Mode::Usb;
         let passband = mode.default_passband();
+        let shape = FilterShape::default();
+        let decimator = DecimatorKind::default();
         let mut r = Receiver {
             rate: sample_rate,
-            ddc: Ddc::new(sample_rate, AUDIO_RATE),
+            ddc: Ddc::with_kind(sample_rate, AUDIO_RATE, decimator),
+            decimator,
             offset_hz: 0.0,
             mode,
             passband,
-            demod: make_demod(mode, passband),
+            shape,
+            demod: make_demod(mode, passband, shape),
             agc: Agc::new(AUDIO_RATE),
             agc_mode: AgcMode::Med,
             gain_db: 20.0,
             calibration_db: 0.0,
-            iq: Vec::new(),
+            decoder_agc: Agc::with_params(AUDIO_RATE, AgcParams::DECODER),
             channel: Vec::new(),
+            env: Vec::new(),
+            decoder: Vec::new(),
         };
         r.agc.set_mode(r.agc_mode);
         r.agc.set_manual_gain_db(r.gain_db);
@@ -95,9 +115,36 @@ impl Receiver {
             return;
         }
         self.rate = rate;
-        self.ddc = Ddc::new(rate, AUDIO_RATE);
+        self.ddc = Ddc::with_kind(rate, AUDIO_RATE, self.decimator);
         self.ddc.set_offset_hz(self.offset_hz);
-        self.demod = make_demod(self.mode, self.passband);
+        self.demod = make_demod(self.mode, self.passband, self.shape);
+    }
+
+    /// Choose the decimator. Rebuilding it costs one filter's fill of audio.
+    pub fn set_decimator(&mut self, kind: DecimatorKind) {
+        if kind == self.decimator {
+            return;
+        }
+        self.decimator = kind;
+        self.ddc = Ddc::with_kind(self.rate, AUDIO_RATE, kind);
+        self.ddc.set_offset_hz(self.offset_hz);
+    }
+
+    pub fn decimator(&self) -> DecimatorKind {
+        self.decimator
+    }
+
+    /// How steep the passband's skirts are.
+    pub fn set_filter_shape(&mut self, shape: FilterShape) {
+        if shape == self.shape {
+            return;
+        }
+        self.shape = shape;
+        self.demod.set_filter(self.passband.0, self.passband.1, shape);
+    }
+
+    pub fn filter_shape(&self) -> FilterShape {
+        self.shape
     }
 
     /// Where the dial is, in Hz from the centre. Kept inside the span.
@@ -118,7 +165,7 @@ impl Receiver {
         }
         self.mode = mode;
         self.passband = mode.default_passband();
-        self.demod = make_demod(mode, self.passband);
+        self.demod = make_demod(mode, self.passband, self.shape);
     }
 
     pub fn mode(&self) -> Mode {
@@ -141,7 +188,7 @@ impl Receiver {
             hi = lo + 50.0;
         }
         self.passband = (lo, hi);
-        self.demod.set_filter(lo, hi);
+        self.demod.set_filter(lo, hi, self.shape);
     }
 
     pub fn passband(&self) -> (f32, f32) {
@@ -161,6 +208,25 @@ impl Receiver {
 
     pub fn agc(&self) -> AgcMode {
         self.agc_mode
+    }
+
+    /// The listening AGC's attack, decay, hang, target and ceiling. A mode
+    /// set afterwards replaces the hang and decay with its preset's.
+    pub fn set_agc_params(&mut self, p: AgcParams) {
+        self.agc.set_params(p);
+    }
+
+    pub fn agc_params(&self) -> AgcParams {
+        self.agc.params()
+    }
+
+    /// The decoders' AGC, which runs whatever the listening one is doing.
+    pub fn set_decoder_agc(&mut self, p: AgcParams) {
+        self.decoder_agc.set_params(p);
+    }
+
+    pub fn decoder_agc(&self) -> AgcParams {
+        self.decoder_agc.params()
     }
 
     /// The fixed gain applied while the AGC is off, in dB (0 to 120).
@@ -196,33 +262,43 @@ impl Receiver {
 
     /// Consume interleaved I/Q at the device rate and append 48 kHz mono audio
     /// to `out`.
+    ///
+    /// The floats are read in place as complex samples (a [`bytemuck`] view:
+    /// `I, Q` pairs are exactly a `Complex32`'s layout), so the first copy of
+    /// the I/Q is the NCO's output. A trailing odd float is ignored.
     pub fn process(&mut self, iq: &[f32], out: &mut Vec<f32>) {
-        self.iq.clear();
-        self.iq.extend(iq.chunks_exact(2).map(|p| Complex32::new(p[0], p[1])));
-        self.process_complex_inner(out);
+        let iq: &[Complex32] = bytemuck::cast_slice(&iq[..iq.len() & !1]);
+        self.process_complex(iq, out);
     }
 
     /// [`Self::process`] for samples already complex.
     pub fn process_complex(&mut self, iq: &[Complex32], out: &mut Vec<f32>) {
-        self.iq.clear();
-        self.iq.extend_from_slice(iq);
-        self.process_complex_inner(out);
+        self.channel.clear();
+        self.ddc.process(iq, &mut self.channel);
+        let start = out.len();
+        self.env.clear();
+        self.demod.process(&self.channel, out, &mut self.env);
+        self.decoder.clear();
+        self.decoder.extend_from_slice(&out[start..]);
+        self.decoder_agc.process_with_envelope(&mut self.decoder, &self.env);
+        self.agc.process_with_envelope(&mut out[start..], &self.env);
     }
 
-    fn process_complex_inner(&mut self, out: &mut Vec<f32>) {
-        self.channel.clear();
-        self.ddc.process(&self.iq, &mut self.channel);
-        let start = out.len();
-        self.demod.process(&self.channel, out);
-        self.agc.process(&mut out[start..]);
+    /// The decoders' audio for the block [`Self::process`] last ran: the same
+    /// demodulated audio as the listening output, levelled by the decoders'
+    /// own AGC.
+    pub fn decoder_audio(&self) -> &[f32] {
+        &self.decoder
     }
 }
 
-fn make_demod(mode: Mode, (lo, hi): (f32, f32)) -> Box<dyn Demodulator> {
+fn make_demod(mode: Mode, (lo, hi): (f32, f32), shape: FilterShape) -> Box<dyn Demodulator> {
     match mode {
-        Mode::Lsb | Mode::Usb | Mode::Cw | Mode::Cwr => Box::new(SsbDemod::new(AUDIO_RATE, lo, hi)),
-        Mode::Am => Box::new(AmDemod::new(AUDIO_RATE, lo, hi)),
-        Mode::Fm => Box::new(FmDemod::new(AUDIO_RATE, lo, hi)),
+        Mode::Lsb | Mode::Usb | Mode::Cw | Mode::Cwr => {
+            Box::new(SsbDemod::new(AUDIO_RATE, lo, hi, shape))
+        }
+        Mode::Am => Box::new(AmDemod::new(AUDIO_RATE, lo, hi, shape)),
+        Mode::Fm => Box::new(FmDemod::new(AUDIO_RATE, lo, hi, shape)),
     }
 }
 
@@ -415,6 +491,68 @@ mod tests {
         }
         assert!(out[0] > 0.1 && out[1] > 0.1, "{out:?}");
         assert!((20.0 * (out[0] / out[1]).log10()).abs() < 1.0, "{out:?}");
+    }
+
+    /// Both decimators and every filter shape give the same tone at the same
+    /// level: they differ in what they keep out, not in what they let in.
+    #[test]
+    fn every_decimator_and_shape_hears_the_same_tone() {
+        for kind in DecimatorKind::ALL {
+            for shape in FilterShape::ALL {
+                let rate = 1_536_000.0;
+                let mut src = SyntheticSource::new(
+                    rate,
+                    0.0,
+                    -140.0,
+                    vec![SynthSignal::carrier(-201_234.0, -30.0)],
+                );
+                let mut rx = Receiver::new(rate);
+                rx.set_decimator(kind);
+                rx.set_filter_shape(shape);
+                rx.set_offset_hz(-202_000.0);
+                fixed_gain(&mut rx);
+                let audio = run(&mut rx, &mut src, 0.5);
+                let (f, a) = tone(&audio[audio.len() - 12_000..], 766.0);
+                assert!((f - 766.0).abs() <= 2.0, "{kind:?} {shape:?}: tone at {f}");
+                let db = 20.0 * (a / 10f32.powf(-30.0 / 20.0)).log10();
+                assert!(db.abs() < 0.2, "{kind:?} {shape:?}: {db:+.2} dB");
+            }
+        }
+    }
+
+    /// The decoders' feed sits at its own target whatever the listening side
+    /// is set to: here the listening AGC is off at 0 dB, so the speaker gets
+    /// the signal 50 dB down while the decoders get it at −12 dBFS.
+    ///
+    /// Nine seconds, because the filters' ring as the carrier appears is
+    /// briefly above the carrier, the decoders' AGC meets it (it is at most
+    /// half a dB) and then holds for its two-second hang before a
+    /// two-second decay brings it back: slow on purpose.
+    #[test]
+    fn the_decoders_get_their_own_level() {
+        let rate = 192_000.0;
+        let mut src =
+            SyntheticSource::new(rate, 0.0, -200.0, vec![SynthSignal::carrier(13_500.0, -50.0)]);
+        let mut rx = Receiver::new(rate);
+        rx.set_offset_hz(12_500.0);
+        fixed_gain(&mut rx);
+        let total = (9.0 * rate) as usize;
+        let mut buf = vec![0.0f32; 2 * 16_384];
+        let (mut listen, mut decode) = (Vec::new(), Vec::new());
+        let mut done = 0;
+        while done < total {
+            let n = src.read(&mut buf);
+            rx.process(&buf[..n], &mut listen);
+            decode.extend_from_slice(rx.decoder_audio());
+            done += n / 2;
+        }
+        assert_eq!(listen.len(), decode.len());
+        let peak = |x: &[f32]| x.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        let tail = |x: &[f32]| peak(&x[x.len() - 9_600..]);
+        let d = 20.0 * tail(&decode).log10();
+        let l = 20.0 * tail(&listen).log10();
+        assert!((d + 12.0).abs() < 0.1, "decoder feed at {d:.2} dBFS");
+        assert!((l + 50.0).abs() < 0.5, "listening at {l:.2} dBFS");
     }
 
     #[test]

@@ -23,7 +23,10 @@ use crossbeam_channel::{
     Receiver as ChanRx, Sender, TryRecvError, TrySendError, bounded, unbounded,
 };
 
+use crate::agc::AgcParams;
 use crate::audio::AudioFeed;
+use crate::ddc::DecimatorKind;
+use crate::passband::FilterShape;
 use crate::receiver::Receiver;
 use crate::source::IqSource;
 use crate::spectrum::{Averaging, Overlap, Spectrum, SpectrumConfig, SpectrumFrame, Window};
@@ -36,8 +39,10 @@ use crate::zoom::{ZoomRequest, ZoomSpectrum};
 /// full), or the receiver's audio and the radio's USB ring fall behind.
 pub type IqTap = Box<dyn FnMut(&[f32], f64, f64) + Send>;
 
-/// Takes a copy of every block of the receiver's 48 kHz mono audio, on the
-/// pipeline's own thread, under the same rule as [`IqTap`].
+/// Takes a copy of every block of the receiver's 48 kHz mono audio for the
+/// decoders — levelled by the decoders' own AGC, not the listening one (see
+/// [`Receiver::decoder_audio`]) — on the pipeline's own thread, under the
+/// same rule as [`IqTap`].
 pub type AudioTap = Box<dyn FnMut(&[f32]) + Send>;
 
 /// What the UI can ask of the pipeline.
@@ -48,8 +53,16 @@ pub enum Command {
     /// `[low, high]` Hz relative to the dial.
     SetPassband(f32, f32),
     SetAgc(AgcMode),
+    /// The listening AGC's attack, decay, hang and target.
+    SetAgcParams(AgcParams),
+    /// The decoders' AGC.
+    SetDecoderAgc(AgcParams),
     /// Fixed gain while the AGC is off, dB.
     SetGain(f32),
+    /// How the receiver decimates to 48 kHz.
+    SetDecimator(DecimatorKind),
+    /// How steep the passband's skirts are.
+    SetFilterShape(FilterShape),
     SetFftSize(usize),
     SetWindow(Window),
     SetOverlap(Overlap),
@@ -69,8 +82,8 @@ pub enum Command {
     SetZoom(Option<ZoomRequest>),
     /// Copy the I/Q to decoders and outside programs; `None` stops it.
     SetIqTap(Option<IqTap>),
-    /// Copy the receiver's audio to decoders and outside programs, as well
-    /// as to the sound card; `None` stops it.
+    /// Copy the receiver's decoder audio to decoders and outside programs;
+    /// `None` stops it.
     SetAudioTap(Option<AudioTap>),
     /// Stop reading the source (true) or start again.
     Pause(bool),
@@ -86,7 +99,12 @@ pub struct PipelineConfig {
     /// `None` takes the mode's default.
     pub passband: Option<(f32, f32)>,
     pub agc: AgcMode,
+    /// `None` takes the AGC mode's preset.
+    pub agc_params: Option<AgcParams>,
+    pub decoder_agc: AgcParams,
     pub gain_db: f32,
+    pub decimator: DecimatorKind,
+    pub filter_shape: FilterShape,
     /// Frames of history kept.
     pub history: usize,
 }
@@ -99,7 +117,11 @@ impl Default for PipelineConfig {
             mode: Mode::Usb,
             passband: None,
             agc: AgcMode::Med,
+            agc_params: None,
+            decoder_agc: AgcParams::DECODER,
             gain_db: 20.0,
+            decimator: DecimatorKind::default(),
+            filter_shape: FilterShape::default(),
             history: 256,
         }
     }
@@ -131,6 +153,10 @@ pub struct Snapshot {
     pub mode: Mode,
     pub passband: (f32, f32),
     pub agc: AgcMode,
+    pub agc_params: AgcParams,
+    pub decoder_agc: AgcParams,
+    pub decimator: DecimatorKind,
+    pub filter_shape: FilterShape,
     /// The source is still delivering.
     pub alive: bool,
     pub paused: bool,
@@ -253,12 +279,18 @@ fn run(
     let mut rate = source.sample_rate();
     let mut spectrum_cfg = cfg.spectrum;
     let mut receiver = Receiver::new(rate);
+    receiver.set_decimator(cfg.decimator);
+    receiver.set_filter_shape(cfg.filter_shape);
     receiver.set_mode(cfg.mode);
     if let Some((lo, hi)) = cfg.passband {
         receiver.set_passband(lo, hi);
     }
     receiver.set_offset_hz(cfg.offset_hz);
     receiver.set_agc(cfg.agc);
+    if let Some(p) = cfg.agc_params {
+        receiver.set_agc_params(p);
+    }
+    receiver.set_decoder_agc(cfg.decoder_agc);
     receiver.set_gain_db(cfg.gain_db);
     receiver.set_calibration_db(spectrum_cfg.calibration_db);
     let mut audio_feed: Option<AudioFeed> = None;
@@ -295,7 +327,11 @@ fn run(
                         Command::SetMode(m) => receiver.set_mode(m),
                         Command::SetPassband(lo, hi) => receiver.set_passband(lo, hi),
                         Command::SetAgc(a) => receiver.set_agc(a),
+                        Command::SetAgcParams(p) => receiver.set_agc_params(p),
+                        Command::SetDecoderAgc(p) => receiver.set_decoder_agc(p),
                         Command::SetGain(g) => receiver.set_gain_db(g),
+                        Command::SetDecimator(k) => receiver.set_decimator(k),
+                        Command::SetFilterShape(f) => receiver.set_filter_shape(f),
                         Command::SetFftSize(n) => sc.fft_size = n,
                         Command::SetWindow(w) => sc.window = w,
                         Command::SetOverlap(o) => sc.overlap = o,
@@ -389,9 +425,9 @@ fn run(
             f.push(&audio);
         }
         if let Some(tap) = audio_tap.as_mut()
-            && !audio.is_empty()
+            && !receiver.decoder_audio().is_empty()
         {
-            tap(&audio);
+            tap(receiver.decoder_audio());
         }
         busy += t.elapsed();
         samples += (n / 2) as u64;
@@ -413,6 +449,10 @@ fn run(
             s.mode = receiver.mode();
             s.passband = receiver.passband();
             s.agc = receiver.agc();
+            s.agc_params = receiver.agc_params();
+            s.decoder_agc = receiver.decoder_agc();
+            s.decimator = receiver.decimator();
+            s.filter_shape = receiver.filter_shape();
             s.alive = alive;
             s.paused = false;
             s.load = load;

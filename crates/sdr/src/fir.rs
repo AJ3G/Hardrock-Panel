@@ -26,39 +26,39 @@ pub fn bandpass_taps(ntaps: usize, lo_hz: f64, hi_hz: f64, sample_rate: f64) -> 
         .collect()
 }
 
-/// Independent running sums a filter window is walked with — see
+/// Independent running sums the real filter's window is walked with — see
 /// [`crate::decim`], where the same reasoning and the same measurements apply.
 /// A single accumulator makes the whole dot product one dependency chain: every
-/// multiply-accumulate waits on the one before it, and a band-pass long enough
-/// to shape an SSB channel is a chain some hundreds of adds deep.
+/// multiply-accumulate waits on the one before it.
 const FIR_ACCUMULATORS: usize = 8;
 
+/// Outputs [`complex_fir`] computes together: 256 samples, 2 KiB, small
+/// enough to stay in L1 while every tap passes over it.
+const FIR_TILE: usize = 256;
+
 crate::simd::kernel! {
-    /// A complete complex-tap FIR: one dot product per output sample.
+    /// A complete complex-tap FIR, `dst[o] = Σ_k taps[k]·buf[o+k]`.
+    ///
+    /// Computed tap by tap across a tile of outputs rather than output by
+    /// output: each tap adds `taps[k]` times a contiguous run of the input to
+    /// the whole tile. That inner loop has no reduction in it, so it
+    /// vectorises at the full register width; the dot-product form it
+    /// replaces is a floating-point reduction, which the compiler may not
+    /// reorder and so ran two floats wide — see `complex_fir_cost`.
     fn complex_fir / complex_fir_portable / complex_fir_avx2 / complex_fir_avx512 (
         dst: &mut [Complex32],
         buf: &[Complex32],
         taps: &[Complex32],
     ) {
-        let n = taps.len();
-        for (o, d) in dst.iter_mut().enumerate() {
-            let w = &buf[o..o + n];
-            let mut acc = [Complex32::default(); FIR_ACCUMULATORS];
-            let mut ws = w.chunks_exact(FIR_ACCUMULATORS);
-            let mut ts = taps.chunks_exact(FIR_ACCUMULATORS);
-            for (xs, tt) in (&mut ws).zip(&mut ts) {
-                for i in 0..FIR_ACCUMULATORS {
-                    acc[i] += xs[i] * tt[i];
+        for (t, tile) in dst.chunks_mut(FIR_TILE).enumerate() {
+            let o0 = t * FIR_TILE;
+            let len = tile.len();
+            tile.fill(Complex32::default());
+            for (k, &h) in taps.iter().enumerate() {
+                for (a, &b) in tile.iter_mut().zip(&buf[o0 + k..o0 + k + len]) {
+                    *a += b * h;
                 }
             }
-            let mut sum = Complex32::default();
-            for a in acc {
-                sum += a;
-            }
-            for (x, &t) in ws.remainder().iter().zip(ts.remainder()) {
-                sum += x * t;
-            }
-            *d = sum;
         }
     }
 }
@@ -153,5 +153,56 @@ impl RealFir {
         out.resize(start + count, 0.0);
         real_fir(&mut out[start..], &self.buf, &self.taps);
         self.buf.drain(..count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tiled form is the dot product it replaced, over ragged blocks.
+    #[test]
+    fn the_complex_fir_is_its_definition() {
+        let taps = bandpass_taps(331, 300.0, 2700.0, 48_000.0);
+        let x: Vec<Complex32> = (0..5_003)
+            .map(|i| {
+                Complex32::new(((i * 37) % 101) as f32 / 50.0 - 1.0, ((i * 11) % 7) as f32 / 7.0)
+            })
+            .collect();
+        let mut fir = ComplexFir::new(taps.clone());
+        let mut got = Vec::new();
+        for c in x.chunks(613) {
+            fir.process(c, &mut got);
+        }
+        assert_eq!(got.len(), x.len() - taps.len() + 1);
+        for (o, g) in got.iter().enumerate() {
+            let mut w = num_complex::Complex64::new(0.0, 0.0);
+            for (k, h) in taps.iter().enumerate() {
+                let p = x[o + k] * h;
+                w += num_complex::Complex64::new(p.re as f64, p.im as f64);
+            }
+            assert!((g.re as f64 - w.re).abs() < 1e-4 && (g.im as f64 - w.im).abs() < 1e-4, "{o}");
+        }
+    }
+
+    /// Cost per complex multiply-add, in release:
+    /// `cargo test --release -p sdr -- --ignored --nocapture complex_fir_cost`.
+    #[test]
+    #[ignore]
+    fn complex_fir_cost() {
+        let x: Vec<Complex32> = (0..48_000).map(|i| Complex32::new(i as f32, 1.0)).collect();
+        for n in [129usize, 331, 1001, 2001, 6001] {
+            let mut fir = ComplexFir::new(vec![Complex32::new(0.001, 0.0005); n]);
+            let mut out = Vec::new();
+            let best = (0..5)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    out.clear();
+                    fir.process(&x, &mut out);
+                    t.elapsed().as_nanos() as f64 / x.len() as f64
+                })
+                .fold(f64::INFINITY, f64::min);
+            println!("{n} taps: {best:.1} ns a sample, {:.3} ns a multiply-add", best / n as f64);
+        }
     }
 }

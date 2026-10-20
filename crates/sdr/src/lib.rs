@@ -8,7 +8,8 @@
 //! * [`Spectrum`] turns interleaved I/Q into calibrated dB frames for the
 //!   spectrum, 3D and waterfall views.
 //! * [`Receiver`] is one software receiver anywhere inside the span, with its
-//!   own offset, mode, passband and AGC, producing 48 kHz mono audio.
+//!   own offset, mode, passband and AGC, producing 48 kHz mono audio — one
+//!   feed for listening and one, levelled on its own, for the decoders.
 //! * [`AudioOut`] plays that audio on a sound card.
 //! * [`ZoomSpectrum`] is a second spectrum of only the region on screen, at
 //!   full resolution (the zoom FFT).
@@ -24,6 +25,7 @@ pub mod demod;
 pub mod design;
 pub mod fir;
 pub mod nco;
+pub mod passband;
 pub mod pipeline;
 pub mod receiver;
 pub(crate) mod simd;
@@ -33,7 +35,10 @@ pub mod types;
 pub mod window;
 pub mod zoom;
 
+pub use agc::AgcParams;
 pub use audio::{AudioFeed, AudioOut, output_devices};
+pub use ddc::DecimatorKind;
+pub use passband::FilterShape;
 pub use pipeline::{AudioTap, Command, IqTap, Pipeline, PipelineConfig, Snapshot};
 pub use receiver::{AUDIO_RATE, Receiver, SUPPORTED_RATES, decimation_plan};
 pub use source::{EladSource, IqSource, SynthSignal, SyntheticSource};
