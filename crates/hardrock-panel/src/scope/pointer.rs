@@ -1,7 +1,10 @@
 //! What the mouse does on the scope, as SDR Console does it.
 //!
 //! * Press on the receiver marker and drag: tune, snapped to the step.
-//! * Press on a filter edge (spectrum only) and drag: set that edge.
+//! * Press on a filter edge, on the spectrum or the waterfall, and drag: set
+//!   that edge (decision 39: the edges are "poles" in the waterfall too).
+//! * Press inside the passband and drag: tune, the passband carried along
+//!   with the pointer. Just click: tune there.
 //! * Press anywhere else and drag: pan a zoomed view. Just click: tune there.
 //! * Wheel: tune by one step. Ctrl+wheel: zoom about the pointer.
 //! * Double-click: the whole span again.
@@ -25,19 +28,23 @@ pub enum Grab {
     Rx,
     EdgeLo,
     EdgeHi,
+    /// Inside the passband, between its edges.
+    Passband,
 }
 
-/// What is under `x`: a filter edge (when `edges` — the spectrum has them,
-/// the waterfall does not), else the receiver marker, else nothing. The edges
-/// come first because on a narrow filter they sit right beside the marker.
-pub fn grab_at(x: f32, rx_x: f32, lo_x: f32, hi_x: f32, edges: bool) -> Option<Grab> {
-    if edges {
-        let (dl, dh) = ((x - lo_x).abs(), (x - hi_x).abs());
-        if dl < EDGE_GRAB || dh < EDGE_GRAB {
-            return Some(if dl <= dh { Grab::EdgeLo } else { Grab::EdgeHi });
-        }
+/// What is under `x`: a filter edge, else the receiver marker, else the
+/// passband between the edges, else nothing. The edges come first because on
+/// a narrow filter they sit right beside the marker. The spectrum and the
+/// waterfall both have all three.
+pub fn grab_at(x: f32, rx_x: f32, lo_x: f32, hi_x: f32) -> Option<Grab> {
+    let (dl, dh) = ((x - lo_x).abs(), (x - hi_x).abs());
+    if dl < EDGE_GRAB || dh < EDGE_GRAB {
+        return Some(if dl <= dh { Grab::EdgeLo } else { Grab::EdgeHi });
     }
-    ((x - rx_x).abs() < RX_GRAB).then_some(Grab::Rx)
+    if (x - rx_x).abs() < RX_GRAB {
+        return Some(Grab::Rx);
+    }
+    (x > lo_x.min(hi_x) && x < lo_x.max(hi_x)).then_some(Grab::Passband)
 }
 
 /// What a press turned into.
@@ -45,6 +52,8 @@ pub fn grab_at(x: f32, rx_x: f32, lo_x: f32, hi_x: f32, edges: bool) -> Option<G
 pub enum DragKind {
     Rx,
     Edge(Grab),
+    /// The passband, carried along: tunes by how far the pointer has moved.
+    Centre,
     Pan,
 }
 
@@ -56,6 +65,9 @@ pub struct Drag {
     pub x0: f32,
     /// The view when it started, which a pan moves from.
     pub start: View,
+    /// The receiver when it started, which a passband drag moves from (the
+    /// radio's own Hz).
+    pub rx0: f64,
     /// It has gone past [`CLICK_SLOP`], so it is a drag, not a click.
     pub moved: bool,
 }
@@ -63,16 +75,17 @@ pub struct Drag {
 impl Drag {
     /// Begin a press on `grab`. While transmitting, nothing that tunes can be
     /// grabbed: the press can only pan.
-    pub fn press(grab: Option<Grab>, x0: f32, start: View, transmitting: bool) -> Drag {
+    pub fn press(grab: Option<Grab>, x0: f32, start: View, rx0: f64, transmitting: bool) -> Drag {
         // SAFETY INTERLOCK 9: no tuning or filter change from the scope while
         // the radio transmits, so a stray drag never moves a keyed signal.
         let kind = match grab {
             _ if transmitting => DragKind::Pan,
             Some(Grab::Rx) => DragKind::Rx,
+            Some(Grab::Passband) => DragKind::Centre,
             Some(g) => DragKind::Edge(g),
             None => DragKind::Pan,
         };
-        Drag { kind, x0, start, moved: false }
+        Drag { kind, x0, start, rx0, moved: false }
     }
 
     /// The pointer is at `x`: note whether this is now a drag.
@@ -85,7 +98,14 @@ impl Drag {
     /// Released: was it a click that tunes?
     pub fn is_click_to_tune(&self, transmitting: bool) -> bool {
         // SAFETY INTERLOCK 9, as above.
-        !self.moved && self.kind == DragKind::Pan && !transmitting
+        !self.moved && matches!(self.kind, DragKind::Pan | DragKind::Centre) && !transmitting
+    }
+
+    /// The receiver for a passband drag with the pointer at `x` on a plot
+    /// `width_px` wide: where it started, moved by as many Hz as the pointer
+    /// has, in the view the drag started in.
+    pub fn centre_to(&self, x: f32, width_px: f32) -> f64 {
+        self.rx0 + ((x - self.x0) / width_px.max(1.0)) as f64 * self.start.width()
     }
 }
 
@@ -150,32 +170,49 @@ mod tests {
     const V: View = View { lo: 14e6, hi: 14.192e6 };
 
     #[test]
-    fn edges_win_over_the_marker_and_only_on_the_spectrum() {
-        // Marker at 100, filter 104..130.
-        assert_eq!(grab_at(103.0, 100.0, 104.0, 130.0, true), Some(Grab::EdgeLo));
-        assert_eq!(grab_at(128.0, 100.0, 104.0, 130.0, true), Some(Grab::EdgeHi));
-        assert_eq!(grab_at(97.0, 100.0, 104.0, 130.0, true), Some(Grab::Rx));
-        assert_eq!(grab_at(103.0, 100.0, 104.0, 130.0, false), Some(Grab::Rx));
-        assert_eq!(grab_at(118.0, 100.0, 104.0, 130.0, true), None);
-        assert_eq!(grab_at(300.0, 100.0, 104.0, 130.0, true), None);
+    fn edges_win_over_the_marker_then_the_passband() {
+        // Marker at 100, filter 104..130, on the spectrum or the waterfall.
+        assert_eq!(grab_at(103.0, 100.0, 104.0, 130.0), Some(Grab::EdgeLo));
+        assert_eq!(grab_at(128.0, 100.0, 104.0, 130.0), Some(Grab::EdgeHi));
+        assert_eq!(grab_at(135.5, 100.0, 104.0, 130.0), Some(Grab::EdgeHi));
+        assert_eq!(grab_at(97.0, 100.0, 104.0, 130.0), Some(Grab::Rx));
+        assert_eq!(grab_at(118.0, 100.0, 104.0, 130.0), Some(Grab::Passband));
+        assert_eq!(grab_at(300.0, 100.0, 104.0, 130.0), None);
+        // LSB: the passband is left of the marker.
+        assert_eq!(grab_at(80.0, 100.0, 70.0, 96.0), Some(Grab::Passband));
+        assert_eq!(grab_at(70.5, 100.0, 70.0, 96.0), Some(Grab::EdgeLo));
+    }
+
+    #[test]
+    fn dragging_the_passband_tunes_by_the_pointers_travel() {
+        // 192 kHz across 960 points: 200 Hz a point.
+        let d = Drag::press(Some(Grab::Passband), 500.0, V, 14_074_000.0, false);
+        assert_eq!(d.kind, DragKind::Centre);
+        assert!((d.centre_to(510.0, 960.0) - 14_076_000.0).abs() < 0.5);
+        assert!((d.centre_to(495.0, 960.0) - 14_073_000.0).abs() < 0.5);
+        // Not moved, it is a click that tunes, as on empty spectrum.
+        assert!(d.is_click_to_tune(false));
+        assert!(!d.is_click_to_tune(true));
+        // While transmitting it can only pan.
+        assert_eq!(Drag::press(Some(Grab::Passband), 0.0, V, 0.0, true).kind, DragKind::Pan);
     }
 
     #[test]
     fn a_press_drags_what_it_grabbed_unless_transmitting() {
-        assert_eq!(Drag::press(Some(Grab::Rx), 0.0, V, false).kind, DragKind::Rx);
+        assert_eq!(Drag::press(Some(Grab::Rx), 0.0, V, 0.0, false).kind, DragKind::Rx);
         assert_eq!(
-            Drag::press(Some(Grab::EdgeHi), 0.0, V, false).kind,
+            Drag::press(Some(Grab::EdgeHi), 0.0, V, 0.0, false).kind,
             DragKind::Edge(Grab::EdgeHi)
         );
-        assert_eq!(Drag::press(None, 0.0, V, false).kind, DragKind::Pan);
+        assert_eq!(Drag::press(None, 0.0, V, 0.0, false).kind, DragKind::Pan);
         for g in [Some(Grab::Rx), Some(Grab::EdgeLo), None] {
-            assert_eq!(Drag::press(g, 0.0, V, true).kind, DragKind::Pan);
+            assert_eq!(Drag::press(g, 0.0, V, 0.0, true).kind, DragKind::Pan);
         }
     }
 
     #[test]
     fn a_click_tunes_and_a_drag_does_not() {
-        let mut d = Drag::press(None, 50.0, V, false);
+        let mut d = Drag::press(None, 50.0, V, 0.0, false);
         d.moved_to(52.5);
         assert!(d.is_click_to_tune(false));
         assert!(!d.is_click_to_tune(true), "never while transmitting");
@@ -185,7 +222,7 @@ mod tests {
         d.moved_to(50.0);
         assert!(d.moved);
         // A press on the marker is never a click-to-tune; it tunes by dragging.
-        let r = Drag::press(Some(Grab::Rx), 50.0, V, false);
+        let r = Drag::press(Some(Grab::Rx), 50.0, V, 0.0, false);
         assert!(!r.is_click_to_tune(false));
     }
 

@@ -125,9 +125,9 @@ pub(super) fn tft(
 
     // The mouse on the spectrum and the waterfall.
     let spec_resp = ui.interact(spec_plot, ui.id().with("scope-spec"), Sense::click_and_drag());
-    pointer_on(sc, ui, &spec_resp, spec_plot, true, cx, out);
+    pointer_on(sc, ui, &spec_resp, spec_plot, cx, out);
     let wf_resp = ui.interact(wf_plot, ui.id().with("scope-wf"), Sense::click_and_drag());
-    pointer_on(sc, ui, &wf_resp, wf_plot, false, cx, out);
+    pointer_on(sc, ui, &wf_resp, wf_plot, cx, out);
 
     top_bar(sc, ui, tbar, cx, snap);
     status_bars(sc, ui, status, diag, cx, snap);
@@ -809,12 +809,31 @@ fn paint_waterfall(
         }
     }
 
-    // The receiver and its passband, faintly.
+    // The receiver, and its passband's edges as poles that can be grabbed
+    // here as on the spectrum: a line down the waterfall with a handle at
+    // its top, brighter under the pointer and while dragged.
     let x = |f: f64| v.x_of(f, rect.left(), rect.width());
     let rx = cx.rig.rx_hz;
     p.vline(x(rx).round() + 0.5, rect.y_range(), Stroke::new(1.0, ink().gamma_multiply(0.6)));
-    for e in [cx.rig.passband.0, cx.rig.passband.1] {
-        p.vline(x(rx + e as f64), rect.y_range(), Stroke::new(1.0, accent().gamma_multiply(0.45)));
+    let (ea, eb) = (x(rx + cx.rig.passband.0 as f64), x(rx + cx.rig.passband.1 as f64));
+    let hover = ui
+        .ctx()
+        .pointer_hover_pos()
+        .filter(|q| rect.contains(*q) && sc.drag.is_none() && !cx.rig.transmitting)
+        .and_then(|q| pointer::grab_at(q.x, x(rx), ea, eb));
+    let dragging = sc.drag.map(|d| d.kind);
+    for (ex, g) in [(ea, Grab::EdgeLo), (eb, Grab::EdgeHi)] {
+        let hot = hover == Some(g) || dragging == Some(DragKind::Edge(g));
+        let c = if hot { accent() } else { accent().gamma_multiply(0.55) };
+        p.vline(ex, rect.y_range(), Stroke::new(if hot { 2.0 } else { 1.0 }, c));
+        p.rect_filled(Rect::from_center_size(pos2(ex, rect.top() + 12.0), vec2(6.0, 16.0)), 1.0, c);
+    }
+    if hover == Some(Grab::Passband) || dragging == Some(DragKind::Centre) {
+        p.rect_filled(
+            Rect::from_x_y_ranges(ea.min(eb)..=ea.max(eb), rect.y_range()),
+            0.0,
+            accent().gamma_multiply(0.10),
+        );
     }
     for m in sc.markers.m.iter().flatten() {
         p.add(Shape::dashed_line(
@@ -953,14 +972,12 @@ fn grip(sc: &mut Scope, ui: &mut egui::Ui, rect: Rect, split: bool) {
     }
 }
 
-/// The mouse on the spectrum (`edges`: the filter edges can be grabbed there)
-/// or the waterfall.
+/// The mouse on the spectrum or the waterfall: the same on both.
 fn pointer_on(
     sc: &mut Scope,
     ui: &mut egui::Ui,
     resp: &egui::Response,
     rect: Rect,
-    edges: bool,
     cx: &Ctx,
     out: &mut ScopeOut,
 ) {
@@ -989,10 +1006,10 @@ fn pointer_on(
         && sc.marker_drag.is_none()
         && let Some(pos) = here
     {
-        let g = if tx { None } else { grab_at(pos.x, x(rx), lo_x, hi_x, edges) };
+        let g = if tx { None } else { grab_at(pos.x, x(rx), lo_x, hi_x) };
         let m = marker_at(pos.x);
         let icon = match (g, m) {
-            (Some(Grab::Rx), _) => CursorIcon::Grab,
+            (Some(Grab::Rx | Grab::Passband), _) => CursorIcon::Grab,
             (Some(_), _) | (None, Some(_)) => CursorIcon::ResizeHorizontal,
             _ if tx => CursorIcon::NotAllowed,
             _ => CursorIcon::Crosshair,
@@ -1007,6 +1024,7 @@ fn pointer_on(
                 format_args!("{:.4}", shown / 1e6),
                 match (g, m) {
                     (Some(Grab::Rx), _) => "drag to tune",
+                    (Some(Grab::Passband), _) => "drag to tune with the passband · click to tune",
                     (Some(_), _) => "drag to set the filter",
                     (None, Some(_)) => "drag the marker",
                     _ => "click to tune · right-click for a marker",
@@ -1019,15 +1037,15 @@ fn pointer_on(
     if pressed && let Some(pos) = here {
         if let Some(i) = marker_at(pos.x).filter(|_| {
             !matches!(
-                grab_at(pos.x, x(rx), lo_x, hi_x, edges),
-                Some(Grab::Rx) | Some(Grab::EdgeLo) | Some(Grab::EdgeHi)
+                grab_at(pos.x, x(rx), lo_x, hi_x),
+                Some(Grab::Rx | Grab::EdgeLo | Grab::EdgeHi)
             ) || tx
         }) {
             sc.marker_drag = Some(i);
             sc.markers.active = i;
         } else {
-            let g = grab_at(pos.x, x(rx), lo_x, hi_x, edges);
-            sc.drag = Some(Drag::press(g, pos.x, v, tx));
+            let g = grab_at(pos.x, x(rx), lo_x, hi_x);
+            sc.drag = Some(Drag::press(g, pos.x, v, rx, tx));
         }
     }
 
@@ -1048,7 +1066,13 @@ fn pointer_on(
                         out.tune_to = Some(cx.map.radio(f));
                         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
                     }
+                    DragKind::Centre if !tx => {
+                        let f = view::snap(cx.map.shown(d.centre_to(pos.x, rect.width())), step);
+                        out.tune_to = Some(cx.map.radio(f));
+                        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                    }
                     DragKind::Edge(g) if !tx => {
+                        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
                         let pb = drag_edge(cx.rig.mode, g, f_at(pos.x) - rx, cx.rig.passband);
                         out.passband = Some(pb);
                         sc.digi = None;
