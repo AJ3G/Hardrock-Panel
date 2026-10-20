@@ -81,7 +81,10 @@ enum State {
     Hunt,
     /// Collecting frame characters; `bcs_remaining` counts the two BCS
     /// bytes once the suffix has been seen.
-    Collect { suffix_seen: bool, bcs_remaining: u8 },
+    Collect {
+        suffix_seen: bool,
+        bcs_remaining: u8,
+    },
 }
 
 pub struct Deframer {
@@ -219,10 +222,8 @@ impl Deframer {
             NAK => None,
             c => Some(c as char),
         };
-        let label: String = body[9..11]
-            .iter()
-            .map(|&c| if c == DEL { 'd' } else { c as char })
-            .collect();
+        let label: String =
+            body[9..11].iter().map(|&c| if c == DEL { 'd' } else { c as char }).collect();
         let block_id = match body[11] {
             0 => None,
             c => Some(c as char),

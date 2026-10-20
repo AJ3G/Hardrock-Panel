@@ -61,8 +61,7 @@ pub fn classify(label: &str) -> Option<QSeries> {
         return None;
     }
     let c = b[1];
-    let in_family = c.is_ascii_digit() && (b'0'..=b'7').contains(&c)
-        || (b'A'..=b'X').contains(&c);
+    let in_family = c.is_ascii_digit() && (b'0'..=b'7').contains(&c) || (b'A'..=b'X').contains(&c);
     if !in_family {
         return None;
     }

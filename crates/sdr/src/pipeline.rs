@@ -167,7 +167,10 @@ impl Pipeline {
         let s = shared.clone();
         let join = std::thread::Builder::new()
             .name("sdr-pipeline".into())
-            .spawn(move || run(source, cfg, rx, s))
+            .spawn(move || {
+                elad_iq::priority::raise_current_thread(elad_iq::priority::Priority::Highest);
+                run(source, cfg, rx, s)
+            })
             .expect("spawn the DSP thread");
         Pipeline { tx, shared, join: Some(join) }
     }

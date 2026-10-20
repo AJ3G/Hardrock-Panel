@@ -61,17 +61,11 @@ fn bits_to_octets(bits: &[u8]) -> Vec<u8> {
     // assembled this way (verified bit-true against dumpvdl2 on the
     // off-air GSIF bursts — MSB packing makes the RS reject perfect
     // codewords).
-    bits.chunks(8)
-        .map(|c| c.iter().enumerate().fold(0u8, |b, (i, &v)| b | (v << i)))
-        .collect()
+    bits.chunks(8).map(|c| c.iter().enumerate().fold(0u8, |b, (i, &v)| b | (v << i))).collect()
 }
 
 fn octets_to_bits(octets: &[u8], nbits: usize) -> Vec<u8> {
-    octets
-        .iter()
-        .flat_map(|&o| (0..8).map(move |i| (o >> i) & 1))
-        .take(nbits)
-        .collect()
+    octets.iter().flat_map(|&o| (0..8).map(move |i| (o >> i) & 1)).take(nbits).collect()
 }
 
 /// TX: data bits → transmitted post-header bit stream (RS-encoded,
@@ -96,8 +90,7 @@ pub fn interleave(data_bits: &[u8], rs: &ReedSolomon) -> Vec<u8> {
         for (r, row) in grid.iter().enumerate() {
             let n = lay.rows[r];
             let k = lay.checks[r];
-            let transmitted =
-                (col < n) || (col >= ROW_DATA_OCTETS && col < ROW_DATA_OCTETS + k);
+            let transmitted = (col < n) || (col >= ROW_DATA_OCTETS && col < ROW_DATA_OCTETS + k);
             if transmitted {
                 out_octets.push(row[col]);
             }
@@ -157,8 +150,7 @@ pub fn deinterleave_soft(
         for r in 0..c {
             let n = lay.rows[r];
             let k = lay.checks[r];
-            let transmitted =
-                (col < n) || (col >= ROW_DATA_OCTETS && col < ROW_DATA_OCTETS + k);
+            let transmitted = (col < n) || (col >= ROW_DATA_OCTETS && col < ROW_DATA_OCTETS + k);
             if transmitted {
                 let (&o, &cf) = it.next()?;
                 grid[r][col] = o;

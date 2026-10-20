@@ -92,9 +92,7 @@ fn cpr_encode(lat: f64, lon: f64, odd: bool) -> (u32, u32) {
 /// 0 (= "no altitude") when out of the encodable range.
 fn encode_alt12(alt_ft: i32) -> u32 {
     let target = (alt_ft as f64 / 25.0).round() as i32 * 25;
-    (1u32..4096)
-        .find(|&ac| ac & 0x10 != 0 && altitude12(ac) == Some(target))
-        .unwrap_or(0)
+    (1u32..4096).find(|&ac| ac & 0x10 != 0 && altitude12(ac) == Some(target)).unwrap_or(0)
 }
 
 /// The 6-bit ADS-B callsign charset index for an ASCII byte (A–Z, 0–9, space);
@@ -305,7 +303,8 @@ mod tests {
         let me = &f[4..11];
         let bit = |i: usize| (me[i / 8] >> (7 - i % 8)) & 1;
         let field = |s: usize, l: usize| (s..s + l).fold(0u32, |v, i| (v << 1) | bit(i) as u32);
-        let cs: String = (0..8).map(|k| IDENT_CHARSET[field(8 + 6 * k, 6) as usize] as char).collect();
+        let cs: String =
+            (0..8).map(|k| IDENT_CHARSET[field(8 + 6 * k, 6) as usize] as char).collect();
         assert_eq!(cs.trim_end(), "KLM1023");
     }
 
@@ -349,13 +348,30 @@ mod tests {
         );
         assert_eq!(v.len(), 4, "even + odd + ident + velocity");
         // Position only (no callsign, no velocity) → just the even/odd pair.
-        let p =
-            synth_frames(EsSource::Adsb, 0x40621D, Some(52.2), Some(3.9), None, None, None, None, None);
+        let p = synth_frames(
+            EsSource::Adsb,
+            0x40621D,
+            Some(52.2),
+            Some(3.9),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(p.len(), 2, "even + odd");
         // No position → nothing (a payload-less ES is pointless).
-        assert!(
-            synth_frames(EsSource::Adsb, 0x40621D, None, None, Some(35000), None, None, None, None)
-                .is_empty()
-        );
+        assert!(synth_frames(
+            EsSource::Adsb,
+            0x40621D,
+            None,
+            None,
+            Some(35000),
+            None,
+            None,
+            None,
+            None
+        )
+        .is_empty());
     }
 }

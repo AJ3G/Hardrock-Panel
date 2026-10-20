@@ -49,9 +49,8 @@ fn gmsk_qtilde(t: f32) -> f32 {
     // Cached lookup: the erf integration below is only run once to fill
     // a fine table (the function is called per waveform sample).
     static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
-    let table = TABLE.get_or_init(|| {
-        (0..=1200).map(|i| gmsk_qtilde_exact(-3.0 + i as f32 * 0.005)).collect()
-    });
+    let table = TABLE
+        .get_or_init(|| (0..=1200).map(|i| gmsk_qtilde_exact(-3.0 + i as f32 * 0.005)).collect());
     if t <= -3.0 {
         return 0.0;
     }
@@ -70,8 +69,7 @@ fn gmsk_qtilde_exact(t: f32) -> f32 {
         let x = x.abs();
         let t = 1.0 / (1.0 + 0.327_591_1 * x);
         let y = 1.0
-            - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t
-                - 0.284_496_736)
+            - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736)
                 * t
                 + 0.254_829_592)
                 * t
@@ -86,12 +84,17 @@ fn gmsk_qtilde_exact(t: f32) -> f32 {
     let mut acc = 0.0f32;
     let mut u = -3.0f32;
     while u < t.min(3.0) {
-        let g = 0.5 * (erf(a * (u + 0.5) / std::f32::consts::SQRT_2)
-            - erf(a * (u - 0.5) / std::f32::consts::SQRT_2));
+        let g = 0.5
+            * (erf(a * (u + 0.5) / std::f32::consts::SQRT_2)
+                - erf(a * (u - 0.5) / std::f32::consts::SQRT_2));
         acc += g * 0.01;
         u += 0.01;
     }
-    if t >= 3.0 { 1.0 } else { acc.clamp(0.0, 1.0) }
+    if t >= 3.0 {
+        1.0
+    } else {
+        acc.clamp(0.0, 1.0)
+    }
 }
 
 /// Per-(prev,cur,next) middle-bit waveforms: 5 samples of relative
@@ -105,10 +108,10 @@ fn gmsk_bit_waveforms() -> [[f32; SPB]; 8] {
         let ln = if idx & 1 != 0 { 1.0f32 } else { -1.0 };
         for (j, v) in w.iter_mut().enumerate() {
             let t = (j as f32 + 0.5) / SPB as f32; // within [0,1) of cur bit
-            // φ_rel(t) = (π/2)[ lp·q̃(t+1) + lc·q̃(t) + ln·q̃(t−1) ]
-            // minus lp's completed value at the window start reference
-            // (the state's quadrant holds Σ levels through prev−1, and
-            // prev's pulse is still partially in flight).
+                                                   // φ_rel(t) = (π/2)[ lp·q̃(t+1) + lc·q̃(t) + ln·q̃(t−1) ]
+                                                   // minus lp's completed value at the window start reference
+                                                   // (the state's quadrant holds Σ levels through prev−1, and
+                                                   // prev's pulse is still partially in flight).
             *v = (PI / 2.0)
                 * (lp * gmsk_qtilde(t + 1.0) + lc * gmsk_qtilde(t) + ln * gmsk_qtilde(t - 1.0));
         }
@@ -296,8 +299,7 @@ impl CoherentDemod {
 
     /// Max effort lowers the anchor threshold to the deep-weak floor.
     pub fn set_max_effort(&mut self, max: bool) {
-        self.corr_threshold =
-            if max { CORR_THRESHOLD_MAX } else { CORR_THRESHOLD_LIVE };
+        self.corr_threshold = if max { CORR_THRESHOLD_MAX } else { CORR_THRESHOLD_LIVE };
     }
 
     /// Feed samples; returns decoded post-flag bit vectors (NRZI already
@@ -404,8 +406,8 @@ impl CoherentDemod {
             if rel + SPB * 64 + self.template.len() + SPB >= self.buf.len() {
                 break;
             }
-            let p: f32 = self.buf.iter().skip(rel).take(SPB).map(|c| c.norm_sqr()).sum::<f32>()
-                / SPB as f32;
+            let p: f32 =
+                self.buf.iter().skip(rel).take(SPB).map(|c| c.norm_sqr()).sum::<f32>() / SPB as f32;
             if p < self.noise * GATE_FACTOR {
                 self.noise += NOISE_ALPHA * (p - self.noise);
                 self.cursor += SPB as u64;
@@ -524,9 +526,9 @@ impl CoherentDemod {
         let span = SPB * 64; // search ~64 bits ahead of the gate
         let mut best = (0.0f32, 0usize);
         let buf = self.buf.as_slices().0; // contiguous after make_contiguous
-        // Stride-2 coarse pass, then ±1 refinement around the winner:
-        // the metric's peak is several samples wide and the fractional
-        // refine absorbs ±1 anyway. Halves the hunt cost.
+                                          // Stride-2 coarse pass, then ±1 refinement around the winner:
+                                          // the metric's peak is several samples wide and the fractional
+                                          // refine absorbs ±1 anyway. Halves the hunt cost.
         let mut off = 0;
         while off < span {
             let s0 = rel + off;
@@ -572,11 +574,21 @@ impl CoherentDemod {
         // these run only on anchored bursts. Live trims the CFO wings
         // (the off-air rescues came from gain/timing, not CFO).
         const HYP_MAX: &[(f32, f32)] = &[
-            (0.0, 0.25), (0.0, 0.1), (0.0, 0.0),
-            (-60.0, 0.25), (-60.0, 0.1), (-60.0, 0.0),
-            (60.0, 0.25), (60.0, 0.1), (60.0, 0.0),
-            (-120.0, 0.25), (-120.0, 0.1), (-120.0, 0.0),
-            (120.0, 0.25), (120.0, 0.1), (120.0, 0.0),
+            (0.0, 0.25),
+            (0.0, 0.1),
+            (0.0, 0.0),
+            (-60.0, 0.25),
+            (-60.0, 0.1),
+            (-60.0, 0.0),
+            (60.0, 0.25),
+            (60.0, 0.1),
+            (60.0, 0.0),
+            (-120.0, 0.25),
+            (-120.0, 0.1),
+            (-120.0, 0.0),
+            (120.0, 0.25),
+            (120.0, 0.1),
+            (120.0, 0.0),
         ];
         let hyp = HYP_MAX;
         let mut out = Vec::new();
@@ -648,9 +660,7 @@ impl CoherentDemod {
             }
         }
         let window: Vec<Complex<f32>> = if best_frac.1 != 0.0 {
-            (0..window.len())
-                .map(|i| sample_frac(window, i as f32 + best_frac.1))
-                .collect()
+            (0..window.len()).map(|i| sample_frac(window, i as f32 + best_frac.1)).collect()
         } else {
             window.to_vec()
         };
@@ -687,7 +697,6 @@ impl CoherentDemod {
         let step = Complex::from_polar(1.0, -2.0 * PI * cfo / self.fs);
         let rot = Complex::from_polar(1.0, -phase0)
             * Complex::from_polar(1.0, -2.0 * PI * cfo / self.fs * tmpl_len as f32);
-
 
         // Start one bit early, on the template's KNOWN last bit: it
         // anchors the state (quadrant + both in-flight levels) and the
@@ -808,7 +817,6 @@ impl CoherentDemod {
         // First emission is the known template bit — drop it.
         Some(bits_rev[1..].to_vec())
     }
-
 }
 
 #[cfg(test)]

@@ -145,8 +145,7 @@ mod tests {
         let mut bits = random_bits(400, 2);
         bits.extend([0; 6]);
         let coded = v.encode(&bits);
-        let mut soft: Vec<f32> =
-            coded.iter().map(|&b| if b == 1 { 1.0 } else { -1.0 }).collect();
+        let mut soft: Vec<f32> = coded.iter().map(|&b| if b == 1 { 1.0 } else { -1.0 }).collect();
         // Flip ~4% of coded symbols, spread out.
         for i in (7..soft.len()).step_by(25) {
             soft[i] = -soft[i];

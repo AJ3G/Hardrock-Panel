@@ -30,11 +30,8 @@ pub fn parse(text: &str) -> Option<serde_json::Value> {
             ptr = &payload[pos..];
             continue;
         }
-        let cleaned: String =
-            payload.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
-        let bin = base64::engine::general_purpose::STANDARD
-            .decode(cleaned.as_bytes())
-            .ok()?;
+        let cleaned: String = payload.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
+        let bin = base64::engine::general_purpose::STANDARD.decode(cleaned.as_bytes()).ok()?;
         // The payload is a zlib stream (CMF/FLG header + raw deflate).
         let inflated = miniz_oxide::inflate::decompress_to_vec_zlib(&bin).ok()?;
         return serde_json::from_slice(&inflated).ok();

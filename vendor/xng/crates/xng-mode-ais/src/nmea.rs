@@ -96,10 +96,8 @@ impl SentenceBuilder {
             .enumerate()
             .map(|(i, frag)| {
                 let frag_fill = if i == total - 1 { fill } else { 0 };
-                let body = format!(
-                    "AIVDM,{total},{},{seq_field},{channel},{frag},{frag_fill}",
-                    i + 1
-                );
+                let body =
+                    format!("AIVDM,{total},{},{seq_field},{channel},{frag},{frag_fill}", i + 1);
                 format!("!{body}*{:02X}", checksum(&body))
             })
             .collect()

@@ -311,7 +311,11 @@ pub fn decode(label: &str, text: &str) -> Option<Oooi> {
         _ => return None,
     }
 
-    if o.is_empty() { None } else { Some(o) }
+    if o.is_empty() {
+        None
+    } else {
+        Some(o)
+    }
 }
 
 #[cfg(test)]

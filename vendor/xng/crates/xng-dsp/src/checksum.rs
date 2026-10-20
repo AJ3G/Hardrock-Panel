@@ -6,7 +6,7 @@
 //!   init 0xFFFF, xorout 0xFFFF).
 //! - CRC-16/CCITT-FALSE kept for modes that use the unreflected variant.
 
-use crc::{Crc, CRC_16_IBM_SDLC, CRC_16_KERMIT, CRC_16_IBM_3740};
+use crc::{Crc, CRC_16_IBM_3740, CRC_16_IBM_SDLC, CRC_16_KERMIT};
 
 /// Mode S CRC-24 (ICAO Annex 10 Vol IV), generator 0xFFF409, MSB-first,
 /// no init/xorout. A valid frame whose parity field is not overlaid with
@@ -78,13 +78,11 @@ mod tests {
         // Extended squitter examples from the open Mode S literature
         // ("The 1090 MHz Riddle"): parity is the last 3 bytes, so the
         // remainder over the full frame is 0.
-        let id_frame: [u8; 14] = [
-            0x8D, 0x48, 0x40, 0xD6, 0x20, 0x2C, 0xC3, 0x71, 0xC3, 0x2C, 0xE0, 0x57, 0x60, 0x98,
-        ];
+        let id_frame: [u8; 14] =
+            [0x8D, 0x48, 0x40, 0xD6, 0x20, 0x2C, 0xC3, 0x71, 0xC3, 0x2C, 0xE0, 0x57, 0x60, 0x98];
         assert_eq!(mode_s_crc(&id_frame), 0);
-        let pos_frame: [u8; 14] = [
-            0x8D, 0x40, 0x62, 0x1D, 0x58, 0xC3, 0x82, 0xD6, 0x90, 0xC8, 0xAC, 0x28, 0x63, 0xA7,
-        ];
+        let pos_frame: [u8; 14] =
+            [0x8D, 0x40, 0x62, 0x1D, 0x58, 0xC3, 0x82, 0xD6, 0x90, 0xC8, 0xAC, 0x28, 0x63, 0xA7];
         assert_eq!(mode_s_crc(&pos_frame), 0);
         // Corruption must produce a nonzero remainder.
         let mut bad = id_frame;

@@ -16,7 +16,13 @@ impl Noise {
 
 fn acars_mpdu() -> Vec<u8> {
     let block = xng_acars::block::build(
-        '2', "N471XG", None, "B6", '4', Some("M11A"), Some("UA0042"),
+        '2',
+        "N471XG",
+        None,
+        "B6",
+        '4',
+        Some("M11A"),
+        Some("UA0042"),
         "/BOMASAI.ADS.VT-ANB072501A070A988CA73248F0E5DC10200000F5EE1ABC000102B885E0A19F5",
         false,
     );
@@ -123,7 +129,12 @@ fn fec_corrected_is_populated_under_noise() {
 /// the +1440 Hz subcarrier, so the recovered `freq_skew_hz` is the residual
 /// CFO) with a controllable noise amplitude. Returns decoded events, which
 /// carry the demod-measured `freq_skew_hz`/`snr_db` (HFDL-5).
-fn run_quality(setting_idx: usize, payload: &[u8], cfo: f64, noise_amp: f32) -> Vec<pdu::HfdlEvent> {
+fn run_quality(
+    setting_idx: usize,
+    payload: &[u8],
+    cfo: f64,
+    noise_amp: f32,
+) -> Vec<pdu::HfdlEvent> {
     let s = &SETTINGS[setting_idx];
     let syms = burst_symbols(payload, s);
     // The decoder applies the +1440 Hz subcarrier shift internally, so the
@@ -155,10 +166,7 @@ fn freq_skew_tracks_injected_cfo() {
         let skew = e.freq_skew_hz.expect("freq_skew_hz populated on demod path") as f64;
         // Recovered estimate within a few Hz of truth at this SNR (observed
         // sub-Hz on these vectors; bound kept loose for noise robustness).
-        assert!(
-            (skew - cfo).abs() < 5.0,
-            "freq_skew_hz {skew} should track injected CFO {cfo}"
-        );
+        assert!((skew - cfo).abs() < 5.0, "freq_skew_hz {skew} should track injected CFO {cfo}");
     }
 }
 

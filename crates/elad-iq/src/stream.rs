@@ -114,6 +114,9 @@ pub(crate) fn spawn(cfg: &EladConfig, center_hz: f64) -> Result<EladHandle> {
     let join = std::thread::Builder::new()
         .name("elad-iq".into())
         .spawn(move || {
+            // Kept clear of the UI and the DSP so the radio's buffer never
+            // overruns (see `priority`).
+            crate::priority::raise_current_thread(crate::priority::Priority::TimeCritical);
             run(
                 cfg,
                 center_hz,

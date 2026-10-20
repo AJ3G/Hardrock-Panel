@@ -291,9 +291,7 @@ mod hex_bytes {
                 }
                 (0..h.len())
                     .step_by(2)
-                    .map(|i| {
-                        u8::from_str_radix(&h[i..i + 2], 16).map_err(serde::de::Error::custom)
-                    })
+                    .map(|i| u8::from_str_radix(&h[i..i + 2], 16).map_err(serde::de::Error::custom))
                     .collect::<Result<Vec<u8>, _>>()
                     .map(Some)
             }
@@ -311,7 +309,11 @@ mod tests {
             mode: Mode::AcarsPoa,
             timestamp: Utc::now(),
             frequency_hz: 131_550_000,
-            signal: SignalQuality { rssi_db: Some(-21.5), snr_db: Some(12.0), ..Default::default() },
+            signal: SignalQuality {
+                rssi_db: Some(-21.5),
+                snr_db: Some(12.0),
+                ..Default::default()
+            },
             decode: DecodeQuality { crc_ok: true, ..Default::default() },
             body: MessageBody::Acars(AcarsCore {
                 mode: '2',

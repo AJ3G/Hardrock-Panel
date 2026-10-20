@@ -22,8 +22,7 @@ fn single_bit_fix(syndrome: u32, nbytes: usize) -> Option<usize> {
         for bit in 0..112usize {
             let mut msg = [0u8; 14];
             msg[bit / 8] = 0x80 >> (bit % 8);
-            let syn = mode_s_crc(&msg[..11])
-                ^ u32::from_be_bytes([0, msg[11], msg[12], msg[13]]);
+            let syn = mode_s_crc(&msg[..11]) ^ u32::from_be_bytes([0, msg[11], msg[12], msg[13]]);
             map.insert(syn, bit);
         }
         map
@@ -281,11 +280,7 @@ impl FrameValidator {
         // addresses are random and never repeat; FIFO-ish eviction by
         // age keeps it small).
         if self.pending.len() >= 64 {
-            let oldest = self
-                .pending
-                .iter()
-                .min_by_key(|(_, (_, _, _, at))| *at)
-                .map(|(k, _)| *k);
+            let oldest = self.pending.iter().min_by_key(|(_, (_, _, _, at))| *at).map(|(k, _)| *k);
             if let Some(k) = oldest {
                 self.pending.remove(&k);
             }
@@ -379,9 +374,8 @@ fn decode_extended_squitter(me: &[u8], f: &mut AdsbFrame) {
     let tc = field(0, 5) as u8;
     match tc {
         1..=4 => {
-            let s: String = (0..8)
-                .map(|i| IDENT_CHARSET[field(8 + 6 * i, 6) as usize] as char)
-                .collect();
+            let s: String =
+                (0..8).map(|i| IDENT_CHARSET[field(8 + 6 * i, 6) as usize] as char).collect();
             let s = s.trim_end().to_owned();
             if !s.is_empty() && !s.contains('#') {
                 f.callsign = Some(s);
@@ -390,14 +384,24 @@ fn decode_extended_squitter(me: &[u8], f: &mut AdsbFrame) {
         // Surface position: CPR over a quarter-globe span, plus the
         // Movement (ground speed) and Ground-Track fields.
         5..=8 => {
-            f.cpr = Some(Cpr { odd: bit(21) == 1, lat: field(22, 17), lon: field(39, 17), surface: true });
+            f.cpr = Some(Cpr {
+                odd: bit(21) == 1,
+                lat: field(22, 17),
+                lon: field(39, 17),
+                surface: true,
+            });
             f.velocity = decode::surface_velocity(me);
         }
         // Airborne position with barometric altitude (Q=1 25-ft linear or
         // Q=0 100-ft Gillham — both decoded via the dump1090/pyModeS path).
         9..=18 => {
             f.altitude_ft = decode::altitude12(field(8, 12));
-            f.cpr = Some(Cpr { odd: bit(21) == 1, lat: field(22, 17), lon: field(39, 17), surface: false });
+            f.cpr = Some(Cpr {
+                odd: bit(21) == 1,
+                lat: field(22, 17),
+                lon: field(39, 17),
+                surface: false,
+            });
             // Per-fix position quality: version-0 NUCp from the TC plus the
             // in-message NICb supplement bit (ME bit 7). Version-aware NIC
             // needs the aircraft's TC31 supplement, applied downstream.
@@ -428,7 +432,12 @@ fn decode_extended_squitter(me: &[u8], f: &mut AdsbFrame) {
         // altitude is HAE metres, not barometric — surfaced under
         // adsb_status.geometric_altitude_ft rather than altitude_ft.
         20..=22 => {
-            f.cpr = Some(Cpr { odd: bit(21) == 1, lat: field(22, 17), lon: field(39, 17), surface: false });
+            f.cpr = Some(Cpr {
+                odd: bit(21) == 1,
+                lat: field(22, 17),
+                lon: field(39, 17),
+                surface: false,
+            });
             let mut q = decode::position_quality(tc, bit(7), None, 0, 0)
                 .and_then(|v| v.as_object().cloned())
                 .unwrap_or_default();
@@ -452,12 +461,10 @@ fn decode_extended_squitter(me: &[u8], f: &mut AdsbFrame) {
 mod tests {
     use super::*;
 
-    const ID_FRAME: [u8; 14] = [
-        0x8D, 0x48, 0x40, 0xD6, 0x20, 0x2C, 0xC3, 0x71, 0xC3, 0x2C, 0xE0, 0x57, 0x60, 0x98,
-    ];
-    const POS_FRAME: [u8; 14] = [
-        0x8D, 0x40, 0x62, 0x1D, 0x58, 0xC3, 0x82, 0xD6, 0x90, 0xC8, 0xAC, 0x28, 0x63, 0xA7,
-    ];
+    const ID_FRAME: [u8; 14] =
+        [0x8D, 0x48, 0x40, 0xD6, 0x20, 0x2C, 0xC3, 0x71, 0xC3, 0x2C, 0xE0, 0x57, 0x60, 0x98];
+    const POS_FRAME: [u8; 14] =
+        [0x8D, 0x40, 0x62, 0x1D, 0x58, 0xC3, 0x82, 0xD6, 0x90, 0xC8, 0xAC, 0x28, 0x63, 0xA7];
 
     /// Confirm an ICAO so subsequent single frames validate directly.
     fn confirmed(v: &mut FrameValidator, frame: &[u8]) -> AdsbFrame {
@@ -543,10 +550,7 @@ mod tests {
 
     /// Hex → variable-length frame bytes.
     fn hex_frame(hex: &str) -> Vec<u8> {
-        (0..hex.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
-            .collect()
+        (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
     }
 
     #[test]

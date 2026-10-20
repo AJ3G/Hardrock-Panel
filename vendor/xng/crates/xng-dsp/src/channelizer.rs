@@ -120,11 +120,8 @@ impl PfbChannelizer {
         for s in self.scratch.iter_mut() {
             *s = IqSample::new(0.0, 0.0);
         }
-        let mut blk = if self.next_block == 0 {
-            self.taps_per_branch - 1
-        } else {
-            self.next_block - 1
-        };
+        let mut blk =
+            if self.next_block == 0 { self.taps_per_branch - 1 } else { self.next_block - 1 };
         for l in 0..self.taps_per_branch {
             let base = blk * nch;
             let samples = &self.blocks[base..base + nch];
@@ -172,14 +169,11 @@ mod tests {
         let settle = pfb.taps_per_branch * 2;
         let power: Vec<f32> = out
             .iter()
-            .map(|c| c[settle..].iter().map(|s| s.norm_sqr()).sum::<f32>() / (c.len() - settle) as f32)
+            .map(|c| {
+                c[settle..].iter().map(|s| s.norm_sqr()).sum::<f32>() / (c.len() - settle) as f32
+            })
             .collect();
-        let best = power
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .unwrap()
-            .0;
+        let best = power.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
         assert_eq!(best, ch, "tone at {f} Hz should land in ch {ch}, powers: {power:?}");
 
         // Dominance: winning channel ≥ 20 dB above every other channel.

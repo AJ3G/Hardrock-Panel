@@ -3,7 +3,7 @@
 //! Validated against pyais (MIT) as a decode oracle — see the vendored
 //! vectors below.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// Append `val`'s low `n` bits, MSB-first (one `u8` per bit) — the inverse of
 /// [`u`], for building AIS payloads (AIS-5c).
@@ -520,7 +520,11 @@ fn dac1_decode(fid: u64, bits: &[u8], p: usize) -> Option<Value> {
         }
         _ => return None,
     }
-    if d.is_empty() { None } else { Some(Value::Object(d)) }
+    if d.is_empty() {
+        None
+    } else {
+        Some(Value::Object(d))
+    }
 }
 
 /// Application-specific message (ASM) decode for the binary payload of a
@@ -583,9 +587,8 @@ fn asm_decode(dac: u64, fid: u64, bits: &[u8], p: usize) -> Option<Value> {
         // EMMA warning report (FID 23).
         (200, 23) => {
             // 1/600000-degree scaling, matching pyais.
-            let ll = |s: usize, n: usize| -> Option<f64> {
-                Some(i(bits, s, n)? as f64 / 600_000.0)
-            };
+            let ll =
+                |s: usize, n: usize| -> Option<f64> { Some(i(bits, s, n)? as f64 / 600_000.0) };
             put("start_year", json!(u(bits, p, 8)?));
             put("start_month", json!(u(bits, p + 8, 4)?));
             put("start_day", json!(u(bits, p + 12, 5)?));
@@ -624,9 +627,8 @@ fn asm_decode(dac: u64, fid: u64, bits: &[u8], p: usize) -> Option<Value> {
         }
         // Signal-strength / bridge-status report (FID 40).
         (200, 40) => {
-            let ll = |s: usize, n: usize| -> Option<f64> {
-                Some(i(bits, s, n)? as f64 / 600_000.0)
-            };
+            let ll =
+                |s: usize, n: usize| -> Option<f64> { Some(i(bits, s, n)? as f64 / 600_000.0) };
             put("lon", json!(ll(p, 28)?));
             put("lat", json!(ll(p + 28, 27)?));
             put("signal_form", json!(u(bits, p + 55, 4)?));
@@ -725,7 +727,11 @@ fn asm_decode(dac: u64, fid: u64, bits: &[u8], p: usize) -> Option<Value> {
         }
         _ => return None,
     }
-    if d.is_empty() { None } else { Some(Value::Object(d)) }
+    if d.is_empty() {
+        None
+    } else {
+        Some(Value::Object(d))
+    }
 }
 
 const NAV_STATUS: [&str; 16] = [
@@ -750,8 +756,15 @@ const NAV_STATUS: [&str; 16] = [
 /// EPFD (electronic position-fixing device) type names by code.
 fn epfd_name(code: u64) -> &'static str {
     const EPFD: [&str; 9] = [
-        "undefined", "GPS", "GLONASS", "GPS+GLONASS", "Loran-C", "Chayka",
-        "integrated", "surveyed", "Galileo",
+        "undefined",
+        "GPS",
+        "GLONASS",
+        "GPS+GLONASS",
+        "Loran-C",
+        "Chayka",
+        "integrated",
+        "surveyed",
+        "Galileo",
     ];
     match code {
         15 => "internal GNSS",
@@ -1186,7 +1199,11 @@ pub fn decode(msg_type: u8, bits: &[u8]) -> Option<Value> {
         }
         _ => return None,
     }
-    if d.is_empty() { None } else { Some(Value::Object(d)) }
+    if d.is_empty() {
+        None
+    } else {
+        Some(Value::Object(d))
+    }
 }
 
 #[cfg(test)]
@@ -1307,10 +1324,8 @@ mod tests {
 
     #[test]
     fn static_voyage_matches_pyais() {
-        let payload = concat!(
-            "55P5TL01VIaAL@7WKO@mBplU@<PDhh000000001S;AJ::4A80?4i@E53",
-            "1@0000000000000"
-        );
+        let payload =
+            concat!("55P5TL01VIaAL@7WKO@mBplU@<PDhh000000001S;AJ::4A80?4i@E53", "1@0000000000000");
         let (t, bits) = typed(payload, 2);
         assert_eq!(t, 5);
         let d = decode(t, &bits).unwrap();
@@ -2127,7 +2142,7 @@ mod tests {
         pack(&mut a, 6, 10); // message linkage
         pack(&mut a, 7, 4); // month
         pack(&mut a, 4, 5); // day
-        // window record (88 bits)
+                            // window record (88 bits)
         pack_i(&mut a, (3.0 * 60_000.0_f64).round() as i64, 25); // lon
         pack_i(&mut a, (51.0 * 60_000.0_f64).round() as i64, 24); // lat
         pack(&mut a, 6, 5); // from hour

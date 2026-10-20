@@ -86,14 +86,14 @@ pub fn cpr_local(cpr: Cpr, ref_lat: f64, ref_lon: f64) -> (f64, f64) {
     let i = if cpr.odd { 1.0 } else { 0.0 };
 
     let dlat = span / (4.0 * NZ - i);
-    let j = (ref_lat / dlat).floor()
-        + (0.5 + (ref_lat % dlat + dlat) % dlat / dlat - lat_cpr).floor();
+    let j =
+        (ref_lat / dlat).floor() + (0.5 + (ref_lat % dlat + dlat) % dlat / dlat - lat_cpr).floor();
     let lat = dlat * (j + lat_cpr);
 
     let nl_v = nl(lat);
     let dlon = span / ((nl_v as f64 - i).max(1.0));
-    let m = (ref_lon / dlon).floor()
-        + (0.5 + (ref_lon % dlon + dlon) % dlon / dlon - lon_cpr).floor();
+    let m =
+        (ref_lon / dlon).floor() + (0.5 + (ref_lon % dlon + dlon) % dlon / dlon - lon_cpr).floor();
     let lon = dlon * (m + lon_cpr);
     (lat, lon)
 }
@@ -261,14 +261,22 @@ pub fn velocity(me: &[u8]) -> Option<Velocity> {
     let vr_raw = field(37, 9);
     let vertical_rate_fpm = (vr_raw != 0).then(|| {
         let v = (vr_raw as i32 - 1) * 64;
-        if bit(36) == 1 { -v } else { v }
+        if bit(36) == 1 {
+            -v
+        } else {
+            v
+        }
     });
     // GNSS-minus-baro: sign bit 48, magnitude bits 49–55; 0 and 127 mean
     // "not available" (pyModeS `bds09`).
     let diff_mag = field(49, 7);
     let geo_minus_baro_ft = (diff_mag != 0 && diff_mag != 127).then(|| {
         let v = (diff_mag as i32 - 1) * 25;
-        if bit(48) == 1 { -v } else { v }
+        if bit(48) == 1 {
+            -v
+        } else {
+            v
+        }
     });
     Some(Velocity {
         speed_kt,
@@ -356,7 +364,10 @@ pub fn operational_status(me: &[u8]) -> Option<serde_json::Value> {
     let subtype = field(5, 3);
     let version = field(40, 3);
     let mut o = serde_json::Map::new();
-    o.insert("subtype".into(), serde_json::json!(if subtype == 1 { "surface" } else { "airborne" }));
+    o.insert(
+        "subtype".into(),
+        serde_json::json!(if subtype == 1 { "surface" } else { "airborne" }),
+    );
     o.insert("version".into(), serde_json::json!(version));
     if version >= 1 {
         o.insert("nic_supp_a".into(), serde_json::json!(bit(43)));
@@ -449,10 +460,7 @@ pub fn target_state(me: &[u8]) -> Option<serde_json::Value> {
     }
 
     if bit(29) == 1 {
-        o.insert(
-            "selected_heading".into(),
-            serde_json::json!(field(30, 9) as f64 * 360.0 / 512.0),
-        );
+        o.insert("selected_heading".into(), serde_json::json!(field(30, 9) as f64 * 360.0 / 512.0));
     }
 
     o.insert("nac_p".into(), serde_json::json!(field(39, 4)));
@@ -718,12 +726,24 @@ pub fn nic_v1(tc: u8, nic_supp_a: u8) -> Option<u8> {
         6 | 10 | 21 => 10,
         7 => 9,
         8 | 18 | 22 => 0,
-        11 => if s == 1 { 9 } else { 8 },
+        11 => {
+            if s == 1 {
+                9
+            } else {
+                8
+            }
+        }
         12 => 7,
         13 => 6,
         14 => 5,
         15 => 4,
-        16 => if s == 1 { 3 } else { 2 },
+        16 => {
+            if s == 1 {
+                3
+            } else {
+                2
+            }
+        }
         17 => 1,
         _ => return None,
     })
@@ -929,7 +949,15 @@ mod tests {
         let (lat, lon) = cpr_local(cpr_of(EVEN), 52.2572, 3.91937);
         assert!(
             within_local_containment(
-                lat, lon, 52.2572, 3.91937, nuc_p_rcu_m(7), 1.0, 700.0, 500.0, dist_m,
+                lat,
+                lon,
+                52.2572,
+                3.91937,
+                nuc_p_rcu_m(7),
+                1.0,
+                700.0,
+                500.0,
+                dist_m,
             ),
             "true-reference local decode accepted"
         );
@@ -941,13 +969,29 @@ mod tests {
         let dlon_zone = 360.0 / nl(52.2572) as f64;
         assert!(
             !within_local_containment(
-                lat, lon + dlon_zone, 52.2572, 3.91937, nuc_p_rcu_m(7), 1.0, 700.0, 500.0, dist_m,
+                lat,
+                lon + dlon_zone,
+                52.2572,
+                3.91937,
+                nuc_p_rcu_m(7),
+                1.0,
+                700.0,
+                500.0,
+                dist_m,
             ),
             "zone-wrapped local decode rejected (short elapsed)"
         );
         assert!(
             !within_local_containment(
-                lat, lon + dlon_zone, 52.2572, 3.91937, nuc_p_rcu_m(7), 100_000.0, 700.0, 500.0, dist_m,
+                lat,
+                lon + dlon_zone,
+                52.2572,
+                3.91937,
+                nuc_p_rcu_m(7),
+                100_000.0,
+                700.0,
+                500.0,
+                dist_m,
             ),
             "beyond-half-zone wrap rejected at any elapsed time"
         );
@@ -959,7 +1003,15 @@ mod tests {
         let enough_s = near_m / 700.0 + 1.0;
         assert!(
             within_local_containment(
-                lat, near_lon, 52.2572, 3.91937, nuc_p_rcu_m(7), enough_s, 700.0, 500.0, dist_m,
+                lat,
+                near_lon,
+                52.2572,
+                3.91937,
+                nuc_p_rcu_m(7),
+                enough_s,
+                700.0,
+                500.0,
+                dist_m,
             ),
             "within-cap displacement accepted once motion budget covers it"
         );
@@ -1072,10 +1124,7 @@ mod tests {
 
     /// Full 14- or 7-byte frame from a hex string.
     fn frame_of(hex: &str) -> Vec<u8> {
-        (0..hex.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
-            .collect()
+        (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
     }
 
     #[test]
@@ -1196,11 +1245,7 @@ mod tests {
         ];
         for (frame, supp, exp) in cases {
             let tc = tc_of(frame);
-            assert_eq!(
-                nic_v1(tc, supp),
-                Some(exp),
-                "frame {frame} tc {tc} supp {supp}"
-            );
+            assert_eq!(nic_v1(tc, supp), Some(exp), "frame {frame} tc {tc} supp {supp}");
         }
     }
 
@@ -1276,14 +1321,22 @@ fn mb_field(mb: &[u8], start: usize, len: usize) -> u32 {
 
 fn mb_signed(mb: &[u8], sign_bit: usize, start: usize, len: usize) -> i32 {
     let v = mb_field(mb, start, len) as i32;
-    if mb_bit(mb, sign_bit) == 1 { v - (1 << len) } else { v }
+    if mb_bit(mb, sign_bit) == 1 {
+        v - (1 << len)
+    } else {
+        v
+    }
 }
 
 /// Sign-magnitude combine: a `len`-bit magnitude and a separate sign bit
 /// (1 = negative). Mirrors pyModeS `_helpers.signed` — NOT two's
 /// complement: sign=1, magnitude=0 represents −2^len.
 fn sign_mag(magnitude: u32, len: usize, sign: u32) -> i32 {
-    if sign == 1 { magnitude as i32 - (1 << len) } else { magnitude as i32 }
+    if sign == 1 {
+        magnitude as i32 - (1 << len)
+    } else {
+        magnitude as i32
+    }
 }
 
 /// Status/value consistency gate (pyModeS `_helpers.wrong_status`): a
@@ -1481,7 +1534,11 @@ pub fn bds50(mb: &[u8]) -> Option<serde_json::Value> {
     let roll = mb_signed(mb, 2, 3, 9) as f64 * 45.0 / 256.0;
     let track = {
         let v = mb_signed(mb, 13, 14, 10) as f64 * 90.0 / 512.0;
-        if v < 0.0 { v + 360.0 } else { v }
+        if v < 0.0 {
+            v + 360.0
+        } else {
+            v
+        }
     };
     let gs = mb_field(mb, 25, 10) * 2;
     let tas = mb_field(mb, 47, 10) * 2;
@@ -1517,7 +1574,11 @@ pub fn bds60(mb: &[u8]) -> Option<serde_json::Value> {
     }
     let heading = {
         let v = mb_signed(mb, 2, 3, 10) as f64 * 90.0 / 512.0;
-        if v < 0.0 { v + 360.0 } else { v }
+        if v < 0.0 {
+            v + 360.0
+        } else {
+            v
+        }
     };
     let ias = mb_field(mb, 14, 10);
     let mach = mb_field(mb, 25, 10) as f64 * 2.048 / 512.0;
@@ -1635,14 +1696,14 @@ pub fn bds45(mb: &[u8]) -> Option<serde_json::Value> {
         return None;
     }
     let gates = [
-        (1usize, 2usize, 2usize),  // turbulence
-        (4, 5, 2),                 // wind shear
-        (7, 8, 2),                 // microburst
-        (10, 11, 2),               // icing
-        (13, 14, 2),               // wake vortex
-        (16, 17, 10),              // temperature (sign + 9-bit magnitude)
-        (27, 28, 11),              // static pressure
-        (39, 40, 12),              // radio height
+        (1usize, 2usize, 2usize), // turbulence
+        (4, 5, 2),                // wind shear
+        (7, 8, 2),                // microburst
+        (10, 11, 2),              // icing
+        (13, 14, 2),              // wake vortex
+        (16, 17, 10),             // temperature (sign + 9-bit magnitude)
+        (27, 28, 11),             // static pressure
+        (39, 40, 12),             // radio height
     ];
     for (s, vs, vl) in gates {
         if wrong_status(mb, s, vs, vl) {
@@ -1814,9 +1875,7 @@ pub fn bds_penalty(v: &serde_json::Value) -> f64 {
             }
         }
         "6,0" => {
-            if let (Some(ias), Some(mach)) =
-                (jf(v, "indicated_airspeed"), jf(v, "mach"))
-            {
+            if let (Some(ias), Some(mach)) = (jf(v, "indicated_airspeed"), jf(v, "mach")) {
                 if mach > 0.0 {
                     let ratio = ias / mach;
                     if !(250.0..=800.0).contains(&ratio) {
@@ -1890,10 +1949,7 @@ mod bds_tests {
     use super::*;
 
     fn mb_of(frame_hex: &str) -> Vec<u8> {
-        (8..22)
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&frame_hex[i..i + 2], 16).unwrap())
-            .collect()
+        (8..22).step_by(2).map(|i| u8::from_str_radix(&frame_hex[i..i + 2], 16).unwrap()).collect()
     }
 
     /// Build the 7-byte MB from a 56-bit MSB-first payload integer (the
@@ -1959,7 +2015,8 @@ mod bds_tests {
     fn bds17_capability_list_matches_pymodes() {
         let v = bds_infer(&mb_of("A0000638FA81C10000000081A92F")).unwrap();
         assert_eq!(v["bds"], "1,7");
-        let expected = ["0,5", "0,6", "0,7", "0,8", "0,9", "2,0", "4,0", "5,0", "5,1", "5,2", "6,0"];
+        let expected =
+            ["0,5", "0,6", "0,7", "0,8", "0,9", "2,0", "4,0", "5,0", "5,1", "5,2", "6,0"];
         let got: Vec<&str> =
             v["supported_bds"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
         assert_eq!(got, expected);
@@ -2026,8 +2083,7 @@ mod bds_tests {
     #[test]
     fn bds30_tti1_icao_threat_matches_pymodes() {
         // test_tti_1_icao_threat: TTI=1, threat ICAO ABCDEF at bits 30-53.
-        let payload =
-            0x30_80_00_00_00_00_00u64 | (1 << (55 - 29)) | (0xABCDEFu64 << 2);
+        let payload = 0x30_80_00_00_00_00_00u64 | (1 << (55 - 29)) | (0xABCDEFu64 << 2);
         let v = bds30(&mb_payload(payload)).unwrap();
         assert_eq!(v["threat_type_indicator"], 1);
         assert_eq!(v["threat_icao"], "ABCDEF");
@@ -2037,10 +2093,8 @@ mod bds_tests {
     fn bds30_tti2_alt_range_bearing_matches_pymodes() {
         // test_tti_2_altitude_range_bearing: range raw 10 → 0.9 NM,
         // bearing raw 3 → 15°, altitude 0 → None.
-        let payload = 0x30_80_00_00_00_00_00u64
-            | (0b10 << (55 - 29))
-            | (10 << (55 - 49))
-            | (3 << (55 - 55));
+        let payload =
+            0x30_80_00_00_00_00_00u64 | (0b10 << (55 - 29)) | (10 << (55 - 49)) | (3 << (55 - 55));
         let v = bds30(&mb_payload(payload)).unwrap();
         assert_eq!(v["threat_type_indicator"], 2);
         assert!((v["threat_range"].as_f64().unwrap() - 0.9).abs() < 1e-9);
@@ -2051,8 +2105,7 @@ mod bds_tests {
     #[test]
     fn bds30_tti2_altitude_delegates_to_altcode() {
         // test_tti_2_altitude_delegates_to_altcode: AC13 0x1010 → 24600 ft.
-        let payload =
-            0x30_80_00_00_00_00_00u64 | (0b10 << (55 - 29)) | (0x1010u64 << 13);
+        let payload = 0x30_80_00_00_00_00_00u64 | (0b10 << (55 - 29)) | (0x1010u64 << 13);
         let v = bds30(&mb_payload(payload)).unwrap();
         assert_eq!(v["threat_type_indicator"], 2);
         assert_eq!(v["threat_altitude"], 24600);
@@ -2153,13 +2206,25 @@ mod bds_tests {
         // FOM = 5.
         assert!(bds44(&mb_payload((base & !(0xF << (55 - 3))) | (5 << (55 - 3)))).is_none());
         // Wind speed 251.
-        assert!(bds44(&mb_payload((1 << (55 - 3)) | (1 << (55 - 4)) | (251 << (55 - 13)))).is_none());
+        assert!(
+            bds44(&mb_payload((1 << (55 - 3)) | (1 << (55 - 4)) | (251 << (55 - 13)))).is_none()
+        );
         // Temperature +60.25 °C (raw 241).
-        assert!(bds44(&mb_payload((1 << (55 - 3)) | (1 << (55 - 4)) | (50 << (55 - 13)) | (241 << (55 - 33)))).is_none());
+        assert!(bds44(&mb_payload(
+            (1 << (55 - 3)) | (1 << (55 - 4)) | (50 << (55 - 13)) | (241 << (55 - 33))
+        ))
+        .is_none());
         // All-zero meteo (wind/dir/temp all 0) with FOM+wind-status set.
         assert!(bds44(&mb_payload((1 << (55 - 3)) | (1 << (55 - 4)))).is_none());
         // Pressure status clear but raw nonzero.
-        assert!(bds44(&mb_payload((1 << (55 - 3)) | (1 << (55 - 4)) | (50 << (55 - 13)) | (100 << (55 - 33)) | (1 << (55 - 45)))).is_none());
+        assert!(bds44(&mb_payload(
+            (1 << (55 - 3))
+                | (1 << (55 - 4))
+                | (50 << (55 - 13))
+                | (100 << (55 - 33))
+                | (1 << (55 - 45))
+        ))
+        .is_none());
     }
 
     // Oracle: pyModeS bds45 / test_bds_commb TestBds45* (golden frame
@@ -2170,7 +2235,15 @@ mod bds_tests {
         let v = bds45(&mb_of("A00004190001FB80000000000000")).unwrap();
         assert_eq!(v["bds"], "4,5");
         assert!((v["static_air_temperature"].as_f64().unwrap() - (-4.5)).abs() < 0.1);
-        for k in ["turbulence", "wind_shear", "microburst", "icing", "wake_vortex", "static_pressure", "radio_height"] {
+        for k in [
+            "turbulence",
+            "wind_shear",
+            "microburst",
+            "icing",
+            "wake_vortex",
+            "static_pressure",
+            "radio_height",
+        ] {
             assert!(v.get(k).is_none(), "unexpected {k}");
         }
     }

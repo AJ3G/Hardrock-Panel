@@ -238,7 +238,7 @@ impl ReedSolomon {
         for i in 0..n {
             let deg = (n - 1 - i) as u32;
             let xinv_log = (255 - (deg % 255)) % 255; // log of α^-deg
-            // Ψ(α^-deg)
+                                                      // Ψ(α^-deg)
             let mut val = 0u8;
             for (k, &p) in psi.iter().enumerate() {
                 if p != 0 {

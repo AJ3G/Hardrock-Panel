@@ -327,9 +327,7 @@ impl PpmDemod {
             // on the table (modes1@2.4M: 281 → 296 of max's 313 going
             // 2 → 4 passes).
             let npass: usize = if self.fracs.len() <= 1 { 4 } else { 16 };
-            for (pass, frac) in
-                (0..npass).map(|k| k as f64 / npass as f64).enumerate()
-            {
+            for (pass, frac) in (0..npass).map(|k| k as f64 / npass as f64).enumerate() {
                 let pass_found = Self::scan_f(
                     &self.power,
                     &prefix,
@@ -362,19 +360,12 @@ impl PpmDemod {
             return out;
         }
 
-        let raw_found = Self::scan(
-            &self.power,
-            self.half,
-            end,
-            &mut self.noise,
-            &mut self.validator,
-            true,
-        );
+        let raw_found =
+            Self::scan(&self.power, self.half, end, &mut self.noise, &mut self.validator, true);
         let mut found: Vec<(usize, AdsbFrame)> = Vec::new();
         for (pos, f) in raw_found {
             let dup = found.iter().any(|(p, g)| {
-                g.bytes == f.bytes
-                    && (*p as i64 - pos as i64).unsigned_abs() < frame_samples as u64
+                g.bytes == f.bytes && (*p as i64 - pos as i64).unsigned_abs() < frame_samples as u64
             });
             if !dup {
                 found.push((pos, f));

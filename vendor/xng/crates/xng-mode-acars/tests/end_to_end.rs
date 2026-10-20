@@ -273,20 +273,11 @@ fn shared_front_end_decodes_many_channels() {
         downlink("CHANNEL TWO PAYLOAD", "XG0002"),
         downlink("CHANNEL TRE PAYLOAD", "XG0003"),
     ];
-    let bursts: Vec<Vec<Complex<f32>>> = specs
-        .iter()
-        .zip(offsets.iter())
-        .map(|(s, &off)| burst_iq(s, fs, off, 0.4))
-        .collect();
+    let bursts: Vec<Vec<Complex<f32>>> =
+        specs.iter().zip(offsets.iter()).map(|(s, &off)| burst_iq(s, fs, off, 0.4)).collect();
 
     let delays = [0usize, 30_000, 60_000];
-    let total = bursts
-        .iter()
-        .zip(delays.iter())
-        .map(|(b, &d)| b.len() + d)
-        .max()
-        .unwrap()
-        + 10_000;
+    let total = bursts.iter().zip(delays.iter()).map(|(b, &d)| b.len() + d).max().unwrap() + 10_000;
     let mut iq = vec![Complex::new(0.0f32, 0.0f32); total];
     for (b, &d) in bursts.iter().zip(delays.iter()) {
         for (i, s) in b.iter().enumerate() {
@@ -328,14 +319,10 @@ fn both_front_ends_decode_equivalently() {
         downlink("FRONT END TWO", "XG0002"),
         downlink("FRONT END TRE", "XG0003"),
     ];
-    let bursts: Vec<Vec<Complex<f32>>> = specs
-        .iter()
-        .zip(offsets.iter())
-        .map(|(s, &off)| burst_iq(s, fs, off, 0.4))
-        .collect();
+    let bursts: Vec<Vec<Complex<f32>>> =
+        specs.iter().zip(offsets.iter()).map(|(s, &off)| burst_iq(s, fs, off, 0.4)).collect();
     let delays = [0usize, 30_000, 60_000];
-    let total =
-        bursts.iter().zip(delays.iter()).map(|(b, &d)| b.len() + d).max().unwrap() + 10_000;
+    let total = bursts.iter().zip(delays.iter()).map(|(b, &d)| b.len() + d).max().unwrap() + 10_000;
     let mut iq = vec![Complex::new(0.0f32, 0.0f32); total];
     for (b, &d) in bursts.iter().zip(delays.iter()) {
         for (i, s) in b.iter().enumerate() {
@@ -473,8 +460,8 @@ fn squelch_does_not_change_what_decodes() {
     let bursts: Vec<Vec<Complex<f32>>> =
         specs.iter().zip(offsets.iter()).map(|(s, &off)| burst_iq(s, fs, off, 0.12)).collect();
     let delays = [240_000usize, 900_000, 1_500_000];
-    let total = bursts.iter().zip(delays.iter()).map(|(b, &d)| b.len() + d).max().unwrap()
-        + 240_000;
+    let total =
+        bursts.iter().zip(delays.iter()).map(|(b, &d)| b.len() + d).max().unwrap() + 240_000;
     let mut iq = vec![Complex::new(0.0f32, 0.0f32); total];
     for (b, &d) in bursts.iter().zip(delays.iter()) {
         for (i, s) in b.iter().enumerate() {

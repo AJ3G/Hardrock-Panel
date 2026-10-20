@@ -38,7 +38,11 @@ pub const SETTINGS: [Setting; 8] = [
 
 impl Setting {
     pub fn data_segments(&self) -> usize {
-        if self.double_slot { 168 } else { 72 }
+        if self.double_slot {
+            168
+        } else {
+            72
+        }
     }
     /// Coded chips on air (data symbols × bits/symbol).
     pub fn chips(&self) -> usize {
@@ -46,13 +50,21 @@ impl Setting {
     }
     /// Decoded payload bits.
     pub fn payload_bits(&self) -> usize {
-        if self.rate_quarter { self.chips() / 4 } else { self.chips() / 2 }
+        if self.rate_quarter {
+            self.chips() / 4
+        } else {
+            self.chips() / 2
+        }
     }
     pub fn payload_bytes(&self) -> usize {
         self.payload_bits() / 8 // 300 bps: 540/8 = 67 full bytes (rest pad)
     }
     fn col_shift(&self) -> usize {
-        if self.double_slot { 23 } else { 17 }
+        if self.double_slot {
+            23
+        } else {
+            17
+        }
     }
     pub fn cols(&self) -> usize {
         self.chips() / 40
@@ -145,11 +157,16 @@ mod tests {
     fn interleaver_indices_are_permutations() {
         for s in &SETTINGS {
             let chips = s.chips();
-            for idx in [push_indices(chips, s.cols(), s.col_shift()), pop_indices(chips, s.cols())] {
+            for idx in [push_indices(chips, s.cols(), s.col_shift()), pop_indices(chips, s.cols())]
+            {
                 let mut sorted = idx.clone();
                 sorted.sort_unstable();
-                assert!(sorted.iter().enumerate().all(|(i, &v)| i == v),
-                    "not a permutation at {} bps double={}", s.bps, s.double_slot);
+                assert!(
+                    sorted.iter().enumerate().all(|(i, &v)| i == v),
+                    "not a permutation at {} bps double={}",
+                    s.bps,
+                    s.double_slot
+                );
             }
         }
     }
@@ -157,7 +174,8 @@ mod tests {
     #[test]
     fn interleave_roundtrip() {
         for s in &SETTINGS {
-            let chips: Vec<u8> = (0..s.chips()).map(|i| (i % 2) as u8 ^ ((i / 7) % 2) as u8).collect();
+            let chips: Vec<u8> =
+                (0..s.chips()).map(|i| (i % 2) as u8 ^ ((i / 7) % 2) as u8).collect();
             let air = interleave(&chips, s);
             let soft: Vec<f32> = air.iter().map(|&b| if b == 1 { 1.0 } else { -1.0 }).collect();
             let back = deinterleave(&soft, s);

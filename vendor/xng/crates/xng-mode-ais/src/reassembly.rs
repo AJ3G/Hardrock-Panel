@@ -42,7 +42,11 @@ pub struct Sentence {
 /// De-armor one payload character to its 6-bit value (IEC 61162-1).
 fn dearmor(c: u8) -> u8 {
     let v = c.wrapping_sub(48);
-    if v > 39 { v - 8 } else { v }
+    if v > 39 {
+        v - 8
+    } else {
+        v
+    }
 }
 
 /// Parse one NMEA sentence line into a [`Sentence`].
@@ -243,9 +247,25 @@ pub struct VesselRecord {
 /// other volatile per-message kinematics are deliberately excluded so the
 /// record reflects stable vessel identity, not a momentary fix.
 const STATIC_FIELDS: &[&str] = &[
-    "name", "callsign", "imo", "ship_type", "destination", "draught_m", "eta",
-    "to_bow", "to_stern", "to_port", "to_starboard", "epfd", "ais_version",
-    "dte_ready", "vendor_id", "model", "serial", "mothership_mmsi", "aton_type",
+    "name",
+    "callsign",
+    "imo",
+    "ship_type",
+    "destination",
+    "draught_m",
+    "eta",
+    "to_bow",
+    "to_stern",
+    "to_port",
+    "to_starboard",
+    "epfd",
+    "ais_version",
+    "dte_ready",
+    "vendor_id",
+    "model",
+    "serial",
+    "mothership_mmsi",
+    "aton_type",
 ];
 
 impl VesselRecord {
@@ -504,7 +524,11 @@ mod tests {
     #[test]
     fn incomplete_message_is_buffered() {
         let mut r = SentenceReassembler::new();
-        assert!(r.push_line("!AIVDM,2,1,1,A,538CQ>02A;h?D9QC800pu8@T>0P4l9E8L0000017Ah:;;5r50Ahm5;C0,0*07").is_none());
+        assert!(r
+            .push_line(
+                "!AIVDM,2,1,1,A,538CQ>02A;h?D9QC800pu8@T>0P4l9E8L0000017Ah:;;5r50Ahm5;C0,0*07"
+            )
+            .is_none());
         assert_eq!(r.pending_count(), 1);
     }
 

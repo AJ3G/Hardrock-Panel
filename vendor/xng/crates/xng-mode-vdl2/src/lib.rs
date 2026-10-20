@@ -142,8 +142,7 @@ impl Vdl2ChannelDecoder {
                 };
                 // ATN transport rides in I-frame info fields: an ISO 8208
                 // packet (most links) or bare CLNP/ES-IS/IDRP.
-                let atn = if acars.is_none()
-                    && matches!(frame.control, avlc::Control::Info { .. })
+                let atn = if acars.is_none() && matches!(frame.control, avlc::Control::Info { .. })
                 {
                     decode_atn(&frame.info, &mut self.x25, &mut self.clnp, &mut self.cotp, now)
                 } else {
@@ -277,7 +276,12 @@ fn cotp_reassemble(
 }
 
 /// Convert a decoded frame into the normalized message model.
-pub fn to_message(f: &Vdl2Frame, frequency_hz: u64, level_dbfs: f32, source: Provenance) -> Message {
+pub fn to_message(
+    f: &Vdl2Frame,
+    frequency_hz: u64,
+    level_dbfs: f32,
+    source: Provenance,
+) -> Message {
     let (body, crc_ok, errors) = match &f.acars {
         Some(b) => {
             // ACARS-over-AVLC: the body is the shared ACARS core, but the AVLC
@@ -306,11 +310,7 @@ pub fn to_message(f: &Vdl2Frame, frequency_hz: u64, level_dbfs: f32, source: Pro
             freq_skew_hz: Some(f.freq_skew_hz),
             ..Default::default()
         },
-        decode: DecodeQuality {
-            crc_ok,
-            fec_corrected: Some(f.rs_corrected as u32),
-            errors,
-        },
+        decode: DecodeQuality { crc_ok, fec_corrected: Some(f.rs_corrected as u32), errors },
         body,
         raw: Some(f.avlc.raw.clone()),
         source,

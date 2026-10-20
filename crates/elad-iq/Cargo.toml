@@ -14,5 +14,9 @@ thiserror.workspace = true
 tracing.workspace = true
 nusb.workspace = true
 
+# Raising the USB and DSP threads' priority (see `priority`).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Threading"] }
+
 [dev-dependencies]
 tracing-subscriber.workspace = true
