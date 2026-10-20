@@ -216,6 +216,14 @@ impl Scope {
         &self.settings
     }
 
+    /// Set the transverter LO from elsewhere (the radio window's offset), Hz.
+    pub fn set_transverter_hz(&mut self, hz: f64) {
+        if self.settings.transverter_hz != hz {
+            self.settings.transverter_hz = hz;
+            self.xvtr_text = view::fmt_freq(hz.abs());
+        }
+    }
+
     /// The pipeline's starting spectrum settings, for `PipelineConfig`.
     pub fn spectrum_config(&self, calibration_db: f32) -> sdr::SpectrumConfig {
         let s = &self.settings;
@@ -349,7 +357,7 @@ impl Scope {
         }
         if let Some(c) = view::needs_recentre(span, rig.rx_hz) {
             let asked = self.recentre_asked.is_some_and(|(hz, t)| hz == c && now - t < 1.0);
-            // SAFETY INTERLOCK 8: the centre is the DUO's VFO A; never moved
+            // SAFETY INTERLOCK 9: the centre is the DUO's VFO A; never moved
             // while it transmits.
             if !asked && !rig.transmitting {
                 out.recentre = Some(c);

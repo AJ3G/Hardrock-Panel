@@ -208,7 +208,7 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
                 d.passband().1
             ));
             let r = r.on_disabled_hover_text("Locked while the radio transmits");
-            // SAFETY INTERLOCK 8: no retuning while transmitting.
+            // SAFETY INTERLOCK 9: no retuning while transmitting.
             if r.clicked() && !tx {
                 let t = bandplan::data_tune(d, cx.map.shown(cx.rig.rx_hz));
                 out.tune_to = Some(cx.map.radio(t.dial_hz));

@@ -64,7 +64,7 @@ impl Drag {
     /// Begin a press on `grab`. While transmitting, nothing that tunes can be
     /// grabbed: the press can only pan.
     pub fn press(grab: Option<Grab>, x0: f32, start: View, transmitting: bool) -> Drag {
-        // SAFETY INTERLOCK 8: no tuning or filter change from the scope while
+        // SAFETY INTERLOCK 9: no tuning or filter change from the scope while
         // the radio transmits, so a stray drag never moves a keyed signal.
         let kind = match grab {
             _ if transmitting => DragKind::Pan,
@@ -84,7 +84,7 @@ impl Drag {
 
     /// Released: was it a click that tunes?
     pub fn is_click_to_tune(&self, transmitting: bool) -> bool {
-        // SAFETY INTERLOCK 8, as above.
+        // SAFETY INTERLOCK 9, as above.
         !self.moved && self.kind == DragKind::Pan && !transmitting
     }
 }

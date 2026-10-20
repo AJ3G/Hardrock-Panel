@@ -260,3 +260,92 @@ fn enum_combo<T: PartialEq + Copy>(
         }
     });
 }
+
+/// Where the panel's receiver gets its I/Q, and where it plays.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn settings_receiver_tab(
+    ui: &mut egui::Ui,
+    source: &mut crate::rx::IqChoice,
+    audio_out: &mut Option<String>,
+    sounds: &[String],
+    elad: &[elad_iq::EladDevice],
+    rx: &crate::rx::Rx,
+) -> bool {
+    use crate::rx::IqChoice;
+    let mut look = false;
+    ui.label(RichText::new("Scope and receiver").size(14.0).strong().color(theme::CYAN()));
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(
+            "The FDM-DUO's I/Q over its second USB lead, for SCOPE and the panel's own \
+             receiver, which DECODE listens to. Demo signals shows a made-up band around \
+             14.2 MHz, with no radio. The I/Q rate is the scope's SPAN key. The source is taken \
+             with APPLY; the sound output at once.",
+        )
+        .weak(),
+    );
+    ui.add_space(6.0);
+    egui::Grid::new("rx-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+        ui.label("I/Q from");
+        enum_combo(ui, "rx-source", source, &IqChoice::ALL, IqChoice::label);
+        ui.end_row();
+        if *source == IqChoice::Elad {
+            ui.label("Found");
+            ui.horizontal(|ui| {
+                let t = if elad.is_empty() {
+                    "No ELAD on USB yet".to_string()
+                } else {
+                    elad.iter().map(|d| d.label()).collect::<Vec<_>>().join(", ")
+                };
+                ui.label(t);
+                if chrome::chip(ui, false, "LOOK AGAIN").clicked() {
+                    look = true;
+                }
+            });
+            ui.end_row();
+        }
+        ui.label("Receiver sound");
+        let shown = audio_out.clone().unwrap_or_else(|| "The system's default output".into());
+        ComboBox::from_id_salt("rx-sound")
+            .width(260.0)
+            .selected_text(shown)
+            .show_styled(ui, |ui| {
+                if ui.selectable_label(audio_out.is_none(), "The system's default output").clicked()
+                {
+                    *audio_out = None;
+                }
+                for d in sounds {
+                    if ui.selectable_label(audio_out.as_ref() == Some(d), d).clicked() {
+                        *audio_out = Some(d.clone());
+                    }
+                }
+            })
+            .response
+            .on_hover_text(
+                "Where the panel's receiver plays. Choose VB-Cable's input (CABLE Input) to feed \
+             an outside decoder.",
+            );
+        ui.end_row();
+    });
+    if *source == IqChoice::Elad && cfg!(windows) {
+        ui.label(
+            RichText::new(
+                "On Windows the ELAD's I/Q device must be on the WinUSB driver (Zadig), which \
+                 stops ELAD's own FDM-SW2 from seeing it until its driver is put back.",
+            )
+            .size(11.5)
+            .weak(),
+        );
+    }
+    let (text, col) = match (&rx.error, rx.active()) {
+        (Some(e), _) => (e.clone(), theme::ALERT()),
+        (None, true) if rx.opening() => ("Opening…".to_string(), theme::YELLOW()),
+        (None, true) => (rx.label.clone(), theme::GREEN()),
+        (None, false) => ("Off".to_string(), theme::TEXT()),
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Status");
+        ui.label(RichText::new(text).color(col));
+    });
+    look
+}

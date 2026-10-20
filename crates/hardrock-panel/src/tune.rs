@@ -111,6 +111,26 @@ pub(crate) fn tune_blocked(amp: &AmpStatus, rig: &RigStatus, watts: Option<f32>)
     }
 }
 
+/// Why an outside program (TCI, rigctld) may not key the radio now, or
+/// `None` if it may.
+///
+/// SAFETY INTERLOCK (docs/safety-interlocks.md, #8 with #6): an outside
+/// program's transmission goes through the amplifier as TUNE's does, so it
+/// is judged by [`tune_blocked`] at the radio's full power setting (the
+/// program's audio level can bring the power up to it, as for a stored CW
+/// message), and refused while anything else keys the radio. For an ordinary
+/// transmission the link also reads the radio's input and mode again just
+/// before it keys (#7).
+pub(crate) fn outside_ptt_blocked(amp: &AmpStatus, rig: &RigStatus) -> Option<String> {
+    if rig.tuning.is_some() {
+        return Some("TUNE is running.".into());
+    }
+    if rig.transmitting() {
+        return Some("The radio is already transmitting.".into());
+    }
+    tune_blocked(amp, rig, planned_watts(rig, Keying::Carrier, 1.0))
+}
+
 /// Why TUNE's tone may not be keyed, beyond [`tune_blocked`]: no sound
 /// output for it, or the radio not set to send it.
 ///
@@ -386,6 +406,34 @@ mod tests {
 
     fn w(r: &RigStatus) -> Option<f32> {
         planned_watts(r, Keying::Carrier, 1.0)
+    }
+
+    #[test]
+    fn an_outside_program_keys_only_when_tune_could_at_the_full_setting() {
+        // In bypass with both links: allowed.
+        let r = duo(14_074_000, 9);
+        assert_eq!(outside_ptt_blocked(&amp(false, 7), &r), None);
+        // In line at MAX (8.3 W): over the HR500's drive limit (#6).
+        assert!(outside_ptt_blocked(&amp(true, 5), &r).unwrap().contains("drive limit"));
+        // At 5 W on the amplifier's band: allowed; on the wrong band: not.
+        let five = duo(14_074_000, 8);
+        assert_eq!(outside_ptt_blocked(&amp(true, 5), &five), None);
+        assert!(outside_ptt_blocked(&amp(true, 7), &five).is_some());
+        // Not while TUNE runs or the radio transmits on its own.
+        let now = Instant::now();
+        let tuning = RigStatus {
+            tuning: Some(rigcat::Tuning { since: now, until: now, keying: Keying::Audio }),
+            ..duo(14_074_000, 8)
+        };
+        assert!(outside_ptt_blocked(&amp(false, 5), &tuning).unwrap().contains("TUNE"));
+        let keyed = RigStatus { tx_state: Some(1), ..duo(14_074_000, 8) };
+        assert!(outside_ptt_blocked(&amp(false, 5), &keyed).is_some());
+        // A tripped or absent amplifier refuses it, as it refuses TUNE.
+        let mut tripped = amp(false, 5);
+        tripped.alerts.tripped = true;
+        assert!(outside_ptt_blocked(&tripped, &five).is_some());
+        let gone = AmpStatus { connected: false, ..amp(false, 5) };
+        assert!(outside_ptt_blocked(&gone, &five).is_some());
     }
 
     #[test]

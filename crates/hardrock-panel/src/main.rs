@@ -14,6 +14,14 @@
 //!   switched here (DN/UP) or by the radio over the amplifier's own CAT or ACC
 //!   input, and the panel says so along its top.
 //!
+//! - **Scope, receiver and decoders.** With the ELAD's USB I/Q (or the demo
+//!   band) chosen under SETTINGS, SCOPE shows the panadapter and runs the
+//!   panel's own receiver, which plays on the chosen sound output and, in
+//!   split, sets where the radio transmits (decision 22); DECODE runs the
+//!   panel's decoders on it (decisions 26 to 28, 32).
+//! - **Outside programs.** TCI and rigctld servers, and WSJT-X UDP, off until
+//!   turned on under SETTINGS (decision 25, interlock #8).
+//!
 //! The safety interlocks are listed in `docs/safety-interlocks.md`.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -32,18 +40,24 @@ mod style;
 mod theme;
 
 mod audio;
+mod decode;
+mod outside;
 mod panel;
 mod radio;
-// The panadapter scope; the integrator wires it into the panel.
+mod rx;
+// The panadapter scope. Some of its API is for the example and the tests.
 #[allow(dead_code)]
 mod scope;
+mod scopewin;
 mod settings;
 mod tune;
 
 use eframe::egui::{self, RichText};
+use eframe::egui_wgpu::RenderState;
 use hardrock::{AmpAction, AmpConfig, AmpLink, AmpReadings, AmpStatus, Band};
 use rigcat::{Keying, RigConfig, RigLink, RigStatus};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use panel::{AmpMeters, TxMeters};
@@ -74,6 +88,14 @@ struct Saved {
     radio_popped: bool,
     /// The meters' needle picks (see [`AmpMeters::saved`]).
     meters: Option<[u8; 4]>,
+    /// The panel's receiver and where its I/Q comes from (decision 22).
+    rx: rx::RxSettings,
+    /// The scope's display settings, and whether it was popped out.
+    scope: scope::ScopeSettings,
+    scope_popped: bool,
+    decode: decode::DecodeSettings,
+    /// TCI, rigctld and WSJT-X UDP (decision 25).
+    outside: outside::OutsideSettings,
 }
 
 impl Default for Saved {
@@ -87,6 +109,11 @@ impl Default for Saved {
             audio_out: None,
             radio_popped: false,
             meters: None,
+            rx: rx::RxSettings::default(),
+            scope: scope::ScopeSettings::default(),
+            scope_popped: false,
+            decode: decode::DecodeSettings::default(),
+            outside: outside::OutsideSettings::default(),
         }
     }
 }
@@ -94,7 +121,9 @@ impl Default for Saved {
 struct App {
     saved: Saved,
     link: Option<AmpLink>,
-    rig: Option<RigLink>,
+    /// Shared (weakly) with the outside programs' links, which unkey through
+    /// it at once.
+    rig: Option<Arc<RigLink>>,
     view: AmpMeters,
     show_settings: bool,
     show_radio: bool,
@@ -120,6 +149,22 @@ struct App {
     tone_error: Option<String>,
     /// Since when the radio has been seen transmitting.
     rig_keyed_since: Option<Instant>,
+    render_state: Option<RenderState>,
+    scope: scope::Scope,
+    rx: rx::Rx,
+    show_scope: bool,
+    show_decode: bool,
+    decode: decode::Decode,
+    outside: outside::Outside,
+    /// The I/Q source as being chosen, applied with APPLY.
+    draft_source: rx::IqChoice,
+    draft_outside: outside::OutsideSettings,
+    elad_devices: Vec<elad_iq::EladDevice>,
+    /// The receiver is to be (re)started, asked when.
+    rx_restart: Option<Instant>,
+    /// The transverter offset last seen, to keep the radio window's and the
+    /// scope's the same.
+    xvtr_seen: Option<i64>,
 }
 
 /// How long the radio is given to show a TUNE keyed before its tone is
@@ -138,16 +183,37 @@ impl App {
         let mut saved: Saved =
             cc.storage.and_then(|s| eframe::get_value(s, STORAGE_KEY)).unwrap_or_default();
         apply_args(&mut saved.amp, &mut saved.rig, std::env::args().skip(1));
+        let view_args = ViewArgs::parse(std::env::args().skip(1));
+        if view_args.demo {
+            saved.rx.source = rx::IqChoice::Demo;
+        }
         let mut view = AmpMeters::default();
         if let Some(m) = saved.meters {
             view.restore(m);
         }
         let link = saved.amp.enabled.then(|| AmpLink::start(saved.amp.clone()));
-        let rig = saved.rig.enabled.then(|| RigLink::start(saved.rig.clone()));
+        let rig = saved.rig.enabled.then(|| Arc::new(RigLink::start(saved.rig.clone())));
         // Straight to the settings on the first run, when there is nothing to
         // connect to yet.
-        let show_settings = !saved.amp.enabled;
+        let show_settings = !saved.amp.enabled && !view_args.demo;
+        let render_state = cc.wgpu_render_state.clone();
+        let scope = scope::Scope::new(render_state.as_ref(), saved.scope.clone());
+        let rx = rx::Rx::new(&saved.rx);
+        let mut outside = outside::Outside::default();
+        outside.apply(&saved.outside, &rx.taps);
         App {
+            render_state,
+            scope,
+            rx,
+            show_scope: view_args.demo || view_args.scope,
+            show_decode: view_args.decode,
+            decode: decode::Decode::default(),
+            outside,
+            draft_source: saved.rx.source,
+            draft_outside: saved.outside.clone(),
+            elad_devices: Vec::new(),
+            rx_restart: Some(Instant::now()),
+            xvtr_seen: None,
             draft: saved.amp.clone(),
             draft_rig: saved.rig.clone(),
             saved,
@@ -214,15 +280,23 @@ impl App {
         self.rig = None;
         self.tone.stop();
         if self.saved.rig.enabled {
-            self.rig = Some(RigLink::start(self.saved.rig.clone()));
+            self.rig = Some(Arc::new(RigLink::start(self.saved.rig.clone())));
         }
         self.band_told = None;
+        if self.draft_source != self.saved.rx.source || self.rx.error.is_some() {
+            self.saved.rx.source = self.draft_source;
+            self.rx.stop();
+            self.rx_restart = Some(Instant::now());
+        }
+        self.saved.outside = self.draft_outside.clone();
+        self.outside.apply(&self.saved.outside, &self.rx.taps);
     }
 
     /// While TUNE is keyed, tell the link the panel still wants it, or stop
     /// it if interlock #6 says so. Keep the tone at the Tune slider's level,
     /// and stop it once TUNE has unkeyed.
     fn keep_tune(&mut self, amp: &AmpStatus, rig: Option<&RigStatus>) {
+        let outside = self.outside.holder().is_some();
         let tuning = rig.and_then(|r| r.tuning);
         let waiting = self.tone_asked.is_some_and(|t| t.elapsed() < KEY_SETTLE);
         if tuning.is_some() {
@@ -232,6 +306,22 @@ impl App {
             self.tone.stop();
         }
         let (Some(link), Some(r), Some(t)) = (&self.rig, rig, tuning) else { return };
+        if outside {
+            // SAFETY INTERLOCK (docs/safety-interlocks.md, #8 with #6): an
+            // outside program's transmission is watched as TUNE is, at the
+            // radio's full power setting (its audio can bring it that high),
+            // and stopped when transmitting from outside is turned off.
+            let watts = tune::planned_watts(r, Keying::Carrier, 1.0);
+            let why = tune::tune_must_stop(amp, r, self.saved.swr_warn, watts).or_else(|| {
+                (!self.outside.allow_tx())
+                    .then(|| "transmitting from outside programs was turned off".to_string())
+            });
+            match why {
+                Some(why) => link.tune_stop(Some(why)),
+                None => link.tune_alive(),
+            }
+            return;
+        }
         if t.keying == Keying::Audio {
             self.tone.set_gain(self.tone_gain(r));
         }
@@ -376,6 +466,142 @@ impl App {
         }
     }
 
+    /// Keep the radio window's transverter offset and the scope's the same:
+    /// whichever changed last wins.
+    fn sync_xvtr(&mut self, ctx: &egui::Context, radio_hz: i64) {
+        let scope_hz = self.scope.settings().transverter_hz.round() as i64;
+        match self.xvtr_seen {
+            Some(seen) if radio_hz != seen => {
+                self.scope.set_transverter_hz(radio_hz as f64);
+                self.saved.scope = self.scope.settings().clone();
+                self.xvtr_seen = Some(radio_hz);
+            }
+            Some(seen) if scope_hz != seen => {
+                radio::set_xvtr_hz(ctx, scope_hz);
+                self.xvtr_seen = Some(scope_hz);
+            }
+            None => {
+                self.scope.set_transverter_hz(radio_hz as f64);
+                self.xvtr_seen = Some(radio_hz);
+            }
+            _ => {}
+        }
+    }
+
+    /// The receiver, the outside programs and the decoders, once a frame.
+    fn run_receiver(
+        &mut self,
+        ctx: &egui::Context,
+        amp: &AmpStatus,
+        rig: Option<&RigStatus>,
+        transmitting: bool,
+        xvtr: i64,
+    ) {
+        let now = rx::RadioNow { link: self.rig.as_deref(), rig, transmitting };
+        if let Some(at) = self.rx_restart {
+            // Opening the ELAD tunes the DUO to the centre it is given: wait
+            // a while for the CAT link to read VFO A, so it opens where the
+            // radio already is.
+            let cat_due = self.saved.rx.source == rx::IqChoice::Elad
+                && self.saved.rig.enabled
+                && !rig.is_some_and(|r| r.connected && r.freq_hz.is_some())
+                && at.elapsed() < CAT_WAIT;
+            if !cat_due {
+                self.rx_restart = None;
+                self.rx.start(&self.saved.rx, &self.scope, now);
+            }
+        }
+        self.rx.frame(&mut self.saved.rx, &self.scope, now);
+        if std::mem::take(&mut self.rx.restart) {
+            self.rx.start(&self.saved.rx, &self.scope, now);
+        }
+        let reqs = self.outside.frame(outside::Frame {
+            ctx,
+            amp,
+            rig,
+            link: self.rig.as_ref(),
+            rx: &self.rx,
+            transmitting,
+        });
+        for r in reqs {
+            self.outside_req(r, rig, transmitting);
+        }
+        let at = decode::Where {
+            dial_hz: self.rx.rx_hz,
+            lsb: self.rx.mode.is_lower(),
+            xvtr_hz: xvtr as f64,
+            ppm: self.scope.settings().ppm,
+        };
+        self.decode.frame(&self.saved.decode, &self.rx, at, self.outside.wsjtx.as_ref());
+    }
+
+    /// Make a change an outside program asked for, as the panel's own
+    /// controls would: the receiver and VFO A, the mode, the centre.
+    fn outside_req(&mut self, r: outside::Req, rig: Option<&RigStatus>, transmitting: bool) {
+        use outside::Req;
+        let now = rx::RadioNow { link: self.rig.as_deref(), rig, transmitting };
+        let proto = self.saved.rig.model.protocol();
+        let cat = |f: Option<rigcat::Frame>| {
+            if let (Some(l), Some(f)) = (&self.rig, f) {
+                // Read back; refused while transmitting (#5).
+                l.set(vec![f]);
+            }
+        };
+        let active = self.rx.active();
+        match r {
+            Req::FreqA(hz) if active => {
+                let rate = self.rx.rate();
+                if rate <= 0.0 || (hz - self.rx.centre()).abs() > 0.45 * rate {
+                    self.rx.recentre(hz, now);
+                }
+                self.rx.tune(hz, transmitting);
+            }
+            Req::FreqA(hz) => cat(proto.set_freq(rigcat::Vfo::A, hz.round() as u64)),
+            Req::FreqB(hz) => cat(proto.set_freq(rigcat::Vfo::B, hz.round() as u64)),
+            Req::Mode(m, w) if active => self.rx.set_mode(m, w.map(|w| passband_for(m, w)), now),
+            Req::Mode(m, _) => cat(proto.set_mode(rx::rig_mode(m))),
+            Req::Split(on) => cat(proto.set_split(on)),
+            Req::Centre(hz) => self.rx.recentre(hz, now),
+        }
+    }
+
+    fn scope_window(&mut self, ctx: &egui::Context, rig: Option<&RigStatus>, transmitting: bool) {
+        let mut open = true;
+        let srig = scope::ScopeRig {
+            rx_hz: self.rx.rx_hz,
+            mode: self.rx.mode,
+            passband: self.rx.passband,
+            transmitting,
+        };
+        let args = scopewin::Args {
+            rx: &self.rx,
+            settings: &mut self.saved.rx,
+            rig: srig,
+            cat: rig.is_some_and(|r| r.connected),
+            links: self.outside.summary(),
+        };
+        let o =
+            scopewin::scope_window(ctx, &mut open, self.saved.scope_popped, &mut self.scope, args);
+        if let Some(p) = o.pop {
+            self.saved.scope_popped = p;
+        }
+        if o.reopen {
+            self.rx.stop();
+            self.rx_restart = Some(Instant::now());
+        }
+        if o.settings {
+            self.show_settings = true;
+        }
+        if let Some(so) = o.scope {
+            if so.settings_changed {
+                self.saved.scope = self.scope.settings().clone();
+            }
+            let now = rx::RadioNow { link: self.rig.as_deref(), rig, transmitting };
+            self.rx.apply_scope(so, &mut self.saved.rx, now);
+        }
+        self.show_scope = open;
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context, st: &AmpStatus, rig: Option<&RigStatus>) {
         let mut open = self.show_settings;
         let mut apply = false;
@@ -403,6 +629,7 @@ impl App {
                         {
                             self.ports = serial_ports();
                             self.sounds = audio::output_devices();
+                            self.elad_devices = elad_iq::list();
                         }
                     });
                     ui.add_space(6.0);
@@ -425,6 +652,23 @@ impl App {
                         &self.sounds,
                         &mut self.saved.audio_out,
                     );
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    if settings::settings_receiver_tab(
+                        ui,
+                        &mut self.draft_source,
+                        &mut self.saved.rx.audio_out,
+                        &self.sounds,
+                        &self.elad_devices,
+                        &self.rx,
+                    ) {
+                        self.elad_devices = elad_iq::list();
+                    }
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    outside::settings_section(ui, &mut self.draft_outside, &self.outside);
                 });
                 ui.add_space(8.0);
                 apply = settings::apply_button(ui);
@@ -440,11 +684,16 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         let mut st = self.status();
-        let rig = self.rig.as_ref().map(RigLink::status);
-        self.follow_band(&st, rig.as_ref(), radio::xvtr_hz(ctx));
+        let rig = self.rig.as_ref().map(|l| l.status());
+        let xvtr = radio::xvtr_hz(ctx);
+        self.follow_band(&st, rig.as_ref(), xvtr);
         // The amplifier as it reports itself, before the radio's readings
         // fill it in: what TUNE's interlocks (#6) judge by.
         let amp_raw = st.clone();
+        self.sync_xvtr(ctx, xvtr);
+        let transmitting =
+            rig.as_ref().is_some_and(|r| r.connected && r.transmitting()) || amp_keyed(&amp_raw);
+        self.run_receiver(ctx, &amp_raw, rig.as_ref(), transmitting, xvtr);
         self.keep_tune(&amp_raw, rig.as_ref());
         let ptt_missing = self.ptt_missing(&amp_raw, rig.as_ref());
         // In bypass the amplifier reports no FWD, RFL or SWR: the radio's own
@@ -477,8 +726,34 @@ impl eframe::App for App {
                     {
                         self.show_radio = !self.show_radio;
                     }
+                    if chrome::chip(ui, self.show_scope, "SCOPE")
+                        .on_hover_text(
+                            "The panadapter and the panel's own receiver, from the radio's I/Q",
+                        )
+                        .clicked()
+                    {
+                        self.show_scope = !self.show_scope;
+                    }
+                    if chrome::chip(ui, self.show_decode, "DECODE")
+                        .on_hover_text("The panel's decoders: WSJT, keyboard, pictures, data links")
+                        .clicked()
+                    {
+                        self.show_decode = !self.show_decode;
+                    }
                     ui.add_space(8.0);
-                    let (text, col) = if let Some(k) = ptt_missing {
+                    let (text, col) = if let Some(h) = self.outside.holder() {
+                        (
+                            format!(
+                                "Keyed by an outside program ({}). STOP on the TUNE strip unkeys \
+                                 it.",
+                                match h {
+                                    links::PttSource::Tci { .. } => "TCI",
+                                    links::PttSource::Rigctld { .. } => "rigctld",
+                                }
+                            ),
+                            theme::CYAN(),
+                        )
+                    } else if let Some(k) = ptt_missing {
                         let more = if k == Keying::Carrier {
                             " RIG TUNE may not key the radio's PTT output: try TUNE."
                         } else {
@@ -594,6 +869,21 @@ impl eframe::App for App {
             }
             self.show_radio = open;
         }
+        if self.show_scope {
+            self.scope_window(ctx, rig.as_ref(), transmitting);
+        }
+        if self.show_decode {
+            let mut open = true;
+            decode::window(
+                ctx,
+                &mut open,
+                &mut self.decode,
+                &mut self.saved.decode,
+                &self.rx,
+                self.outside.wsjtx.is_some(),
+            );
+            self.show_decode = open;
+        }
 
         self.saved.meters = Some(self.view.saved());
         // The link updates on its own thread: look again a few times a second.
@@ -602,6 +892,15 @@ impl eframe::App for App {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, STORAGE_KEY, &self.saved);
+    }
+
+    /// Let the radio's USB I/Q go, stop the decoders and the servers (which
+    /// unkeys any outside program), and free the scope's GPU textures.
+    fn on_exit(&mut self) {
+        self.decode.stop(&self.rx.taps);
+        self.outside.apply(&outside::OutsideSettings::default(), &self.rx.taps);
+        self.rx.stop();
+        self.scope.retire(self.render_state.as_ref());
     }
 }
 
@@ -637,6 +936,59 @@ fn apply_args(cfg: &mut AmpConfig, rig: &mut RigConfig, mut args: impl Iterator<
             _ => {}
         }
     }
+}
+
+/// How long a starting ELAD waits for the CAT link to read VFO A.
+const CAT_WAIT: Duration = Duration::from_secs(10);
+
+/// What the command line asks of the windows: `--demo` (the scope on the
+/// demo band), `--scope`, `--decode`, and `--size 1200x900`.
+#[derive(Debug, Default, PartialEq)]
+struct ViewArgs {
+    demo: bool,
+    scope: bool,
+    decode: bool,
+    size: Option<[f32; 2]>,
+}
+
+impl ViewArgs {
+    fn parse(mut args: impl Iterator<Item = String>) -> ViewArgs {
+        let mut v = ViewArgs::default();
+        while let Some(a) = args.next() {
+            match a.as_str() {
+                "--demo" => v.demo = true,
+                "--scope" => v.scope = true,
+                "--decode" => v.decode = true,
+                "--size" => {
+                    v.size = args.next().and_then(|s| {
+                        let (w, h) = s.split_once('x')?;
+                        Some([w.parse().ok()?, h.parse().ok()?])
+                    })
+                }
+                _ => {}
+            }
+        }
+        v
+    }
+}
+
+/// The receiver passband for a width an outside program asks for, as the
+/// panel draws each mode's.
+fn passband_for(m: sdr::Mode, width: u32) -> (f32, f32) {
+    let w = (width as f32).clamp(50.0, 12_000.0);
+    match m {
+        sdr::Mode::Usb => (100.0, 100.0 + w),
+        sdr::Mode::Lsb => (-100.0 - w, -100.0),
+        sdr::Mode::Cw => (600.0 - w / 2.0, 600.0 + w / 2.0),
+        sdr::Mode::Cwr => (-600.0 - w / 2.0, -600.0 + w / 2.0),
+        sdr::Mode::Am | sdr::Mode::Fm => (-w / 2.0, w / 2.0),
+    }
+}
+
+/// The amplifier says it is keyed, or shows RF (as interlocks 1 and 2).
+fn amp_keyed(amp: &AmpStatus) -> bool {
+    amp.connected
+        && (amp.transmitting == Some(true) || amp.readings.as_ref().is_some_and(rf_present))
 }
 
 /// The amplifier's drive limit while it is in line (PTT), or `None` in OFF.
@@ -728,10 +1080,11 @@ fn main() -> eframe::Result {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+    let size = ViewArgs::parse(std::env::args().skip(1)).size;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Hardrock Panel")
-            .with_inner_size([760.0, 820.0])
+            .with_inner_size(size.unwrap_or([760.0, 820.0]))
             .with_min_inner_size([520.0, 420.0]),
         wgpu_options: scope::gpu::wgpu_options(),
         ..Default::default()
@@ -837,6 +1190,30 @@ mod tests {
         assert_eq!(band_of(28_074_000), Some(Band::M10));
         assert_eq!(band_of(50_313_000), None);
         assert_eq!(band_of(15_000_000), None);
+    }
+
+    #[test]
+    fn the_command_line_opens_the_scope_on_the_demo_band() {
+        let args = ["--port", "COM5", "--demo", "--decode", "--size", "1200x900"].map(String::from);
+        let v = ViewArgs::parse(args.into_iter());
+        assert!(v.demo && v.decode && !v.scope);
+        assert_eq!(v.size, Some([1200.0, 900.0]));
+    }
+
+    #[test]
+    fn older_settings_leave_the_scope_and_the_outside_links_off() {
+        let s: Saved = serde_json::from_str(r#"{"swr_warn": 3.0}"#).unwrap();
+        assert_eq!(s.rx.source, rx::IqChoice::Off);
+        assert!(s.rx.tx_follows_rx);
+        assert!(!s.outside.tci && !s.outside.rigctld && !s.outside.allow_tx);
+        assert_eq!((s.outside.tci_port, s.outside.rigctld_port), (50001, 4532));
+    }
+
+    #[test]
+    fn an_outside_programs_width_becomes_a_passband() {
+        assert_eq!(passband_for(sdr::Mode::Usb, 3000), (100.0, 3100.0));
+        assert_eq!(passband_for(sdr::Mode::Lsb, 2400), (-2500.0, -100.0));
+        assert_eq!(passband_for(sdr::Mode::Cw, 500), (350.0, 850.0));
     }
 
     #[test]

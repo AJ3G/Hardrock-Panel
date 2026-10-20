@@ -164,6 +164,16 @@ pub(crate) fn xvtr_hz(ctx: &egui::Context) -> i64 {
     ctx.data_mut(|d| d.get_persisted::<RadioPrefs>(prefs_id())).map_or(0, |p| p.xvtr_hz)
 }
 
+/// Set the transverter LO, as if typed in the radio window (the scope's own
+/// setting is kept the same as this one).
+pub(crate) fn set_xvtr_hz(ctx: &egui::Context, hz: i64) {
+    ctx.data_mut(|d| {
+        let mut p: RadioPrefs = d.get_persisted(prefs_id()).unwrap_or_default();
+        p.xvtr_hz = hz;
+        d.insert_persisted(prefs_id(), p);
+    });
+}
+
 fn ui_id() -> egui::Id {
     egui::Id::new("radio-window-ui")
 }

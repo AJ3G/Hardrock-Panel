@@ -648,7 +648,7 @@ fn paint_band_plan(
             if dm.is_empty() { String::new() } else { format!(" · {}", dm.join(", ")) }
         );
         if resp.clicked() && !cx.rig.transmitting {
-            // SAFETY INTERLOCK 8: nothing tunes while transmitting.
+            // SAFETY INTERLOCK 9: nothing tunes while transmitting.
             out.tune_to = Some(cx.map.radio(view::snap(shown, sc.settings.step_hz as f64)));
         }
     }
@@ -944,7 +944,7 @@ fn pointer_on(
             d.moved_to(pos.x);
             if d.moved {
                 match d.kind {
-                    // SAFETY INTERLOCK 8: a press made while transmitting is
+                    // SAFETY INTERLOCK 9: a press made while transmitting is
                     // always a pan (`Drag::press`); one made before keying
                     // stops tuning the moment the radio keys.
                     DragKind::Rx if !tx => {
@@ -1012,7 +1012,7 @@ fn pointer_on(
             if zoom {
                 sc.want_view = Some(view::zoom_at(cx.span, v, f_at(pos.x), wheel_zoom(n)));
             } else if !tx {
-                // SAFETY INTERLOCK 8: no stepping while transmitting.
+                // SAFETY INTERLOCK 9: no stepping while transmitting.
                 let base = out.tune_to.unwrap_or(rx);
                 let shown = view::snap(cx.map.shown(base), step) + n as f64 * step;
                 out.tune_to = Some(cx.map.radio(shown));

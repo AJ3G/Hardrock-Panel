@@ -15,6 +15,11 @@ tracing-subscriber.workspace = true
 # The panadapter: its spectrum frames, and half floats and plain bytes for the
 # waterfall's GPU textures.
 sdr.workspace = true
+elad-iq.workspace = true
+links.workspace = true
+decoders.workspace = true
+datalink.workspace = true
+crossbeam-channel.workspace = true
 half = "2.7.1"
 bytemuck = "1.25.2"
 serialport = { version = "4.10", default-features = false }
