@@ -32,7 +32,7 @@ pub mod window;
 pub mod zoom;
 
 pub use audio::{AudioFeed, AudioOut, output_devices};
-pub use pipeline::{Command, Pipeline, PipelineConfig, Snapshot};
+pub use pipeline::{AudioTap, Command, IqTap, Pipeline, PipelineConfig, Snapshot};
 pub use receiver::{AUDIO_RATE, Receiver, SUPPORTED_RATES, decimation_plan};
 pub use source::{EladSource, IqSource, SynthSignal, SyntheticSource};
 pub use spectrum::{

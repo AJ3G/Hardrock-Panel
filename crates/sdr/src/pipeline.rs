@@ -30,6 +30,16 @@ use crate::spectrum::{Averaging, Overlap, Spectrum, SpectrumConfig, SpectrumFram
 use crate::types::{AgcMode, Mode};
 use crate::zoom::{ZoomRequest, ZoomSpectrum};
 
+/// Takes a copy of every block of I/Q the pipeline reads: interleaved
+/// `I, Q, …`, the span's centre and the complex rate, on the pipeline's own
+/// thread. It must return at once (hand the block to a queue that drops when
+/// full), or the receiver's audio and the radio's USB ring fall behind.
+pub type IqTap = Box<dyn FnMut(&[f32], f64, f64) + Send>;
+
+/// Takes a copy of every block of the receiver's 48 kHz mono audio, on the
+/// pipeline's own thread, under the same rule as [`IqTap`].
+pub type AudioTap = Box<dyn FnMut(&[f32]) + Send>;
+
 /// What the UI can ask of the pipeline.
 pub enum Command {
     /// Receiver dial, Hz from the centre.
@@ -57,6 +67,11 @@ pub enum Command {
     SetHistory(usize),
     /// Run a zoom FFT on one region (`None` stops it); see [`crate::zoom`].
     SetZoom(Option<ZoomRequest>),
+    /// Copy the I/Q to decoders and outside programs; `None` stops it.
+    SetIqTap(Option<IqTap>),
+    /// Copy the receiver's audio to decoders and outside programs, as well
+    /// as to the sound card; `None` stops it.
+    SetAudioTap(Option<AudioTap>),
     /// Stop reading the source (true) or start again.
     Pause(bool),
     Stop,
@@ -247,6 +262,8 @@ fn run(
     receiver.set_gain_db(cfg.gain_db);
     receiver.set_calibration_db(spectrum_cfg.calibration_db);
     let mut audio_feed: Option<AudioFeed> = None;
+    let mut iq_tap: Option<IqTap> = None;
+    let mut audio_tap: Option<AudioTap> = None;
     let mut paused = false;
 
     let (block_tx, block_rx) = bounded::<IqBlock>(SPECTRUM_QUEUE);
@@ -298,6 +315,8 @@ fn run(
                         Command::SetZoom(z) => {
                             let _ = msg_tx.send(SpecMsg::Zoom(z));
                         }
+                        Command::SetIqTap(t) => iq_tap = t,
+                        Command::SetAudioTap(t) => audio_tap = t,
                         Command::Pause(p) => paused = p,
                         Command::Stop => unreachable!(),
                     }
@@ -361,10 +380,18 @@ fn run(
                 Err(TrySendError::Disconnected(_)) => break 'outer,
             }
         }
+        if let Some(tap) = iq_tap.as_mut() {
+            tap(&buf[..n], center, rate);
+        }
         audio.clear();
         receiver.process(&buf[..n], &mut audio);
         if let Some(f) = audio_feed.as_mut() {
             f.push(&audio);
+        }
+        if let Some(tap) = audio_tap.as_mut()
+            && !audio.is_empty()
+        {
+            tap(&audio);
         }
         busy += t.elapsed();
         samples += (n / 2) as u64;
@@ -536,6 +563,15 @@ mod tests {
         let p = Pipeline::spawn(Box::new(src), cfg);
         let (feed, mut audio_rx, _) = audio_ring();
         p.set_audio(Some(feed));
+        // Taps see the same I/Q and audio, with the span's centre and rate.
+        let iq_seen = Arc::new(Mutex::new((0usize, 0.0f64, 0.0f64)));
+        let audio_seen = Arc::new(Mutex::new(0usize));
+        let (i2, a2) = (iq_seen.clone(), audio_seen.clone());
+        p.send(Command::SetIqTap(Some(Box::new(move |iq, c, r| {
+            let mut g = i2.lock().unwrap();
+            *g = (g.0 + iq.len(), c, r);
+        }))));
+        p.send(Command::SetAudioTap(Some(Box::new(move |a| *a2.lock().unwrap() += a.len()))));
 
         let s = wait_for(&p, |s| s.history.len() == 8 && s.generation > 20);
         let f = s.latest.clone().unwrap();
@@ -546,6 +582,13 @@ mod tests {
         assert!((s.level_dbm - -37.0).abs() < 0.5, "meter {}", s.level_dbm);
         assert!(Arc::ptr_eq(s.history.back().unwrap(), &f));
         assert!(audio_rx.slots() > 1000, "audio is flowing");
+        let (floats, c, r) = *iq_seen.lock().unwrap();
+        assert!(floats > 0 && floats % 2 == 0);
+        assert_eq!((c, r), (7.1e6, rate));
+        // 48 kHz audio for 4 times fewer complex samples at 192 kHz.
+        let heard = *audio_seen.lock().unwrap();
+        assert!(heard > 1000, "the audio tap is fed");
+        p.send(Command::SetIqTap(None));
 
         // Move the receiver off the carrier: the meter drops to the noise.
         p.set_offset_hz(-50_000.0);
