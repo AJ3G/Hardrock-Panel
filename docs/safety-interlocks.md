@@ -14,7 +14,7 @@ Before removing or loosening any of these, read why it is there.
 
 ## 2. Relay buttons greyed while transmitting (panel)
 
-- **Where:** `crates/hardrock-panel/src/panel.rs`, `rf_present()`, `NOT_WHILE_TX` and the ANT, DN, UP and ON/BYP buttons.
+- **Where:** `crates/hardrock-panel/src/panel.rs`, `rf_present()`, `NOT_WHILE_TX` and `keys()`, which decides the ANT, DN, UP and ON/BYP keys for every look of the AMP window: the panel's own buttons and the soft keys of the ELAD look (`panel/tft.rs`, decision 24). Tested by `every_look_greys_the_relay_keys_while_there_is_rf`.
 - **Blocks:** the same switches as #1, at the button.
 - **When:** the latest reading shows drive of 0.1 W or more, or output of 1 W or more.
 - **Why:** as #1. The button is greyed so the operator knows why nothing would happen, and hovering explains: "Not while transmitting: switching a relay with RF on it can damage it. Unkey first." #1 stays as the last check, because a reading can be a fraction of a second old.
@@ -30,7 +30,7 @@ Before removing or loosening any of these, read why it is there.
 
 ## 4. No OFF to PTT while the drive is over the amplifier's limit (panel and link)
 
-- **Where:** `crates/hardrock-panel/src/panel.rs` (the PTT/OFF button) and `crates/hardrock/src/link.rs`, `act()`.
+- **Where:** `crates/hardrock-panel/src/panel.rs`, `ptt_overdriven()` and `keys()` (the PTT/OFF button or soft key, in every look), and `crates/hardrock/src/link.rs`, `act()`. Tested by `every_look_refuses_ptt_while_overdriven_in_bypass`.
 - **Blocks:** putting the amplifier in line (OFF to PTT).
 - **When:** the drive reads over the amplifier's drive limit: its own yellow DRV level, 8 W on the HR500 (from the operating manual's indicator table; it trips at 12 W). The HR50's 6 W is scaled from the HR500's and untested. The link checks the amplifier's status just before sending; no answer refuses the command, as in #1.
 - **Why:** in OFF (bypass) the radio's own power goes straight through to the tuner, so an operator can run a 100 W radio barefoot through the bypassed amp (AJ3G, 18 Oct 2026). Switching to PTT with that still applied would drive the amplifier far past its trip level and can damage the VRF2944 output devices.
