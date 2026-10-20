@@ -1,0 +1,23 @@
+[package]
+name = "datalink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Aviation and maritime data links from the radio's I/Q: HFDL, VHF ACARS, VDL Mode 2, AIS and Mode S, by xng's decode cores"
+
+[dependencies]
+decoders.workspace = true
+sdr.workspace = true
+num-complex.workspace = true
+crossbeam-channel.workspace = true
+rayon.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+xng-types.workspace = true
+xng-dsp.workspace = true
+xng-mode-hfdl.workspace = true
+xng-mode-acars.workspace = true
+xng-mode-vdl2.workspace = true
+xng-mode-ais.workspace = true
+xng-mode-adsb.workspace = true

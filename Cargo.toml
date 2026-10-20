@@ -6,7 +6,14 @@ members = [
     "crates/hardrock-panel",
     "crates/elad-iq",
     "crates/sdr",
+    "crates/links",
+    "crates/decoders",
+    "crates/datalink",
 ]
+# airframesio/xng's decode cores, vendored with their own workspace (see
+# vendor/xng/VENDORED.md). Kept out of this one so `cargo fmt` and clippy on
+# the panel's crates leave upstream's code as it is.
+exclude = ["vendor/xng"]
 default-members = ["crates/hardrock-panel"]
 
 [workspace.package]
@@ -34,6 +41,47 @@ thiserror = "2"
 num-complex = "0.4.6"
 rustfft = "6.4.1"
 cpal = "0.18.2"
+# Links for outside programs, and the panel's own decoders.
+links = { path = "crates/links" }
+decoders = { path = "crates/decoders" }
+datalink = { path = "crates/datalink" }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+mfsk-core = { version = "0.10.0", default-features = false, features = ["std", "ft8", "ft4", "wspr", "jt65", "jt9", "fst4", "q65", "parallel", "fft-rustfft"] }
+rayon = "1"
+xng-mode-hfdl = { path = "vendor/xng/crates/xng-mode-hfdl" }
+xng-mode-acars = { path = "vendor/xng/crates/xng-mode-acars" }
+xng-mode-vdl2 = { path = "vendor/xng/crates/xng-mode-vdl2" }
+xng-mode-ais = { path = "vendor/xng/crates/xng-mode-ais" }
+xng-mode-adsb = { path = "vendor/xng/crates/xng-mode-adsb" }
+xng-dsp = { path = "vendor/xng/crates/xng-dsp" }
+xng-types = { path = "vendor/xng/crates/xng-types" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# The decoders are unusably slow unoptimised, tests included.
+[profile.dev.package.mfsk-core]
+opt-level = 2
+[profile.dev.package.decoders]
+opt-level = 2
+[profile.dev.package.datalink]
+opt-level = 2
+[profile.dev.package.xng-dsp]
+opt-level = 2
+[profile.dev.package.xng-mode-hfdl]
+opt-level = 2
+[profile.dev.package.xng-mode-acars]
+opt-level = 2
+[profile.dev.package.xng-mode-vdl2]
+opt-level = 2
+[profile.dev.package.xng-mode-ais]
+opt-level = 2
+[profile.dev.package.xng-mode-adsb]
+opt-level = 2
+[profile.dev.package.xng-acars]
+opt-level = 2
+[profile.dev.package.rustfft]
+opt-level = 2
+[profile.dev.package.sdr]
+opt-level = 2
 
 [profile.release]
 lto = "thin"

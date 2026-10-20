@@ -1,0 +1,15 @@
+[package]
+name = "links"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TCI, Hamlib rigctld and WSJT-X UDP links for outside programs, ported from SDRoxide"
+
+# The servers outside programs use to drive the panel's radio, and the UDP
+# messages loggers listen for. Everything here talks to the panel through the
+# `Rig` trait, so nothing in it knows about the panel itself.
+[dependencies]
+crossbeam-channel.workspace = true
+rtrb.workspace = true
+tracing.workspace = true
+tungstenite.workspace = true
