@@ -12,6 +12,11 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# The panadapter: its spectrum frames, and half floats and plain bytes for the
+# waterfall's GPU textures.
+sdr.workspace = true
+half = "2.7.1"
+bytemuck = "1.25.2"
 serialport = { version = "4.10", default-features = false }
 # TUNE's tone, into the radio's USB audio.
 cpal = "0.18.2"

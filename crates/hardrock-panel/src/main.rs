@@ -34,6 +34,9 @@ mod theme;
 mod audio;
 mod panel;
 mod radio;
+// The panadapter scope; the integrator wires it into the panel.
+#[allow(dead_code)]
+mod scope;
 mod settings;
 mod tune;
 
@@ -710,6 +713,7 @@ fn main() -> eframe::Result {
             .with_title("Hardrock Panel")
             .with_inner_size([760.0, 820.0])
             .with_min_inner_size([520.0, 420.0]),
+        wgpu_options: scope::gpu::wgpu_options(),
         ..Default::default()
     };
     eframe::run_native("Hardrock Panel", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
