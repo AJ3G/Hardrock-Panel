@@ -608,6 +608,31 @@ mod tests {
     }
 
     #[test]
+    fn a_hamlib_program_reads_the_panel_and_cannot_key_it_by_default() {
+        use std::io::{Read, Write};
+        let mut o = Outside::default();
+        o.shared.lock().state.vfo_a_hz = 7_074_000.0;
+        let taps = rx::Taps::default();
+        let s = OutsideSettings { rigctld: true, rigctld_port: 0, ..OutsideSettings::default() };
+        o.apply(&s, &taps);
+        assert!(o.errors.is_empty(), "{:?}", o.errors);
+        let addr = o.rigctld.as_ref().unwrap().addr().to_string();
+        let mut sock = std::net::TcpStream::connect(addr).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut ask = |q: &[u8]| {
+            sock.write_all(q).unwrap();
+            let mut b = [0u8; 256];
+            let n = sock.read(&mut b).unwrap();
+            String::from_utf8_lossy(&b[..n]).into_owned()
+        };
+        assert_eq!(ask(b"f\n"), "7074000\n");
+        assert!(ask(b"T 1\n").starts_with("RPRT -"), "refused with transmit off");
+        assert!(o.holder().is_none());
+        o.apply(&OutsideSettings::default(), &taps);
+        assert!(o.rigctld.is_none());
+    }
+
+    #[test]
     fn a_program_cannot_key_while_the_panel_starts_its_own_tune() {
         let o = Outside::default();
         {
