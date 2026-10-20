@@ -13,7 +13,10 @@
 //! change) starts the history afresh.
 //!
 //! This side decides which slot each row goes in, so the GPU side only
-//! copies; it is all plain data and tested here.
+//! copies; it is all plain data and tested here. With the FFT on the GPU
+//! the rows never come to the CPU at all: the same bookkeeping hands out
+//! the slots and bands (`push_*_gpu`), the rows go out with no bins, and the
+//! GPU pools its own spectrum into those slots.
 
 use super::view::{Span, View, coverage};
 
@@ -39,8 +42,26 @@ pub struct RowData {
     /// The band the row covers, Hz from the reference.
     pub lo: f32,
     pub hi: f32,
-    /// dBm, as half-float bits, `tex_w` of them.
+    /// dBm, as half-float bits, `tex_w` of them; empty when the GPU writes
+    /// the row itself and only the band is to be stored.
     pub bins: Vec<u16>,
+}
+
+/// The GPU spectrum's share of an upload: what to run, as the GPU side
+/// defines it. Compared by identity.
+#[derive(Clone)]
+pub struct GpuPart(pub std::sync::Arc<super::gpu::GpuFrame>);
+
+impl std::fmt::Debug for GpuPart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GpuPart({} ops)", self.0.work.ops.len())
+    }
+}
+
+impl PartialEq for GpuPart {
+    fn eq(&self, other: &GpuPart) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// Everything to write to the GPU this repaint.
@@ -52,12 +73,28 @@ pub struct Upload {
     pub clear: bool,
     pub wf: Vec<RowData>,
     pub surface: Vec<RowData>,
+    /// The surface slot that held the live row before this upload: keep a
+    /// copy of it before anything is written, for the live row to move on
+    /// from smoothly.
+    pub prev: Option<u32>,
+    pub gpu: Option<GpuPart>,
 }
 
 impl Upload {
     pub fn is_empty(&self) -> bool {
-        !self.clear && self.wf.is_empty() && self.surface.is_empty()
+        !self.clear && self.wf.is_empty() && self.surface.is_empty() && self.gpu.is_none()
     }
+}
+
+/// What the GPU does for one frame's waterfall row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WfStep {
+    /// The band to pool the frame over.
+    pub cov: View,
+    /// Keep the strongest of this frame and what is gathered (a slow row).
+    pub max: bool,
+    /// The row is complete: into this slot.
+    pub slot: Option<u32>,
 }
 
 /// A slow waterfall row being gathered from several frames.
@@ -87,6 +124,14 @@ pub struct Rows {
     /// which glides the rows back between whole steps.
     s3_accum: f32,
     last_time: Option<f64>,
+    /// A slow waterfall row the GPU is gathering: its band and frames.
+    gpu_pending: Option<(View, u32)>,
+    /// The live surface row's band, the one before it, when the live row
+    /// last changed and how often it does.
+    live_band: Option<(f32, f32)>,
+    prev_band: Option<(f32, f32)>,
+    live_at: f64,
+    live_iv: f64,
     seq: u64,
     clear: bool,
     scratch: Vec<f32>,
@@ -105,6 +150,11 @@ impl Rows {
             s3_count: 0,
             s3_accum: 0.0,
             last_time: None,
+            gpu_pending: None,
+            live_band: None,
+            prev_band: None,
+            live_at: f64::NAN,
+            live_iv: 1.0 / 30.0,
             seq: 0,
             clear: false,
             scratch: Vec::new(),
@@ -147,6 +197,21 @@ impl Rows {
         self.s3_count
     }
 
+    /// How far the live surface row has come from the previous spectrum to
+    /// the newest at `now`, 0 to 1: the spectra come at the frame rate, the
+    /// screen repaints faster, and the front row moves between them.
+    pub fn live_t(&self, now: f64) -> f32 {
+        if !self.live_at.is_finite() {
+            return 1.0;
+        }
+        ((now - self.live_at) / self.live_iv.max(1e-3)).clamp(0.0, 1.0) as f32
+    }
+
+    /// The previous live row's band, when there is one to move on from.
+    pub fn prev_band(&self) -> Option<(f32, f32)> {
+        self.prev_band
+    }
+
     /// The fraction of a row the surface has flowed since the last one.
     pub fn surface_carry(&self) -> f32 {
         self.s3_accum.clamp(0.0, 1.0)
@@ -162,6 +227,9 @@ impl Rows {
             self.wf_count = 0;
             self.s3_count = 0;
             self.pending = None;
+            self.gpu_pending = None;
+            self.live_band = None;
+            self.prev_band = None;
         }
     }
 
@@ -219,6 +287,38 @@ impl Rows {
         }
     }
 
+    /// [`Rows::push_waterfall`] for a spectrum on the GPU: what to do with
+    /// this frame, and the row's band when it is complete.
+    pub fn push_waterfall_gpu(
+        &mut self,
+        frame: Span,
+        view: View,
+        frames_per_row: u32,
+        utc: f64,
+        out: &mut Upload,
+    ) -> Option<WfStep> {
+        if frame.width <= 0.0 {
+            return None;
+        }
+        self.use_center(frame.center);
+        let cov = coverage(frame, view);
+        let frames = match self.gpu_pending {
+            Some((c, n)) if c == cov => n + 1,
+            _ => 1,
+        };
+        let max = frames > 1;
+        if frames < frames_per_row.max(1) {
+            self.gpu_pending = Some((cov, frames));
+            return Some(WfStep { cov, max, slot: None });
+        }
+        self.gpu_pending = None;
+        self.wf_head = (self.wf_head + 1) % WF_ROWS;
+        self.wf_count = (self.wf_count + 1).min(WF_ROWS);
+        self.wf_times[self.wf_head as usize] = utc;
+        out.wf.push(self.row(self.wf_head, cov, &[]));
+        Some(WfStep { cov, max, slot: Some(self.wf_head) })
+    }
+
     /// Advance the 3D surface to `now` (seconds) at `rows_per_sec`, and write
     /// the newest spectrum as its live front row (`db` is `None` when no new
     /// frame came, and only the flow moves).
@@ -230,23 +330,68 @@ impl Rows {
         rows_per_sec: f32,
         out: &mut Upload,
     ) {
+        let db = db.filter(|(d, _)| !d.is_empty());
+        let Some((cov, slots)) = self.surface_step(db.map(|d| d.1), view, now, rows_per_sec, out)
+        else {
+            return;
+        };
+        if let Some((db, frame)) = db {
+            self.pool(db, frame, cov);
+        }
+        let row = self.row(0, cov, &self.scratch);
+        for slot in slots {
+            out.surface.push(RowData { slot, ..row.clone() });
+        }
+    }
+
+    /// [`Rows::push_surface`] for a spectrum on the GPU: the rows go out
+    /// with their bands only, and this says which band to pool the frame
+    /// over and which slots it goes in (the live row's last).
+    pub fn push_surface_gpu(
+        &mut self,
+        frame: Option<Span>,
+        view: View,
+        now: f64,
+        rows_per_sec: f32,
+        out: &mut Upload,
+    ) -> Option<(View, Vec<u32>)> {
+        let (cov, slots) = self.surface_step(frame, view, now, rows_per_sec, out)?;
+        let row = self.row(0, cov, &[]);
+        for &slot in &slots {
+            out.surface.push(RowData { slot, ..row.clone() });
+        }
+        Some((cov, slots))
+    }
+
+    /// The surface's flow: which slots a new frame over `frame` goes in.
+    fn surface_step(
+        &mut self,
+        frame: Option<Span>,
+        view: View,
+        now: f64,
+        rows_per_sec: f32,
+        out: &mut Upload,
+    ) -> Option<(View, Vec<u32>)> {
         let dt = self.last_time.map_or(0.0, |t| (now - t).clamp(0.0, 0.3));
         self.last_time = Some(now);
-        let Some((db, frame)) = db.filter(|(d, f)| !d.is_empty() && f.width > 0.0) else {
+        let Some(frame) = frame.filter(|f| f.width > 0.0) else {
             // Nothing new to lay down: still let the rows glide, up to a row.
             if self.s3_count > 0 {
                 self.s3_accum = (self.s3_accum + dt as f32 * rows_per_sec).min(0.999);
             }
-            return;
+            return None;
         };
         self.use_center(frame.center);
         let cov = coverage(frame, view);
-        self.pool(db, frame, cov);
         self.s3_accum += dt as f32 * rows_per_sec;
         let due = (self.s3_accum.floor() as u32).min(MAX_STEP);
         self.s3_accum -= self.s3_accum.floor();
         if self.s3_count == 0 {
             self.s3_count = 1;
+            self.prev_band = None;
+        } else {
+            out.prev = Some(self.s3_head);
+            self.prev_band = self.live_band;
         }
         for _ in 0..due {
             // The live row stays where it is as the newest history row; a
@@ -254,22 +399,27 @@ impl Rows {
             self.s3_head = (self.s3_head + 1) % SURFACE_ROWS;
             self.s3_count = (self.s3_count + 1).min(DEPTH + 1);
         }
-        let row = self.row(self.s3_head, cov, &self.scratch);
-        if due > 0 {
-            // The rows laid down this repaint, as copies of the live one.
-            for k in 1..due.min(DEPTH) {
-                let mut r = row.clone();
-                r.slot = (self.s3_head + SURFACE_ROWS - k) % SURFACE_ROWS;
-                out.surface.push(r);
-            }
+        // The rows laid down this repaint, as copies of the live one, and
+        // the live one.
+        let mut slots: Vec<u32> =
+            (1..due.min(DEPTH)).map(|k| (self.s3_head + SURFACE_ROWS - k) % SURFACE_ROWS).collect();
+        slots.push(self.s3_head);
+        let r = self.ref_hz();
+        self.live_band = Some(((cov.lo - r) as f32, (cov.hi - r) as f32));
+        if self.live_at.is_finite() {
+            let gap = (now - self.live_at).clamp(0.0, 0.5);
+            self.live_iv += (gap - self.live_iv) * 0.2;
         }
-        out.surface.push(row);
+        self.live_at = now;
+        Some((cov, slots))
     }
 
     /// Forget the surface, as when it is switched off: coming back to it
     /// should not show minutes-old rows as the last few seconds.
     pub fn clear_surface(&mut self) {
         self.s3_count = 0;
+        self.live_band = None;
+        self.prev_band = None;
         self.s3_accum = 0.0;
         self.last_time = None;
     }
@@ -422,5 +572,41 @@ mod tests {
         assert_eq!(r.surface_count(), DEPTH + 1);
         r.clear_surface();
         assert_eq!(r.surface_count(), 0);
+    }
+
+    #[test]
+    fn the_gpu_gets_slots_and_bands_and_no_bins() {
+        let mut r = Rows::new(256);
+        let mut up = Upload::default();
+        let steps: Vec<WfStep> =
+            (0..3).map(|_| r.push_waterfall_gpu(SPAN, whole(), 3, 5.0, &mut up).unwrap()).collect();
+        // A slow row: started, then gathered, then complete in slot 0.
+        assert_eq!(
+            steps.iter().map(|s| (s.max, s.slot)).collect::<Vec<_>>(),
+            [(false, None), (true, None), (true, Some(0))]
+        );
+        assert_eq!(up.wf.len(), 1);
+        assert!(up.wf[0].bins.is_empty());
+        assert_eq!((up.wf[0].lo, up.wf[0].hi), (-96_000.0, 96_000.0));
+        assert_eq!(r.wf_time(0), Some(5.0));
+
+        // The surface: the live row's slot, then on the next frame the slot
+        // it was in is the one to keep as the previous spectrum.
+        let mut up = Upload::default();
+        let (_, slots) = r.push_surface_gpu(Some(SPAN), whole(), 1.0, 16.0, &mut up).unwrap();
+        assert_eq!(slots, [r.surface_head()]);
+        assert_eq!(up.prev, None);
+        assert!(r.prev_band().is_none());
+        let head = r.surface_head();
+        let mut up = Upload::default();
+        let (_, slots) = r.push_surface_gpu(Some(SPAN), whole(), 1.125, 16.0, &mut up).unwrap();
+        assert_eq!(up.prev, Some(head));
+        assert_eq!(r.prev_band(), Some((-96_000.0, 96_000.0)));
+        assert_eq!(slots.len(), 2);
+        assert!(up.surface.iter().all(|s| s.bins.is_empty()));
+        // Halfway to the next spectrum, the front row is halfway there.
+        let t = r.live_t(1.125 + r.live_iv / 2.0);
+        assert!((t - 0.5).abs() < 1e-3, "{t}");
+        assert_eq!(r.live_t(100.0), 1.0);
     }
 }

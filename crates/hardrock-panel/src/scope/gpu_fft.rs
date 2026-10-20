@@ -45,8 +45,8 @@ pub const MAX_QUERIES: usize = 8;
 // row being gathered. The 3D row is copied to a texture from its offset,
 // which must be a multiple of 256 bytes.
 const RES_PEAKS: u32 = 8;
-const TRACE_OFF: u32 = 64;
-const PEAK_OFF: u32 = TRACE_OFF + MAX_TRACE;
+pub(crate) const TRACE_OFF: u32 = 64;
+pub(crate) const PEAK_OFF: u32 = TRACE_OFF + MAX_TRACE;
 const S3_OFF: u32 = PEAK_OFF + MAX_TRACE;
 const PEND_OFF: u32 = S3_OFF + MAX_ROW;
 const OUT_LEN: u32 = PEND_OFF + MAX_ROW;
@@ -562,6 +562,17 @@ impl Engine {
         }
     }
 
+    /// The I/Q ring it reads.
+    pub fn iq(&self) -> &wgpu::Buffer {
+        &self.iq
+    }
+
+    /// The results buffer, which the trace is drawn from (see trace.wgsl
+    /// for its layout).
+    pub fn out(&self) -> &wgpu::Buffer {
+        &self.outb
+    }
+
     /// Pick up any readback that has arrived; the newest is kept in `last`.
     pub fn collect(&mut self) -> Option<&Readout> {
         let mut newest: Option<Readout> = None;
@@ -761,7 +772,21 @@ impl Engine {
                 }
                 Cmd::Read { idx } => {
                     let s = &self.staging[idx];
-                    enc.copy_buffer_to_buffer(&self.outb, 0, &s.buf, 0, READ_LEN as u64 * 4);
+                    // Only what the readout uses: the results, the trace,
+                    // and the peak trace when there is one.
+                    let (cols, peak) =
+                        s.meta.as_ref().map_or((0, false), |m| (m.cols.min(MAX_TRACE), m.peak));
+                    enc.copy_buffer_to_buffer(
+                        &self.outb,
+                        0,
+                        &s.buf,
+                        0,
+                        (TRACE_OFF + cols) as u64 * 4,
+                    );
+                    if peak && cols > 0 {
+                        let at = PEAK_OFF as u64 * 4;
+                        enc.copy_buffer_to_buffer(&self.outb, at, &s.buf, at, cols as u64 * 4);
+                    }
                     s.state.store(1, Ordering::Release);
                     let state = s.state.clone();
                     enc.map_buffer_on_submit(&s.buf, wgpu::MapMode::Read, .., move |r| {

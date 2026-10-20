@@ -4,8 +4,78 @@
 //! The DUO runs from a GPS-disciplined reference (AJ3G's Leo Bodnar GPSDO), so
 //! frequencies here are good to well under a hertz: a marker on a peak reads
 //! the peak interpolated between bins, to 0.1 Hz.
+//!
+//! The markers read a [`Bins`]: a CPU spectrum frame, or [`Exact`], the GPU
+//! spectrum's trace columns with the strongest bins it found in the bands
+//! asked for (the view, and each tracking marker's window), read back at
+//! the spectrum's full resolution.
 
-use sdr::SpectrumFrame;
+use sdr::{Peak, SpectrumFrame};
+
+/// What a marker reads from.
+pub trait Bins {
+    /// The strongest signal within `[lo, hi]` Hz, interpolated between bins.
+    fn peak_in(&self, lo: f64, hi: f64) -> Option<Peak>;
+    /// The level at `hz`.
+    fn level_at(&self, hz: f64) -> Option<f32>;
+    /// The spectrum's resolution, Hz.
+    fn bin_width(&self) -> f64;
+}
+
+impl Bins for SpectrumFrame {
+    fn peak_in(&self, lo: f64, hi: f64) -> Option<Peak> {
+        SpectrumFrame::peak_in(self, lo, hi)
+    }
+    fn level_at(&self, hz: f64) -> Option<f32> {
+        level_at(self, hz)
+    }
+    fn bin_width(&self) -> f64 {
+        SpectrumFrame::bin_width(self)
+    }
+}
+
+/// The strongest bin the GPU found in `[lo, hi]` Hz.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExactPeak {
+    pub lo: f64,
+    pub hi: f64,
+    pub peak: Peak,
+}
+
+/// A frame of columns, and the peaks found at full resolution.
+pub struct Exact<'a> {
+    pub frame: &'a SpectrumFrame,
+    pub peaks: &'a [ExactPeak],
+    /// The real bin width, Hz.
+    pub bin_hz: f64,
+}
+
+impl Bins for Exact<'_> {
+    /// A peak found over (at least half of) the same band, else the
+    /// strongest column.
+    fn peak_in(&self, lo: f64, hi: f64) -> Option<Peak> {
+        let want = (hi - lo).max(0.0);
+        self.peaks
+            .iter()
+            .filter(|e| {
+                let overlap = e.hi.min(hi) - e.lo.max(lo);
+                (lo..=hi).contains(&e.peak.hz) && overlap >= 0.5 * want
+            })
+            .min_by(|a, b| {
+                let da = ((a.hi - a.lo) - want).abs();
+                let db = ((b.hi - b.lo) - want).abs();
+                da.total_cmp(&db)
+            })
+            .map(|e| e.peak)
+            .or_else(|| self.frame.peak_in(lo, hi))
+    }
+    fn level_at(&self, hz: f64) -> Option<f32> {
+        level_at(self.frame, hz)
+    }
+    fn bin_width(&self) -> f64 {
+        self.bin_hz
+    }
+}
 
 /// One marker.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,7 +130,7 @@ impl Markers {
 
     /// Put the active marker on the strongest signal in `[lo, hi]` and have it
     /// follow it.
-    pub fn snap_to_peak(&mut self, frame: &SpectrumFrame, lo: f64, hi: f64) {
+    pub fn snap_to_peak(&mut self, frame: &impl Bins, lo: f64, hi: f64) {
         if let Some(p) = frame.peak_in(lo, hi) {
             let i = self.active.min(1);
             self.m[i] = Some(Marker { hz: p.hz, track: true });
@@ -69,7 +139,7 @@ impl Markers {
 
     /// Let tracking markers follow their peaks, within `window` Hz either
     /// side.
-    pub fn track(&mut self, frame: &SpectrumFrame, window: f64) {
+    pub fn track(&mut self, frame: &impl Bins, window: f64) {
         for m in self.m.iter_mut().flatten() {
             if m.track
                 && let Some(p) = frame.peak_in(m.hz - window, m.hz + window)
@@ -80,7 +150,7 @@ impl Markers {
     }
 
     /// What marker `i` reads on `frame`.
-    pub fn read(&self, i: usize, frame: &SpectrumFrame) -> Option<Reading> {
+    pub fn read(&self, i: usize, frame: &impl Bins) -> Option<Reading> {
         let m = self.m.get(i).copied().flatten()?;
         if m.track {
             // On its peak: the interpolated level.
@@ -88,11 +158,11 @@ impl Markers {
             let p = frame.peak_in(m.hz - w, m.hz + w)?;
             return Some(Reading { hz: m.hz, dbm: p.dbm });
         }
-        Some(Reading { hz: m.hz, dbm: level_at(frame, m.hz)? })
+        Some(Reading { hz: m.hz, dbm: frame.level_at(m.hz)? })
     }
 
     /// M2 less M1: Δf (Hz) and Δlevel (dB).
-    pub fn delta(&self, frame: &SpectrumFrame) -> Option<(f64, f32)> {
+    pub fn delta(&self, frame: &impl Bins) -> Option<(f64, f32)> {
         let a = self.read(0, frame)?;
         let b = self.read(1, frame)?;
         Some((b.hz - a.hz, b.dbm - a.dbm))
@@ -207,6 +277,31 @@ mod tests {
         assert!((dl - 70.0).abs() < 0.01);
         assert!(level_at(&f, 900.0).is_none());
         assert!((level_at(&f, 1150.5).unwrap() - -120.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_gpus_exact_peaks_are_read_where_they_cover_the_band() {
+        // Columns 10 Hz wide, and the GPU's 1 Hz-resolution peak at 1080.3 Hz.
+        let cols = SpectrumFrame {
+            center_hz: 1100.0,
+            span_hz: 200.0,
+            db: (0..20).map(|i| if i == 8 { -51.0 } else { -120.0 }).collect(),
+            peak: None,
+            seq: 1,
+            enbw: 0.2,
+            noise_dbm: -120.0,
+        };
+        let p = Peak { bin: 80, hz: 1080.3, dbm: -50.0 };
+        let peaks = [ExactPeak { lo: 1060.0, hi: 1100.0, peak: p }];
+        let e = Exact { frame: &cols, peaks: &peaks, bin_hz: 1.0 };
+        assert_eq!(e.peak_in(1062.0, 1098.0), Some(p));
+        // A band it does not cover: the strongest column.
+        let far = e.peak_in(1000.0, 1050.0).unwrap();
+        assert!(far.dbm < -100.0);
+        let mut m = Markers::default();
+        m.snap_to_peak(&e, 1060.0, 1100.0);
+        assert_eq!(m.read(0, &e).unwrap().hz, 1080.3);
+        assert_eq!(e.bin_width(), 1.0);
     }
 
     #[test]

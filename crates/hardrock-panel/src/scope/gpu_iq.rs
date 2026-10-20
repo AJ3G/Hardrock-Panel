@@ -34,6 +34,11 @@
 //!   before work recorded now runs.
 //! * [`GpuIq::epoch_at`] and [`GpuIq::epochs`]: the centre and rate in force
 //!   from each stream position on.
+//! * [`GpuIq::stream`]: which stream the positions count in; a new sink
+//!   starts a new stream from position 0.
+//!
+//! The ring is only fed while [`GpuIq::set_enabled`] says so: with the FFT
+//! on the CPU nothing crosses the bus for it.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -113,6 +118,8 @@ pub struct GpuIq {
     queue: wgpu::Queue,
     feed: Arc<Mutex<Option<Feed>>>,
     run: Mutex<Run>,
+    enabled: Arc<AtomicBool>,
+    stream: AtomicU64,
 }
 
 /// One stream's uploader.
@@ -148,7 +155,19 @@ impl GpuIq {
                 thread: None,
                 started: Instant::now(),
             }),
+            enabled: Arc::new(AtomicBool::new(true)),
+            stream: AtomicU64::new(0),
         }
+    }
+
+    /// Feed the ring (true) or let the tap return at once.
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::Relaxed);
+    }
+
+    /// The stream the positions count in: changes with every new sink.
+    pub(crate) fn stream(&self) -> u64 {
+        self.stream.load(Ordering::Acquire)
     }
 
     fn shared(&self) -> Arc<Shared> {
@@ -180,8 +199,12 @@ impl GpuIq {
             })
             .ok();
         *run = Run { shared, thread, started: Instant::now() };
-        let feed = self.feed.clone();
+        self.stream.fetch_add(1, Ordering::AcqRel);
+        let (feed, enabled) = (self.feed.clone(), self.enabled.clone());
         move |iq, c, r| {
+            if !enabled.load(Ordering::Relaxed) {
+                return;
+            }
             if let Some(f) = lock(&feed).as_mut() {
                 f.push(iq, c, r);
             }

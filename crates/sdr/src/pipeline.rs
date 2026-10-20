@@ -72,6 +72,10 @@ pub enum Command {
     /// Copy the receiver's audio to decoders and outside programs, as well
     /// as to the sound card; `None` stops it.
     SetAudioTap(Option<AudioTap>),
+    /// Run the CPU spectrum (true, the default) or not: off while the
+    /// scope computes its spectrum on the GPU from the I/Q tap, so the I/Q
+    /// is not also queued for a spectrum nobody reads.
+    SetSpectrumOn(bool),
     /// Stop reading the source (true) or start again.
     Pause(bool),
     Stop,
@@ -268,6 +272,7 @@ fn run(
     let mut iq_tap: Option<IqTap> = None;
     let mut audio_tap: Option<AudioTap> = None;
     let mut paused = false;
+    let mut spectrum_on = true;
 
     let (block_tx, block_rx) = bounded::<IqBlock>(SPECTRUM_QUEUE);
     let (msg_tx, msg_rx) = unbounded::<SpecMsg>();
@@ -320,6 +325,12 @@ fn run(
                         }
                         Command::SetIqTap(t) => iq_tap = t,
                         Command::SetAudioTap(t) => audio_tap = t,
+                        Command::SetSpectrumOn(on) => {
+                            spectrum_on = on;
+                            if !on {
+                                pending.iq.clear();
+                            }
+                        }
                         Command::Pause(p) => paused = p,
                         Command::Stop => unreachable!(),
                     }
@@ -360,7 +371,12 @@ fn run(
         let t = Instant::now();
         // Gather the I/Q into blocks of at least MIN_SPECTRUM_BLOCK, each
         // all at one centre and rate.
-        if !pending.iq.is_empty() && (pending.center != center || pending.rate != rate) {
+        // Nothing is queued while the scope draws its spectrum from the
+        // I/Q tap on the GPU.
+        if spectrum_on
+            && !pending.iq.is_empty()
+            && (pending.center != center || pending.rate != rate)
+        {
             let full = std::mem::take(&mut pending.iq);
             match block_tx.try_send(IqBlock {
                 iq: full,
@@ -374,7 +390,9 @@ fn run(
         }
         pending.center = center;
         pending.rate = rate;
-        pending.iq.extend_from_slice(&buf[..n]);
+        if spectrum_on {
+            pending.iq.extend_from_slice(&buf[..n]);
+        }
         if pending.iq.len() >= MIN_SPECTRUM_BLOCK * 2 {
             let full = std::mem::replace(&mut pending.iq, Vec::with_capacity(BLOCK));
             match block_tx.try_send(IqBlock { iq: full, center, rate }) {
@@ -543,6 +561,25 @@ mod tests {
             assert!(t.elapsed() < Duration::from_secs(20), "timed out: {s:?}");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn the_cpu_spectrum_can_be_switched_off_for_the_gpu() {
+        let src = SyntheticSource::new(192_000.0, 7.1e6, -80.0, vec![]);
+        let cfg = PipelineConfig {
+            spectrum: SpectrumConfig { fft_size: 4096, fps: 60.0, ..Default::default() },
+            history: 4,
+            ..Default::default()
+        };
+        let p = Pipeline::spawn(Box::new(src), cfg);
+        wait_for(&p, |s| s.generation > 3);
+        p.send(Command::SetSpectrumOn(false));
+        std::thread::sleep(Duration::from_millis(300));
+        let g = p.snapshot().generation;
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(p.snapshot().generation, g, "no frames while it is off");
+        p.send(Command::SetSpectrumOn(true));
+        wait_for(&p, |s| s.generation > g + 2);
     }
 
     #[test]

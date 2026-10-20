@@ -9,7 +9,7 @@ use eframe::egui::{
 };
 
 use super::bandplan;
-use super::gpu::{self, SurfaceParams, WfParams};
+use super::gpu::{self, SurfaceParams, TraceParams, WfParams};
 use super::levels::{self, level_text, s_unit};
 use super::markers::{fmt_delta, fmt_tenth};
 use super::pointer::{self, Drag, DragKind, Grab, drag_edge, grab_at, wheel_zoom};
@@ -112,7 +112,7 @@ pub(super) fn tft(
     if surface_h > 0.0 {
         paint_surface(sc, ui, surface, trace.height() < 1.0, cx, &mut upload);
     }
-    paint_spectrum(sc, ui, spec_plot, trace, spec_gut, cx, snap);
+    paint_spectrum(sc, ui, spec_plot, trace, spec_gut, cx, snap, &mut upload);
     if bp_h > 0.0 {
         paint_band_plan(sc, ui, bp_plot, bp_gut, cx, out);
     }
@@ -140,6 +140,7 @@ fn split_gutter(r: Rect) -> (Rect, Rect) {
 
 /// The flat spectrum (in `trace`), the frequency grid and every marker over
 /// the whole spectrum area (`all`, which includes the 3D surface's part).
+#[allow(clippy::too_many_arguments)]
 fn paint_spectrum(
     sc: &mut Scope,
     ui: &mut egui::Ui,
@@ -148,6 +149,7 @@ fn paint_spectrum(
     gut: Rect,
     cx: &Ctx,
     snap: &sdr::Snapshot,
+    upload: &mut Option<Arc<Upload>>,
 ) {
     let p = ui.painter_at(all.union(gut));
     let v = cx.view;
@@ -237,7 +239,39 @@ fn paint_spectrum(
     // whole span's.
     let frame = sc.shown().cloned();
     let ppp = ui.ctx().pixels_per_point();
-    if has_trace && let Some(f) = &frame {
+    sc.trace_px = if has_trace { (trace.width() * ppp).round() as u32 } else { 0 };
+    let on_gpu = sc.gpu_fft();
+    if has_trace && on_gpu {
+        // The GPU's own columns, drawn where they fall in the view; the
+        // persistence from what came back of them.
+        if sc.settings.persist && !sc.cols.is_empty() {
+            let cols = sc.cols.clone();
+            paint_persistence(sc, ui, trace, &cols, cx.now);
+        }
+        if let (Some(g), Some(t)) = (sc.gpu, sc.trace_geom) {
+            let x0 = (v.x_of(t.lo, trace.left(), trace.width()) - trace.left()) / trace.width();
+            let x1 = (v.x_of(t.hi, trace.left(), trace.width()) - trace.left()) / trace.width();
+            let rgb =
+                |c: Color32| [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0];
+            let params = TraceParams {
+                floor,
+                ceil,
+                cols: t.cols,
+                x0,
+                x1,
+                px: [trace.width() * ppp, trace.height() * ppp],
+                line_w: 1.2 * ppp,
+                fill: !sc.settings.persist,
+                line_a: if sc.settings.persist { 0.55 } else { 1.0 },
+                peak: sc.settings.peak && t.peak,
+                accent: rgb(accent()),
+                ink: rgb(ink()),
+            };
+            let cb = gpu::TracePaint { id: sc.id, tex_w: g.tex_w, upload: upload.take(), params };
+            ui.painter_at(trace).add(gpu::callback(trace, cb));
+        }
+    }
+    if has_trace && let Some(f) = frame.as_ref().filter(|_| !on_gpu) {
         let ncols = ((trace.width() * ppp) as usize).max(16);
         let (cols, xs) = columns(f, v, trace, ncols, false);
         sc.cols.clone_from(&cols);
@@ -281,6 +315,8 @@ fn paint_spectrum(
             p.add(Shape::line(line, Stroke::new(1.0, ink().gamma_multiply(0.35))));
             sc.peak_cols = pk;
         }
+    }
+    if has_trace && let Some(f) = &frame {
         // The noise floor estimate.
         if sc.settings.noise_line && f.noise_dbm > floor && f.noise_dbm < ceil {
             let yy = y(f.noise_dbm);
@@ -303,8 +339,11 @@ fn paint_spectrum(
 
     // Markers and their readout.
     if let Some(f) = &frame {
-        let window = (v.width() / 200.0).max(f.bin_width() * 3.0);
-        sc.markers.track(f, window);
+        let bins = sc.bins(f);
+        let window = (v.width() / 200.0).max(bins.bin_hz * 3.0);
+        let mut m = sc.markers;
+        m.track(&bins, window);
+        sc.markers = m;
         paint_markers(sc, &p, all, trace, cx, f);
     }
 
@@ -450,7 +489,7 @@ fn paint_markers(
     let mut lines = Vec::new();
     for i in 0..2 {
         let Some(m) = sc.markers.m[i] else { continue };
-        let r = sc.markers.read(i, f);
+        let r = sc.markers.read(i, &sc.bins(f));
         let xx = v.x_of(m.hz, all.left(), all.width());
         if (all.left()..=all.right()).contains(&xx) {
             let col = if sc.markers.active == i { ink() } else { ink().gamma_multiply(0.7) };
@@ -489,7 +528,7 @@ fn paint_markers(
             ));
         }
     }
-    if let Some((df, dl)) = sc.markers.delta(f) {
+    if let Some((df, dl)) = sc.markers.delta(&sc.bins(f)) {
         lines.push(format!("Δ {}  {:+.1} dB", fmt_delta(cx.map.width(df)), dl));
     }
     let mut yy = all.top() + 22.0;
@@ -538,12 +577,13 @@ fn paint_surface(
     let reference = sc.rows.ref_hz();
     let ppp = ui.ctx().pixels_per_point();
     let cols = ((r.width() * ppp) as u32).clamp(64, 4096);
+    let (s3_floor, s3_ceil) = sc.s3_levels(cx.now);
     let ink3 = |c: Color32| [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0];
     let params = SurfaceParams {
         view_lo: (v.lo - reference) as f32,
         view_hi: (v.hi - reference) as f32,
-        floor: sc.settings.floor_dbm,
-        ceil: sc.settings.ceil_dbm,
+        floor: s3_floor,
+        ceil: s3_ceil,
         live: sc.rows.surface_head(),
         count: sc.rows.surface_count(),
         carry: sc.rows.surface_carry(),
@@ -551,6 +591,9 @@ fn paint_surface(
         solid: sc.settings.solid_3d,
         bg: ink3(ground()),
         ink: ink3(accent()),
+        live_t: if sc.paused { 1.0 } else { sc.rows.live_t(cx.now) },
+        prev: sc.rows.prev_band(),
+        light: if sc.settings.lit_3d { 1.0 } else { 0.0 },
     };
     let cb = gpu::SurfacePaint {
         id: sc.id,
@@ -558,6 +601,7 @@ fn paint_surface(
         upload: upload.take(),
         palette: sc.settings.palette,
         params,
+        px: [(r.width() * ppp).round() as u32, (r.height() * ppp).round() as u32],
     };
     ui.painter_at(r).add(gpu::callback(r, cb));
 
@@ -1118,6 +1162,9 @@ fn status_bars(sc: &Scope, ui: &egui::Ui, a: Rect, b: Rect, cx: &Ctx, snap: &sdr
         if s.avg { "AVG 4".into() } else { "AVG OFF".into() },
         format!("{fps} fps"),
     ];
+    if sc.gpu_fft() {
+        parts.push(format!("FFT ON GPU · IQ {:.1} MB/s", sc.gpu_iq_bytes_per_sec() / 1e6));
+    }
     if sc.zoom.is_some() {
         parts.push("ZOOM FFT".into());
     }
