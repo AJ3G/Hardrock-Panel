@@ -13,7 +13,8 @@ its SDRoxide source path in a header comment:
 | `src/spectrum.rs` | adapted from `crates/sdroxide-dsp/src/spectrum.rs` |
 | `src/types.rs` | `AgcMode` and `MAX_MANUAL_GAIN_DB` from `crates/sdroxide-types` |
 
-The receiver, the spectrum's frame limiter, averaging and peak hold, the
+The receiver, the spectrum's frame limiter, Welch overlap, averaging, peak
+hold, noise floor and peak interpolation, the zoom FFT (`src/zoom.rs`), the
 audio output, the synthetic source and the pipeline are new for
 hardrock-panel; the audio output follows the panel's own `audio.rs`.
 

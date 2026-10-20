@@ -10,6 +10,8 @@
 //! * [`Receiver`] is one software receiver anywhere inside the span, with its
 //!   own offset, mode, passband and AGC, producing 48 kHz mono audio.
 //! * [`AudioOut`] plays that audio on a sound card.
+//! * [`ZoomSpectrum`] is a second spectrum of only the region on screen, at
+//!   full resolution (the zoom FFT).
 //! * [`Pipeline`] is the thread that ties an [`IqSource`] to both and publishes
 //!   the result for the UI.
 
@@ -27,13 +29,15 @@ pub mod source;
 pub mod spectrum;
 pub mod types;
 pub mod window;
+pub mod zoom;
 
 pub use audio::{AudioFeed, AudioOut, output_devices};
 pub use pipeline::{Command, Pipeline, PipelineConfig, Snapshot};
 pub use receiver::{AUDIO_RATE, Receiver, SUPPORTED_RATES, decimation_plan};
 pub use source::{EladSource, IqSource, SynthSignal, SyntheticSource};
 pub use spectrum::{
-    Averaging, MAX_FFT_SIZE, MIN_FFT_SIZE, Spectrum, SpectrumConfig, SpectrumFrame, Window,
-    pool_max, pool_max_range,
+    Averaging, MAX_FFT_SIZE, MIN_FFT_SIZE, Overlap, Peak, Spectrum, SpectrumConfig, SpectrumFrame,
+    Window, interpolate_peak, pool_max, pool_max_range,
 };
 pub use types::{AgcMode, Complex32, Mode};
+pub use zoom::{ZoomRequest, ZoomSpectrum, zoom_factor};

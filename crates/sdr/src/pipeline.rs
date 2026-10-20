@@ -1,23 +1,34 @@
-//! The DSP thread: I/Q in from an [`IqSource`], spectrum frames and receiver
+//! The DSP threads: I/Q in from an [`IqSource`], spectrum frames and receiver
 //! audio out.
 //!
-//! The UI talks to it over a crossbeam channel ([`Command`]) and reads what it
-//! made from a [`Snapshot`] behind a mutex, which the thread holds only long
-//! enough to swap in a finished frame — every frame is an `Arc`, so a reader
-//! cloning the snapshot copies pointers, not spectra.
+//! Two threads. The pipeline thread reads the source and runs the receiver,
+//! and hands each block of I/Q to a spectrum thread, which runs the spectrum
+//! and the zoom FFT. A million-point FFT at 60 frames a second is most of a
+//! core; on its own thread it can only slow the display, never starve the
+//! receiver's audio or let the radio's USB ring overflow. If the spectrum
+//! thread falls behind, blocks are dropped for it (and counted) rather than
+//! queued without end.
+//!
+//! The UI talks to the pipeline over a crossbeam channel ([`Command`]) and
+//! reads what it made from a [`Snapshot`] behind a mutex, which the threads
+//! hold only long enough to swap in a finished frame — every frame is an
+//! `Arc`, so a reader cloning the snapshot copies pointers, not spectra.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver as ChanRx, Sender, TryRecvError, unbounded};
+use crossbeam_channel::{
+    Receiver as ChanRx, Sender, TryRecvError, TrySendError, bounded, unbounded,
+};
 
 use crate::audio::AudioFeed;
 use crate::receiver::Receiver;
 use crate::source::IqSource;
-use crate::spectrum::{Averaging, Spectrum, SpectrumConfig, SpectrumFrame, Window};
+use crate::spectrum::{Averaging, Overlap, Spectrum, SpectrumConfig, SpectrumFrame, Window};
 use crate::types::{AgcMode, Mode};
+use crate::zoom::{ZoomRequest, ZoomSpectrum};
 
 /// What the UI can ask of the pipeline.
 pub enum Command {
@@ -31,6 +42,7 @@ pub enum Command {
     SetGain(f32),
     SetFftSize(usize),
     SetWindow(Window),
+    SetOverlap(Overlap),
     SetAveraging(Averaging),
     SetPeakHold(bool),
     SetPeakDecay(f32),
@@ -43,6 +55,8 @@ pub enum Command {
     SetAudio(Option<AudioFeed>),
     /// How many frames of history to keep for the waterfall and 3D views.
     SetHistory(usize),
+    /// Run a zoom FFT on one region (`None` stops it); see [`crate::zoom`].
+    SetZoom(Option<ZoomRequest>),
     /// Stop reading the source (true) or start again.
     Pause(bool),
     Stop,
@@ -85,6 +99,14 @@ pub struct Snapshot {
     pub history: VecDeque<Arc<SpectrumFrame>>,
     /// Counts frames published; a UI can repaint only when it moves.
     pub generation: u64,
+    /// The newest zoom-FFT spectrum, while a zoom is running.
+    pub zoom_latest: Option<Arc<SpectrumFrame>>,
+    /// Recent zoom spectra, as `history`.
+    pub zoom_history: VecDeque<Arc<SpectrumFrame>>,
+    /// Counts zoom frames published.
+    pub zoom_generation: u64,
+    /// The zoom the spectrum thread is running now.
+    pub zoom: Option<ZoomRequest>,
     /// The receiver's passband level, dBm.
     pub level_dbm: f32,
     pub sample_rate: f64,
@@ -99,14 +121,18 @@ pub struct Snapshot {
     pub paused: bool,
     /// A short description of the source.
     pub source: String,
-    /// Share of real time the DSP took over the last second (1.0 = a whole
-    /// core's worth of falling behind).
+    /// Share of real time the receiver took over the last second (1.0 = a
+    /// whole core's worth of falling behind).
     pub load: f32,
+    /// The same for the spectrum thread.
+    pub spectrum_load: f32,
+    /// Blocks of I/Q the spectrum thread was too busy to take, since start.
+    pub spectrum_drops: u64,
     /// Complex samples processed since start.
     pub samples: u64,
 }
 
-/// A running pipeline. Dropping it stops the thread.
+/// A running pipeline. Dropping it stops the threads.
 pub struct Pipeline {
     tx: Sender<Command>,
     shared: Arc<Mutex<Snapshot>>,
@@ -162,7 +188,7 @@ impl Pipeline {
         self.lock().latest.clone()
     }
 
-    /// Stop the thread and get the source back (to release a radio, say).
+    /// Stop the threads and get the source back (to release a radio, say).
     pub fn stop(mut self) -> Option<Box<dyn IqSource>> {
         self.send(Command::Stop);
         self.join.take().and_then(|j| j.join().ok())
@@ -181,6 +207,23 @@ impl Drop for Pipeline {
 /// Floats read per pass: about 5 ms at 6144 kHz, 85 ms at 192 kHz.
 const BLOCK: usize = 2 * 32_768;
 
+/// Blocks the spectrum thread may have waiting: about a second at 6144 kHz.
+const SPECTRUM_QUEUE: usize = 192;
+
+/// One block of I/Q for the spectrum thread.
+struct IqBlock {
+    iq: Vec<f32>,
+    center: f64,
+    rate: f64,
+}
+
+/// What the spectrum thread is told besides I/Q.
+enum SpecMsg {
+    Config(SpectrumConfig),
+    History(usize),
+    Zoom(Option<ZoomRequest>),
+}
+
 fn run(
     mut source: Box<dyn IqSource>,
     cfg: PipelineConfig,
@@ -189,7 +232,6 @@ fn run(
 ) -> Box<dyn IqSource> {
     let mut rate = source.sample_rate();
     let mut spectrum_cfg = cfg.spectrum;
-    let mut spectrum = Spectrum::new(spectrum_cfg, rate);
     let mut receiver = Receiver::new(rate);
     receiver.set_mode(cfg.mode);
     if let Some((lo, hi)) = cfg.passband {
@@ -199,13 +241,21 @@ fn run(
     receiver.set_agc(cfg.agc);
     receiver.set_gain_db(cfg.gain_db);
     receiver.set_calibration_db(spectrum_cfg.calibration_db);
-    let mut history_len = cfg.history.max(1);
     let mut audio_feed: Option<AudioFeed> = None;
     let mut paused = false;
 
+    let (block_tx, block_rx) = bounded::<IqBlock>(SPECTRUM_QUEUE);
+    let (msg_tx, msg_rx) = unbounded::<SpecMsg>();
+    let spec_shared = shared.clone();
+    let history = cfg.history.max(1);
+    let spec_join = std::thread::Builder::new()
+        .name("sdr-spectrum".into())
+        .spawn(move || run_spectrum(spectrum_cfg, history, rate, block_rx, msg_rx, spec_shared))
+        .expect("spawn the spectrum thread");
+    let mut drops = 0u64;
+
     let mut buf = vec![0.0f32; BLOCK];
     let mut audio = Vec::with_capacity(4096);
-    let mut frames = Vec::new();
     let mut samples = 0u64;
     let (mut busy, mut window_start, mut window_samples) = (Duration::ZERO, Instant::now(), 0u64);
     let mut load = 0.0f32;
@@ -225,6 +275,7 @@ fn run(
                         Command::SetGain(g) => receiver.set_gain_db(g),
                         Command::SetFftSize(n) => sc.fft_size = n,
                         Command::SetWindow(w) => sc.window = w,
+                        Command::SetOverlap(o) => sc.overlap = o,
                         Command::SetAveraging(a) => sc.averaging = a,
                         Command::SetPeakHold(on) => sc.peak_hold = on,
                         Command::SetPeakDecay(d) => sc.peak_decay_db_per_s = d,
@@ -235,13 +286,18 @@ fn run(
                         }
                         Command::SetCenter(hz) => source.set_center_hz(hz),
                         Command::SetAudio(f) => audio_feed = f,
-                        Command::SetHistory(n) => history_len = n.max(1),
+                        Command::SetHistory(n) => {
+                            let _ = msg_tx.send(SpecMsg::History(n.max(1)));
+                        }
+                        Command::SetZoom(z) => {
+                            let _ = msg_tx.send(SpecMsg::Zoom(z));
+                        }
                         Command::Pause(p) => paused = p,
                         Command::Stop => unreachable!(),
                     }
                     if sc != spectrum_cfg {
-                        spectrum.set_config(sc);
-                        spectrum_cfg = spectrum.config();
+                        spectrum_cfg = sc;
+                        let _ = msg_tx.send(SpecMsg::Config(sc));
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -270,12 +326,15 @@ fn run(
         let new_rate = source.sample_rate();
         if new_rate != rate {
             rate = new_rate;
-            spectrum.set_sample_rate(rate);
             receiver.set_sample_rate(rate);
         }
         let center = source.center_hz();
         let t = Instant::now();
-        spectrum.process(&buf[..n], center, &mut frames);
+        match block_tx.try_send(IqBlock { iq: buf[..n].to_vec(), center, rate }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => drops += 1,
+            Err(TrySendError::Disconnected(_)) => break 'outer,
+        }
         audio.clear();
         receiver.process(&buf[..n], &mut audio);
         if let Some(f) = audio_feed.as_mut() {
@@ -292,17 +351,8 @@ fn run(
         }
 
         let level = receiver.level_dbm();
-        let made: Vec<Arc<SpectrumFrame>> = frames.drain(..).map(Arc::new).collect();
         let alive = source.is_alive();
         publish(&shared, |s| {
-            for f in made {
-                s.history.push_back(f.clone());
-                s.latest = Some(f);
-                s.generation += 1;
-            }
-            while s.history.len() > history_len {
-                s.history.pop_front();
-            }
             s.level_dbm = level;
             s.sample_rate = rate;
             s.center_hz = center;
@@ -314,9 +364,106 @@ fn run(
             s.paused = false;
             s.load = load;
             s.samples = samples;
+            s.spectrum_drops = drops;
         });
     }
+    drop(block_tx);
+    drop(msg_tx);
+    let _ = spec_join.join();
     source
+}
+
+/// The spectrum thread: the main spectrum and, when asked for, the zoom.
+fn run_spectrum(
+    mut cfg: SpectrumConfig,
+    mut history_len: usize,
+    mut rate: f64,
+    blocks: ChanRx<IqBlock>,
+    msgs: ChanRx<SpecMsg>,
+    shared: Arc<Mutex<Snapshot>>,
+) {
+    let mut spectrum = Spectrum::new(cfg, rate);
+    let mut zoom_req: Option<ZoomRequest> = None;
+    let mut zoom: Option<ZoomSpectrum> = None;
+    let mut frames = Vec::new();
+    let mut zframes = Vec::new();
+    let (mut busy, mut window_start, mut window_samples) = (Duration::ZERO, Instant::now(), 0u64);
+    let mut load = 0.0f32;
+    loop {
+        while let Ok(m) = msgs.try_recv() {
+            match m {
+                SpecMsg::Config(c) => {
+                    spectrum.set_config(c);
+                    cfg = spectrum.config();
+                    if let Some(z) = zoom.as_mut() {
+                        z.set_config(cfg);
+                    }
+                }
+                SpecMsg::History(n) => history_len = n,
+                SpecMsg::Zoom(z) => zoom_req = z,
+            }
+        }
+        let block = match blocks.recv_timeout(Duration::from_millis(50)) {
+            Ok(b) => b,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+        };
+        let t = Instant::now();
+        if block.rate != rate {
+            rate = block.rate;
+            spectrum.set_sample_rate(rate);
+        }
+        // Build, move or drop the zoom to match what was asked.
+        match zoom_req {
+            None => zoom = None,
+            // A zoom that would not decimate gains nothing over the main
+            // spectrum.
+            Some(req) if crate::zoom::zoom_factor(rate, req.width_hz) <= 1 => zoom = None,
+            Some(req) => match zoom.as_mut() {
+                Some(z) if z.fits(req, rate) => z.set_center(req.center_hz),
+                _ => zoom = Some(ZoomSpectrum::new(req, rate, cfg)),
+            },
+        }
+        spectrum.process(&block.iq, block.center, &mut frames);
+        if let Some(z) = zoom.as_mut() {
+            z.process(&block.iq, block.center, &mut zframes);
+        }
+        busy += t.elapsed();
+        window_samples += (block.iq.len() / 2) as u64;
+        if window_start.elapsed() >= Duration::from_secs(1) && window_samples > 0 {
+            load = (busy.as_secs_f64() / (window_samples as f64 / rate)) as f32;
+            busy = Duration::ZERO;
+            window_samples = 0;
+            window_start = Instant::now();
+        }
+        let made: Vec<Arc<SpectrumFrame>> = frames.drain(..).map(Arc::new).collect();
+        let zmade: Vec<Arc<SpectrumFrame>> = zframes.drain(..).map(Arc::new).collect();
+        let zoom_now = zoom.as_ref().map(|z| z.request());
+        publish(&shared, |s| {
+            for f in made {
+                s.history.push_back(f.clone());
+                s.latest = Some(f);
+                s.generation += 1;
+            }
+            while s.history.len() > history_len {
+                s.history.pop_front();
+            }
+            for f in zmade {
+                s.zoom_history.push_back(f.clone());
+                s.zoom_latest = Some(f);
+                s.zoom_generation += 1;
+            }
+            if zoom_now.is_none() {
+                s.zoom_latest = None;
+                s.zoom_history.clear();
+            }
+            while s.zoom_history.len() > history_len {
+                s.zoom_history.pop_front();
+            }
+            s.zoom = zoom_now;
+            s.spectrum_load = load;
+        });
+    }
 }
 
 fn publish(shared: &Mutex<Snapshot>, f: impl FnOnce(&mut Snapshot)) {
@@ -383,6 +530,19 @@ mod tests {
                 && s.latest.as_ref().unwrap().db.len() == 16_384
         });
         assert!(s.alive);
+        // A zoom on the carrier: frames a few kHz wide with fine bins.
+        p.send(Command::SetZoom(Some(ZoomRequest {
+            center_hz: 7.1125e6,
+            width_hz: 4000.0,
+            fft_size: 4096,
+        })));
+        let s = wait_for(&p, |s| s.zoom_latest.is_some() && s.zoom_generation > 2);
+        let z = s.zoom_latest.unwrap();
+        assert_eq!(z.span_hz, rate / 32.0);
+        let pk = z.peak_in(7.1124e6, 7.1126e6).unwrap();
+        assert!((pk.hz - 7.1125e6).abs() < 0.5, "{}", pk.hz);
+        p.send(Command::SetZoom(None));
+        wait_for(&p, |s| s.zoom.is_none() && s.zoom_latest.is_none());
         p.send(Command::Pause(true));
         wait_for(&p, |s| s.paused);
         while audio_rx.pop().is_ok() {}
