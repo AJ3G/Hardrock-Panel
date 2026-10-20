@@ -17,6 +17,7 @@
 
 pub mod agc;
 pub mod audio;
+pub mod cic;
 pub mod ddc;
 pub mod decim;
 pub mod demod;

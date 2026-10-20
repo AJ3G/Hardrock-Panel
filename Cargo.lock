@@ -2165,6 +2165,7 @@ version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
+ "bytemuck",
  "num-traits",
 ]
 
@@ -3170,6 +3171,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "sdr"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "cpal",
  "crossbeam-channel",
  "elad-iq",

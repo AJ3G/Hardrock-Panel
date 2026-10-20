@@ -9,6 +9,7 @@ description = "Panadapter spectrum and software receiver DSP for hardrock-panel,
 elad-iq.workspace = true
 crossbeam-channel.workspace = true
 num-complex.workspace = true
+bytemuck.workspace = true
 rustfft.workspace = true
 rtrb.workspace = true
 cpal.workspace = true

@@ -309,14 +309,22 @@ pub fn shift(lp: &[f64], centre: f64) -> Vec<Complex32> {
 }
 
 /// Gain in dB of real taps at `f` cycles per sample.
+///
+/// The exponential is walked by multiplication rather than evaluated per tap
+/// — a filter's response is scanned at hundreds of thousands of frequencies
+/// in the tests — and re-seeded exactly every 64 taps so the walk's rounding
+/// never builds up past 10⁻¹⁴.
 pub fn gain_db(taps: &[f64], f: f64) -> f64 {
-    let (mut re, mut im) = (0.0f64, 0.0f64);
-    for (k, &h) in taps.iter().enumerate() {
-        let p = -TAU * f * k as f64;
-        re += h * p.cos();
-        im += h * p.sin();
+    let step = num_complex::Complex64::from_polar(1.0, -TAU * f);
+    let mut acc = num_complex::Complex64::new(0.0, 0.0);
+    for (b, chunk) in taps.chunks(64).enumerate() {
+        let mut e = num_complex::Complex64::from_polar(1.0, -TAU * f * (b * 64) as f64);
+        for &h in chunk {
+            acc += e * h;
+            e *= step;
+        }
     }
-    10.0 * (re * re + im * im).max(1e-300).log10()
+    10.0 * acc.norm_sqr().max(1e-300).log10()
 }
 
 /// [`gain_db`] for real taps already rounded to f32 — what the filter will

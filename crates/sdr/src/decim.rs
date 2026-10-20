@@ -146,6 +146,12 @@ impl Default for HalfbandDecim {
     }
 }
 
+/// The 23-tap prototype every [`HalfbandDecim`] is cut from, for a caller
+/// that wants to know what the stage does (its response, its delay).
+pub fn halfband_prototype() -> Vec<f32> {
+    lowpass_taps(HB_TAPS, 0.25)
+}
+
 impl HalfbandDecim {
     pub fn new() -> Self {
         let proto = lowpass_taps(HB_TAPS, 0.25);
@@ -290,53 +296,63 @@ impl Decimator {
 /// falls off a cliff (more live values than there are registers to hold them).
 const FIR_ACCUMULATORS: usize = 8;
 
-/// `window · taps`, walked with [`FIR_ACCUMULATORS`] independent sums.
+/// Generic FIR decimator by an integer factor, in polyphase form.
 ///
-/// `inline(always)`, not `inline`: this is called from inside a dispatched
-/// kernel, and a copy left standing on its own would be compiled once for the
-/// baseline and then *called* by the AVX2 copy — which is how the whole dot
-/// product silently stayed on 128-bit registers while the loop around it went
-/// wide. It showed up in a profile as a `decim::dot` with no `_avx2` suffix.
-#[inline(always)]
-fn dot(window: &[Complex32], taps: &[f32]) -> Complex32 {
-    let mut acc = [Complex32::default(); FIR_ACCUMULATORS];
-    let mut w = window.chunks_exact(FIR_ACCUMULATORS);
-    let mut t = taps.chunks_exact(FIR_ACCUMULATORS);
-    for (xs, ts) in (&mut w).zip(&mut t) {
-        for i in 0..FIR_ACCUMULATORS {
-            acc[i] += xs[i] * ts[i];
-        }
-    }
-    let mut sum = Complex32::default();
-    for a in acc {
-        sum += a;
-    }
-    // The taps are an odd count by construction, so there is always a tail.
-    for (x, &tap) in w.remainder().iter().zip(t.remainder()) {
-        sum += x * tap;
-    }
-    sum
-}
-
-/// Generic FIR decimator by an integer factor.
+/// Only the kept outputs are computed: `n/factor` multiply-adds per output.
+/// The input is split by phase — `x_p[i] = x[i·factor + p]` — and the taps
+/// likewise, `h_p[q] = h[q·factor + p]`, so that one output is
+///
+/// ```text
+/// y[o] = Σ_p Σ_q h_p[q] · x_p[o + q]
+/// ```
+///
+/// and is computed tap by tap *across a tile of outputs*: for each tap, every
+/// output in the tile gains `h_p[q]` times a run of `x_p` at unit stride. That
+/// inner loop is a multiply-add between two contiguous float arrays (the I/Q
+/// pairs read as flat floats through [`bytemuck`], no copy) with no reduction
+/// in it, which is the shape the loop vectoriser turns into full-width
+/// fused multiply-adds.
+///
+/// The form it replaces walked one output at a time as a dot product. That
+/// is a reduction, which LLVM may not reassociate, and on a complex-by-real
+/// window it vectorised two floats wide whatever the register size: measured
+/// at 0.29 ns a multiply-add on a 649-tap /8 stage against 0.06 here (see
+/// `polyphase_cost` below).
 pub struct FirDecim {
     taps: Vec<f32>,
     factor: usize,
-    buf: Vec<Complex32>,
+    /// `phase_taps[p][q] = taps[q·factor + p]`, zero past the end.
+    phase_taps: Vec<Vec<f32>>,
+    /// The input split by phase, each with the history the next output needs.
+    phases: Vec<Vec<Complex32>>,
+    /// Which phase the next input sample belongs to.
+    next_phase: usize,
 }
 
+/// Outputs computed together: 256 complex samples, 2 KiB, so the tile being
+/// accumulated stays in L1 while every tap passes over it.
+const POLY_TILE: usize = 256;
+
 crate::simd::kernel! {
-    /// [`dot`] once per kept output — see [`FirDecim`].
-    fn fir_decim / fir_decim_portable / fir_decim_avx2 / fir_decim_avx512 (
+    /// The polyphase sum for `dst.len()` outputs — see [`FirDecim`].
+    fn poly_decim / poly_decim_portable / poly_decim_avx2 / poly_decim_avx512 (
         dst: &mut [Complex32],
-        buf: &[Complex32],
-        taps: &[f32],
-        factor: usize,
+        phases: &[Vec<Complex32>],
+        phase_taps: &[Vec<f32>],
     ) {
-        let n = taps.len();
-        for (o, d) in dst.iter_mut().enumerate() {
-            let base = o * factor;
-            *d = dot(&buf[base..base + n], taps);
+        for (t, tile) in dst.chunks_mut(POLY_TILE).enumerate() {
+            let o0 = t * POLY_TILE;
+            let len = tile.len();
+            let y: &mut [f32] = bytemuck::cast_slice_mut(tile);
+            y.fill(0.0);
+            for (xp, hp) in phases.iter().zip(phase_taps) {
+                let x: &[f32] = bytemuck::cast_slice(&xp[o0..o0 + len + hp.len() - 1]);
+                for (q, &h) in hp.iter().enumerate() {
+                    for (a, &b) in y.iter_mut().zip(&x[2 * q..2 * q + 2 * len]) {
+                        *a += h * b;
+                    }
+                }
+            }
         }
     }
 }
@@ -346,7 +362,7 @@ impl FirDecim {
         assert!(factor >= 1);
         let ntaps = (12 * factor).clamp(24, 768) | 1; // odd
         let taps = lowpass_taps(ntaps, 0.45 / factor as f64);
-        FirDecim { taps, factor, buf: Vec::new() }
+        Self::with_taps(taps, factor)
     }
 
     /// The same dot product with taps the caller chose.
@@ -361,25 +377,66 @@ impl FirDecim {
     /// filter that is not shifting anything sideways.
     pub fn with_taps(taps: Vec<f32>, factor: usize) -> Self {
         assert!(factor >= 1 && taps.len() > factor);
-        FirDecim { taps, factor, buf: Vec::new() }
+        let per = taps.len().div_ceil(factor);
+        let phase_taps = (0..factor)
+            .map(|p| (0..per).map(|q| taps.get(q * factor + p).copied().unwrap_or(0.0)).collect())
+            .collect();
+        FirDecim { taps, factor, phase_taps, phases: vec![Vec::new(); factor], next_phase: 0 }
+    }
+
+    /// The taps it runs with.
+    pub fn taps(&self) -> &[f32] {
+        &self.taps
+    }
+
+    pub fn factor(&self) -> usize {
+        self.factor
     }
 
     pub fn process(&mut self, input: &[Complex32], out: &mut Vec<Complex32>) {
-        self.buf.extend_from_slice(input);
-        let n = self.taps.len();
-        if self.buf.len() < n {
+        let m = self.factor;
+        // Deal the input out by phase, starting where the last block left off.
+        let mut rest = input;
+        while self.next_phase != 0
+            && let Some((&x, tail)) = rest.split_first()
+        {
+            self.phases[self.next_phase].push(x);
+            self.next_phase = (self.next_phase + 1) % m;
+            rest = tail;
+        }
+        let whole = rest.len() / m;
+        for (p, ph) in self.phases.iter_mut().enumerate() {
+            ph.extend(rest[..whole * m].iter().skip(p).step_by(m));
+        }
+        for &x in &rest[whole * m..] {
+            self.phases[self.next_phase].push(x);
+            self.next_phase += 1;
+        }
+
+        // One output per position every phase has a whole window behind.
+        let per = self.phase_taps[0].len();
+        let have = self.phases.iter().map(Vec::len).min().unwrap_or(0);
+        if have < per {
             return;
         }
-        let count = (self.buf.len() - n) / self.factor + 1;
+        let count = have - (per - 1);
         let start = out.len();
         out.resize(start + count, Complex32::default());
-        fir_decim(&mut out[start..], &self.buf, &self.taps, self.factor);
-        self.buf.drain(..count * self.factor);
+        poly_decim(&mut out[start..], &self.phases, &self.phase_taps);
+        for ph in &mut self.phases {
+            ph.drain(..count);
+        }
     }
 }
 
-/// [`dot`] for a real-valued window — the audio counterpart. `inline(always)`
-/// for the reason [`dot`] is.
+/// `window · taps`, walked with [`FIR_ACCUMULATORS`] independent sums — the
+/// audio decimator's dot product.
+///
+/// `inline(always)`, not `inline`: this is called from inside a dispatched
+/// kernel, and a copy left standing on its own would be compiled once for the
+/// baseline and then *called* by the AVX2 copy — which is how a dot product
+/// here once silently stayed on 128-bit registers while the loop around it
+/// went wide.
 #[inline(always)]
 fn real_dot(window: &[f32], taps: &[f32]) -> f32 {
     let mut acc = [0.0f32; FIR_ACCUMULATORS];
@@ -534,6 +591,72 @@ mod tests {
             for (k, (g, w)) in got.iter().zip(&want).enumerate() {
                 assert!((g - w).norm() < 1e-5, "block pattern {pattern:?}, sample {k}: {g} vs {w}");
             }
+        }
+    }
+
+    /// The polyphase FIR decimator computes the direct form's outputs exactly,
+    /// whatever lengths the blocks arrive in — every factor, including ones
+    /// the tap count does not divide by.
+    #[test]
+    fn the_polyphase_fir_is_the_direct_form() {
+        for (n, m) in [(49usize, 4usize), (97, 8), (35, 2), (50, 3), (5, 1)] {
+            let taps: Vec<f32> = (0..n).map(|k| ((k * 7919) % 101) as f32 / 101.0 - 0.5).collect();
+            let x = tone(20_011, 0.0123);
+            let mut want = Vec::new();
+            let mut o = 0;
+            while o * m + n <= x.len() {
+                let mut acc = Complex32::default();
+                for (k, &h) in taps.iter().enumerate() {
+                    acc += x[o * m + k] * h;
+                }
+                want.push(acc);
+                o += 1;
+            }
+            for pattern in [&[4096usize][..], &[1, 2, 3, 5, 7, 11, 13][..], &[700, 1, 333][..]] {
+                let mut d = FirDecim::with_taps(taps.clone(), m);
+                let mut got = Vec::new();
+                let (mut at, mut i) = (0usize, 0usize);
+                while at < x.len() {
+                    let k = pattern[i % pattern.len()].min(x.len() - at);
+                    d.process(&x[at..at + k], &mut got);
+                    at += k;
+                    i += 1;
+                }
+                // The polyphase form pads the taps to a whole number per
+                // phase, so it may stop an output or two short of the end.
+                assert!(
+                    want.len() - got.len() <= m,
+                    "{n}/{m} {pattern:?}: {} vs {}",
+                    got.len(),
+                    want.len()
+                );
+                for (k, (g, w)) in got.iter().zip(&want).enumerate() {
+                    assert!((g - w).norm() < 1e-4, "{n}/{m} {pattern:?} output {k}: {g} vs {w}");
+                }
+            }
+        }
+    }
+
+    /// Cost of the polyphase decimator per multiply-add, in release:
+    /// `cargo test --release -p sdr -- --ignored --nocapture polyphase_cost`.
+    #[test]
+    #[ignore]
+    fn polyphase_cost() {
+        let block = tone(65_536, 0.01);
+        for (n, m) in [(49usize, 4usize), (97, 8), (329, 4), (649, 8)] {
+            let mut d = FirDecim::with_taps(vec![0.001; n], m);
+            let mut out = Vec::new();
+            let reps = 400;
+            let t = std::time::Instant::now();
+            for _ in 0..reps {
+                out.clear();
+                d.process(&block, &mut out);
+            }
+            let ns = t.elapsed().as_nanos() as f64 / (reps * block.len()) as f64;
+            println!(
+                "{n} taps /{m}: {ns:.2} ns an input sample, {:.3} ns a multiply-add",
+                ns * m as f64 / n as f64
+            );
         }
     }
 
