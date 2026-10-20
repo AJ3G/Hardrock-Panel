@@ -66,6 +66,14 @@ Before removing or loosening any of these, read why it is there.
 - **What the operator sees:** TX TUNE greyed, with the reason on hover. With menu 32 on anything but USB audio, a yellow line says so, with a USB AUDIO button that sets it.
 - **Added:** AJ3G, 19 Oct 2026, with TX TUNE (decision 17). Tested by `tune_with_drive_needs_usb_audio_and_a_sideband`, `tune_with_drive_reads_the_input_and_mode_then_keys_an_ordinary_transmission`, `tune_with_drive_is_refused_while_the_radio_takes_the_microphone` and `the_tone_needs_its_sound_output_usb_audio_and_a_sideband`.
 
+## 8. The scope does not retune while the radio transmits
+
+- **Where:** `crates/hardrock-panel/src/scope/pointer.rs`, `Drag::press()` and `Drag::is_click_to_tune()`; `crates/hardrock-panel/src/scope/paint.rs`, `pointer_on()` (presses and the wheel) and the band plan strip's click; `crates/hardrock-panel/src/scope/mod.rs`, `follow()` (recentring); `crates/hardrock-panel/src/scope/controls.rs`, the data-mode keys.
+- **Blocks while transmitting:** click-to-tune, dragging the receiver marker or a filter edge, wheel steps, band-plan clicks, the data-mode keys (which set the frequency, mode and passband), and asking for a new IQ centre (VFO A). While transmitting, a press on the scope can only pan the view. Zoom, markers and display settings still work.
+- **Why:** the scope's outputs move the radio. Moving VFO A or the receiver while keyed changes the transmit frequency under load, and in split it moves `FB` (decision 22), possibly out of the amplifier's band or the band plan.
+- **What the operator sees:** over the spectrum the pointer becomes a not-allowed cursor and the top bar reads "tuning locked while transmitting"; the data-mode keys are greyed, with the reason on hover.
+- **Added:** AJ3G, 20 Oct 2026, with the scope. Tested by `a_press_drags_what_it_grabbed_unless_transmitting` and `the_centre_follows_the_receiver_but_not_while_transmitting`.
+
 ## Not interlocks, but related
 
 - TUNE is allowed while transmitting: tuning needs a carrier, and the ATU switches its own relays under its own control at tuning power.

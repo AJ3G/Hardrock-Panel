@@ -254,3 +254,27 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 **What the panel does.** The DUO's IQ window is centred on VFO A (`FA`) and stays put; clicking or dragging a signal moves the panel's own receiver inside the span, and the centre moves only when the receiver nears an edge. Above 192 kHz the DUO mutes its own audio, so the panel demodulates and plays the receiver to the sound output chosen in SETTINGS (VB-Cable can be chosen, for decoders). To transmit where the panel listens, the panel sets split (`SP1`) and `FB` to the receiver's frequency. Still to check on the bench: that the IQ window stays on VFO A while split.
 
 **Where.** `crates/elad-iq` (USB IQ, from SDRoxide's `sdroxide-elad`), `crates/sdr` (spectrum and receiver), and the scope in `crates/hardrock-panel`.
+
+## 23. The scope keeps levels, not colours, on the GPU
+
+**Decided:** AJ3G, 20 Oct 2026: "use the GPU" (an RTX 5070 in a Framework 16), and "spare no expense on the scope".
+
+**What the panel does.** The waterfall and the 3D FFT are `egui_wgpu` paint callbacks drawing into egui's own render pass. Each new spectrum row is written once into a ring texture as dBm in half floats, with a second texture holding the band that row covers. The shader turns levels into colours per pixel, takes the strongest of the bins under each pixel, and places each row by its own band. A change of floor, ceiling, palette, contrast, zoom, pan or centre is then only a uniform change, with no CPU recolouring and no re-upload; 16 384 columns at 60 rows a second is about 2 MB/s of upload. The 3D surface (SDRoxide's look: 48 rows deep, PERSP 0.85, FOG 0.55, solid or lines) is computed in the vertex shader from a 64-row texture of the same kind. eframe asks for the high-performance adapter and for textures as wide as the adapter allows, up to 16 384. The phosphor trace is the one view built on the CPU, as an egui texture of hit counts. Without a wgpu renderer, the waterfall and 3D panes show a note instead.
+
+**Where.** `crates/hardrock-panel/src/scope/gpu.rs`, `rows.rs`, `shaders/`; `main.rs` (`wgpu_options`).
+
+## 24. The scope shows the antenna frequency and returns the radio's
+
+**Decided:** AJ3G, 20 Oct 2026: the DUO is used with up and down converters, and runs from a GPS-disciplined reference.
+
+**What the panel does.** The scope has a transverter LO (signed, in Hz, 0 to start) and a ppm calibration (0 to start). Everything it shows is the radio's frequency × (1 + ppm·10⁻⁶) + LO: the axis, the markers, the readouts and the band plan lookup. Everything it returns (`tune_to`, `recentre`) is in the radio's own frequency. When either setting is not zero, the top bar shows XVTR and/or CAL in the accent colour. Marker and peak readouts go to 0.1 Hz, from a parabola fitted in dB across the peak bin and its neighbours. The waterfall's UTC ticks use the system clock as it is.
+
+**Where.** `crates/hardrock-panel/src/scope/view.rs` (`FreqMap`), `markers.rs`, `paint.rs` (`top_bar`); `crates/sdr/src/spectrum.rs` (`interpolate_peak`).
+
+## 25. The spectrum has its own thread, Welch overlap and a zoom FFT
+
+**Decided:** AJ3G, 20 Oct 2026: FFTs up to at least a million points with overlap and a choice of window, and a zoom FFT that resolves the zoomed region.
+
+**What the panel does.** In `sdr`, the spectrum runs on its own thread, fed through a bounded queue. If it falls behind, blocks are dropped and counted, and the receiver's audio is never held up. FFT sizes run from 4k to 1M (2²⁰). The windows are Hann, Blackman-Harris, rectangular and flat-top, each with its ENBW, so the RBW shown is true. Overlap can be off, 50 % or 75 %, with the segments' powers averaged (Welch). Each frame carries a noise floor (the median bin, in dBm per bin), which the scope draws as a dashed line and uses for the receiver's SNR. When the view is zoomed past what the main FFT resolves, the scope asks for a zoom FFT on the view. That zoom mixes the view's centre to 0 Hz, decimates by a power of two through half-band filters, and runs its own FFT. The scope uses the zoom's frames while they cover the view, and the main FFT's frames otherwise. The pipeline keeps 16 frames of history, since million-point frames are large.
+
+**Where.** `crates/sdr/src/pipeline.rs`, `spectrum.rs`, `window.rs`, `zoom.rs`; `crates/hardrock-panel/src/scope/mod.rs` (`sync_pipeline`, `zoom_request`).

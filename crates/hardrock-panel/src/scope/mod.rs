@@ -507,6 +507,29 @@ mod tests {
     }
 
     #[test]
+    fn the_centre_follows_the_receiver_but_not_while_transmitting() {
+        let mut sc = Scope::new(None, ScopeSettings::default());
+        let span = Span { center: 14_200_000.0, width: 192_000.0 };
+        let mut rig = ScopeRig {
+            rx_hz: 14_290_400.0,
+            mode: sdr::Mode::Usb,
+            passband: (100.0, 2900.0),
+            transmitting: true,
+        };
+        let mut out = ScopeOut::default();
+        sc.follow(span, &rig, 0.0, &mut out);
+        assert_eq!(out.recentre, None);
+        rig.transmitting = false;
+        sc.follow(span, &rig, 0.1, &mut out);
+        assert_eq!(out.recentre, Some(14_290_000.0));
+        // Inside 0.45 of the span it stays put.
+        let mut out = ScopeOut::default();
+        rig.rx_hz = 14_280_000.0;
+        sc.follow(span, &rig, 5.0, &mut out);
+        assert_eq!(out.recentre, None);
+    }
+
+    #[test]
     fn only_new_frames_are_taken() {
         let h: VecDeque<_> = (1..=5).map(frame).collect();
         let mut last = 3;
