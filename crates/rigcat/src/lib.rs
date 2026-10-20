@@ -185,6 +185,25 @@ impl RigStatus {
         self.tuning.is_some() || self.keyed() || self.tx_state.is_some_and(|t| t != 0)
     }
 
+    /// Why [`Self::transmitting`] is true, in words for the operator, or
+    /// `None` when it isn't.
+    pub fn tx_reason(&self) -> Option<String> {
+        if self.tuning.is_some() {
+            return Some("a TUNE from the panel is running".into());
+        }
+        if let Some(w) = self.fwd.filter(|p| p.valid && p.w > 0.0).map(|p| p.w) {
+            return Some(format!("the radio reports {w:.2} W forward (FP)"));
+        }
+        match self.tx_state {
+            Some(0) | None => None,
+            Some(t) => Some(format!(
+                "the radio's status says {} (GI {})",
+                if t == 2 { "TUNE" } else { "TX" },
+                self.value("GI").unwrap_or("?")
+            )),
+        }
+    }
+
     /// The radio's last answer for `cmd`, without the letters.
     pub fn value(&self, cmd: &str) -> Option<&str> {
         self.values.get(cmd).map(|s| s.as_str())

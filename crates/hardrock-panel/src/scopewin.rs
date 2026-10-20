@@ -30,6 +30,8 @@ pub(crate) struct Args<'a> {
     pub cat: bool,
     /// What the outside-program links are doing, one line each.
     pub links: Vec<String>,
+    /// Why the panel thinks the radio is transmitting, when it does.
+    pub tx_why: Option<String>,
 }
 
 /// Draw the window, docked or popped out. Clears `open` when it is closed.
@@ -105,6 +107,13 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
             (_, None) => (rx.label.clone(), theme::GREEN()),
         };
         ui.label(RichText::new(text).size(12.0).color(col));
+        // Why the panel thinks the radio is transmitting, so a reading that
+        // is wrong can be seen for what it is.
+        if let Some(why) = a.tx_why.as_deref() {
+            ui.label(
+                RichText::new(format!("Transmitting: {why}")).size(12.0).color(theme::YELLOW()),
+            );
+        }
         if rx.error.is_some() && chrome::chip(ui, false, "TRY AGAIN").clicked() {
             out.reopen = true;
         }

@@ -591,6 +591,7 @@ impl App {
 
     fn scope_window(&mut self, ctx: &egui::Context, rig: Option<&RigStatus>, transmitting: bool) {
         let mut open = true;
+        let tx_why = transmitting.then(|| tx_why(rig, &self.status()));
         let srig = scope::ScopeRig {
             rx_hz: self.rx.rx_hz,
             mode: self.rx.mode,
@@ -603,6 +604,7 @@ impl App {
             rig: srig,
             cat: rig.is_some_and(|r| r.connected),
             links: self.outside.summary(),
+            tx_why,
         };
         let o =
             scopewin::scope_window(ctx, &mut open, self.saved.scope_popped, &mut self.scope, args);
@@ -1174,6 +1176,20 @@ fn passband_for(m: sdr::Mode, width: u32) -> (f32, f32) {
 }
 
 /// The amplifier says it is keyed, or shows RF (as interlocks 1 and 2).
+/// Why the panel takes the radio to be transmitting, for the operator.
+fn tx_why(rig: Option<&RigStatus>, amp: &AmpStatus) -> String {
+    if let Some(r) = rig.filter(|r| r.connected).and_then(RigStatus::tx_reason) {
+        return r;
+    }
+    if amp.connected && amp.transmitting == Some(true) {
+        return "the amplifier reports TX".into();
+    }
+    match amp.readings.as_ref().filter(|r| rf_present(r)) {
+        Some(r) => format!("the amplifier reads {:.1} W drive, {:.1} W out", r.drive_w, r.fwd_w),
+        None => "unknown".into(),
+    }
+}
+
 fn amp_keyed(amp: &AmpStatus) -> bool {
     amp.connected
         && (amp.transmitting == Some(true) || amp.readings.as_ref().is_some_and(rf_present))

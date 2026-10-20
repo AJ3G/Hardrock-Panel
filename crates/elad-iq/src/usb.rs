@@ -85,13 +85,30 @@ impl UsbDev {
     /// taken and nothing else is disturbed.
     pub fn open(serial: &str, trace: &Trace) -> Result<UsbDev> {
         let want = serial.trim();
-        let devices = nusb::list_devices().wait()?;
+        let devices: Vec<nusb::DeviceInfo> = nusb::list_devices().wait()?.collect();
         let candidates: Vec<nusb::DeviceInfo> = devices
+            .iter()
             .filter(|d| d.vendor_id() == VID && Model::from_pid(d.product_id()).is_some())
+            .cloned()
             .collect();
 
         if candidates.is_empty() {
-            return Err(Error::NotFound("no ELAD device found on USB".to_string()));
+            // Say what *is* there, so a report shows whether the radio is
+            // missing, has another product id, or is held by another driver.
+            let seen: Vec<String> =
+                devices.iter().filter(|d| looks_elad(d)).map(describe).collect();
+            trace.note(format!("{} USB devices visible", devices.len()));
+            for line in &seen {
+                trace.note(format!("ELAD-looking device: {line}"));
+            }
+            let msg = if seen.is_empty() {
+                "no ELAD device found on USB: check the USB lead to the radio's I/Q port \
+                 and that the radio is on"
+                    .to_string()
+            } else {
+                format!("no ELAD I/Q device this driver knows on USB; seen: {}", seen.join("; "))
+            };
+            return Err(Error::NotFound(msg));
         }
 
         let mut last_err = None;
@@ -454,4 +471,30 @@ impl UsbDev {
             len,
         )
     }
+}
+
+/// An ELAD vendor id, or a name that says ELAD or FDM.
+fn looks_elad(d: &nusb::DeviceInfo) -> bool {
+    let named = |x: Option<&str>| {
+        x.is_some_and(|x| {
+            let x = x.to_ascii_uppercase();
+            x.contains("ELAD") || x.contains("FDM")
+        })
+    };
+    d.vendor_id() == VID || named(d.manufacturer_string()) || named(d.product_string())
+}
+
+/// One line about a device, for a bug report.
+fn describe(d: &nusb::DeviceInfo) -> String {
+    #[cfg(target_os = "windows")]
+    let driver = format!(", driver {}", d.driver().unwrap_or("none"));
+    #[cfg(not(target_os = "windows"))]
+    let driver = String::new();
+    format!(
+        "{:04x}:{:04x} {} {}{driver}",
+        d.vendor_id(),
+        d.product_id(),
+        d.manufacturer_string().unwrap_or("?"),
+        d.product_string().unwrap_or("?"),
+    )
 }

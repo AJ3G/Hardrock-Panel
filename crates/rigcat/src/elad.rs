@@ -888,12 +888,18 @@ impl Protocol for FdmDuo {
             "GI" => {
                 // P1 RIT, P2, P3 memory (3), P4 RX/TX/TUNE, P5 mode, P6 VFO,
                 // P7 split, P8 (4).
-                let c: Vec<char> = b.chars().collect();
-                if c.len() >= 9 {
+                // Only a block of exactly the documented 13 digits is read:
+                // a longer or shorter one would shift every field, and a
+                // memory or mode digit read as P4 would say "transmitting"
+                // for good.
+                let c: Vec<char> = b.trim().chars().collect();
+                if c.len() == 13 && c.iter().all(|ch| ch.is_ascii_digit()) {
                     s.rit_on = c[0].to_digit(10).map(|v| v != 0);
                     s.tx_state = c[5].to_digit(10).map(|v| v as u8);
                     s.vfo = c[7].to_digit(10).map(|v| v as u8);
                     s.split = c[8].to_digit(10).map(|v| v != 0);
+                } else {
+                    s.tx_state = None;
                 }
             }
             _ => {}
@@ -1323,9 +1329,23 @@ mod tests {
             (Some(true), Some(1), Some(1), Some(true))
         );
         assert!(s.transmitting());
+        assert!(s.tx_reason().is_some_and(|r| r.contains("GI 1000012110000")));
         d.apply(&mut s, &Reply { key: "GI".into(), body: "0000002000000".into() });
         assert_eq!(s.tx_state, Some(0));
         assert!(!s.transmitting());
         assert_eq!(s.value("GI"), Some("0000002000000"));
+        assert_eq!(s.tx_reason(), None);
+    }
+
+    #[test]
+    fn a_gi_block_of_another_length_is_not_read_as_transmitting() {
+        let d = FdmDuo::default();
+        let mut s = RigStatus::default();
+        // One digit short or long shifts the mode digit into P4.
+        for body in ["000002000000", "00000002000000", "00000A2000000"] {
+            d.apply(&mut s, &Reply { key: "GI".into(), body: body.into() });
+            assert_eq!(s.tx_state, None, "{body}");
+            assert!(!s.transmitting(), "{body}");
+        }
     }
 }
