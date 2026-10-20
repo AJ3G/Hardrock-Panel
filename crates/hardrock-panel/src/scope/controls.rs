@@ -3,7 +3,8 @@
 
 use eframe::egui::{self, Align2, Color32, CursorIcon, Rect, RichText, Sense, Stroke, pos2, vec2};
 
-use super::bandplan::{self, DataMode, Use};
+use super::bandplan::{self, Use};
+use super::digimodes::{self, Digi};
 use super::levels::s_unit;
 use super::paint::{Ctx, fft_label};
 use super::palette::Palette;
@@ -209,25 +210,24 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
 
     ui.horizontal_wrapped(|ui| {
         caption(ui, "Data");
-        for d in DataMode::ALL {
-            let on = sc.digi == Some(d) && cx.rig.mode == sdr::Mode::Usb;
-            let r = ui.add_enabled_ui(!tx, |ui| chip(ui, on, d.label())).inner;
+        for d in digimodes::keys() {
+            let on = sc.digi.is_some_and(|x| std::ptr::eq(x, d));
+            let r = ui.add_enabled_ui(!tx, |ui| chip(ui, on, d.name)).inner;
             let r = r.on_hover_text(format!(
-                "USB at the {} calling frequency on this band, passband {:.0}–{:.0} Hz",
-                d.label(),
-                d.passband().0,
-                d.passband().1
+                "{} at {}'s frequency on this band, passband {}–{} Hz; the radio's filter and \
+                 the decoder follow",
+                if d.side == digimodes::Side::Voice { "LSB or USB" } else { "USB" },
+                d.name,
+                d.lo,
+                d.hi
             ));
             let r = r.on_disabled_hover_text("Locked while the radio transmits");
             // SAFETY INTERLOCK 9: no retuning while transmitting.
             if r.clicked() && !tx {
-                let t = bandplan::data_tune(d, cx.map.shown(cx.rig.rx_hz));
-                out.tune_to = Some(cx.map.radio(t.dial_hz));
-                out.passband = Some(t.passband);
-                out.mode = Some(sdr::Mode::Usb);
-                out.data_mode = Some(d);
-                sc.digi = Some(d);
-                sc.digi_note = t.note;
+                match bandplan::data_pick(d, cx.rig.rx_hz, cx.map) {
+                    Some(p) => pick_data(sc, out, cx, d, p.dial, p.note),
+                    None => sc.digi_note = Some(format!("No {} frequency in reach", d.name)),
+                }
             }
         }
         if let Some(n) = &sc.digi_note {
@@ -449,4 +449,23 @@ fn palette_chip(ui: &mut egui::Ui, p: Palette, on: bool) -> egui::Response {
         );
     }
     r
+}
+
+/// Send the receiver to data mode `d` at `dial` (as shown): its frequency,
+/// sideband and passband, and say so. The caller has checked the radio is
+/// not transmitting (interlock 9).
+pub(super) fn pick_data(
+    sc: &mut Scope,
+    out: &mut ScopeOut,
+    cx: &Ctx,
+    d: &'static Digi,
+    dial: u64,
+    note: Option<String>,
+) {
+    out.tune_to = Some(cx.map.radio(dial as f64));
+    out.passband = Some(d.passband(dial));
+    out.mode = Some(d.sdr_mode(dial));
+    out.data_mode = Some(super::DataPick { digi: d, dial, note: note.clone() });
+    sc.digi = Some(d);
+    sc.digi_note = note;
 }

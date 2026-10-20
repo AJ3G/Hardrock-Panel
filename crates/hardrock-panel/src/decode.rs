@@ -28,6 +28,7 @@ use links::WsjtxUdp;
 use serde::{Deserialize, Serialize};
 
 use crate::rx::{self, Rx};
+use crate::scope::digimodes::{self, Digi};
 use crate::{chrome, theme};
 
 /// Every mode the window offers.
@@ -72,7 +73,7 @@ impl Kind {
         ("From I/Q", &[Kind::Hfdl, Kind::Acars, Kind::Vdl2, Kind::Ais, Kind::ModeS]),
     ];
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Kind::Ft8 => "FT8",
             Kind::Ft4 => "FT4",
@@ -124,6 +125,49 @@ impl Kind {
         })
     }
 
+    /// The mode's dial frequencies and receiver set-up (decision 39), where
+    /// it has a calling frequency.
+    pub(crate) fn digi(self) -> Option<&'static Digi> {
+        digimodes::digi(match self {
+            Kind::Ft8 => "FT8",
+            Kind::Ft4 => "FT4",
+            Kind::Wspr => "WSPR",
+            Kind::Jt65 => "JT65",
+            Kind::Jt9 => "JT9",
+            Kind::Fst4 => "FST4",
+            Kind::Q65 => "Q65",
+            Kind::Rtty => "RTTY",
+            Kind::Psk31 => "PSK31",
+            Kind::Navtex => "NAVTEX",
+            Kind::Sstv => "SSTV",
+            Kind::Wefax => "WEFAX",
+            Kind::Acars => "ACARS",
+            Kind::Vdl2 => "VDL2",
+            Kind::Ais => "AIS",
+            Kind::ModeS => "ADS-B",
+            Kind::Olivia | Kind::Thor | Kind::Hfdl => return None,
+        })
+    }
+
+    /// The decoder for data mode `d`, if the panel has one.
+    pub(crate) fn of_digi(d: &Digi) -> Option<Kind> {
+        Kind::GROUPS
+            .iter()
+            .flat_map(|(_, k)| k.iter().copied())
+            .find(|k| k.digi().is_some_and(|x| std::ptr::eq(x, d)))
+    }
+
+    /// The receiver's passband for a keyboard mode with no calling
+    /// frequency, about the audio its decoder listens at.
+    pub(crate) fn audio_passband(self, audio_hz: f64) -> Option<(f32, f32)> {
+        let half = match self {
+            Kind::Olivia => 350.0,
+            Kind::Thor => 250.0,
+            _ => return None,
+        };
+        Some(((audio_hz - half) as f32, (audio_hz + half) as f32))
+    }
+
     fn link(self) -> Option<LinkMode> {
         Some(match self {
             Kind::Hfdl => LinkMode::Hfdl,
@@ -151,6 +195,8 @@ pub(crate) struct DecodeSettings {
     /// WEFAX's lines per minute, and IOC 288 rather than 576.
     pub lpm: f64,
     pub ioc_288: bool,
+    /// Picking a mode takes the radio and the receiver to it (decision 39).
+    pub snap: bool,
 }
 
 impl Default for DecodeSettings {
@@ -162,6 +208,7 @@ impl Default for DecodeSettings {
             reverse: false,
             lpm: 120.0,
             ioc_288: false,
+            snap: true,
         }
     }
 }
@@ -248,6 +295,8 @@ pub(crate) struct Decode {
     pub error: Option<String>,
     /// The last slot: when, how many decodes, how long it took.
     last_slot: Option<(i64, usize, u32)>,
+    /// What the last snap did (or why it didn't).
+    pub note: Option<(String, bool)>,
 }
 
 /// Where the receiver is, for the RF of each decode.
@@ -545,36 +594,108 @@ fn caption(ui: &mut egui::Ui, t: &str) {
     ui.label(RichText::new(t.to_uppercase()).size(10.5).color(theme::CYAN_DIM()).strong());
 }
 
-/// Draw the window. Clears `open` when it is closed.
+/// What the operator asked of the window this frame.
+#[derive(Default)]
+pub(crate) struct DecodeOut {
+    /// A mode was picked: snap to it, if `snap` is on.
+    pub picked: Option<Kind>,
+    /// Pop out (`true`) or dock (`false`).
+    pub pop: Option<bool>,
+}
+
+/// Draw the window, over the panel or popped out into one of its own (as
+/// RADIO and SCOPE do). Clears `open` when it is closed.
 pub(crate) fn window(
     ctx: &egui::Context,
     open: &mut bool,
+    popped: bool,
     d: &mut Decode,
     s: &mut DecodeSettings,
     rx: &Rx,
     wsjtx_on: bool,
-) {
-    egui::Window::new("Decode")
-        .id(egui::Id::new("decode-window"))
-        .open(open)
-        .frame(chrome::window_frame())
-        .resizable(true)
-        .collapsible(false)
-        .default_pos([(ctx.content_rect().width() - 660.0).max(20.0), 120.0])
-        .default_size([640.0, 560.0])
-        .show(ctx, |ui| {
-            chrome::window_body_bg(ui);
-            body(ui, d, s, rx, wsjtx_on);
-        });
+) -> DecodeOut {
+    let mut out = DecodeOut::default();
+    if popped {
+        let closed = ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("decode-window"),
+            egui::ViewportBuilder::default()
+                .with_title("Decode")
+                .with_inner_size([720.0, 640.0])
+                .with_min_inner_size([420.0, 320.0]),
+            |ui, _class| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
+                    .show(ui, |ui| {
+                        chrome::window_body_bg(ui);
+                        body(ui, true, d, s, rx, wsjtx_on, &mut out);
+                    });
+                ui.ctx().input(|i| i.viewport().close_requested())
+            },
+        );
+        if closed {
+            *open = false;
+        }
+    } else {
+        egui::Window::new("Decode")
+            .id(egui::Id::new("decode-window"))
+            .open(open)
+            .frame(chrome::window_frame())
+            .resizable(true)
+            .collapsible(false)
+            .default_pos([(ctx.content_rect().width() - 660.0).max(20.0), 120.0])
+            .default_size([640.0, 560.0])
+            .show(ctx, |ui| {
+                chrome::window_body_bg(ui);
+                body(ui, false, d, s, rx, wsjtx_on, &mut out);
+            });
+    }
+    out
 }
 
-fn body(ui: &mut egui::Ui, d: &mut Decode, s: &mut DecodeSettings, rx: &Rx, wsjtx_on: bool) {
+fn body(
+    ui: &mut egui::Ui,
+    popped: bool,
+    d: &mut Decode,
+    s: &mut DecodeSettings,
+    rx: &Rx,
+    wsjtx_on: bool,
+    out: &mut DecodeOut,
+) {
+    ui.horizontal(|ui| {
+        chrome::checkbox(ui, &mut s.snap, "Snap the radio to the mode").on_hover_text(
+            "Picking a mode takes the radio and the panel's receiver to its frequency on this \
+             band (or the nearest), in its sideband, with the radio's filter and the receiver's \
+             passband set for it. Never while transmitting.",
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (text, hover) = if popped {
+                ("DOCK", "Put DECODE back over the panel")
+            } else {
+                ("POP OUT", "Open DECODE in a window of its own")
+            };
+            if chrome::chip(ui, false, text).on_hover_text(hover).clicked() {
+                out.pop = Some(!popped);
+            }
+        });
+    });
     for (group, kinds) in Kind::GROUPS {
         ui.horizontal_wrapped(|ui| {
             caption(ui, group);
             for &k in kinds {
-                if chrome::chip(ui, s.kind == k, k.label()).clicked() {
+                let hover = match k.digi() {
+                    Some(g) => format!(
+                        "{}: {} with a {}–{} Hz passband{}",
+                        k.label(),
+                        if g.side == digimodes::Side::Voice { "LSB or USB" } else { g.side_name() },
+                        g.lo,
+                        g.hi,
+                        if s.snap { ", at its frequency on this band" } else { "" }
+                    ),
+                    None => format!("{}: no calling frequency, tune to it by hand", k.label()),
+                };
+                if chrome::chip(ui, s.kind == k, k.label()).on_hover_text(hover).clicked() {
                     s.kind = k;
+                    out.picked = Some(k);
                 }
             }
         });
@@ -648,6 +769,10 @@ fn body(ui: &mut egui::Ui, d: &mut Decode, s: &mut DecodeSettings, rx: &Rx, wsjt
     ui.label(RichText::new(line).size(11.5).color(col));
     if let Some(e) = &d.error {
         ui.label(RichText::new(e).size(11.5).color(theme::YELLOW()));
+    }
+    if let Some((n, refused)) = &d.note {
+        let col = if *refused { theme::YELLOW() } else { theme::CYAN() };
+        ui.label(RichText::new(n).size(11.5).color(col));
     }
     ui.separator();
 
@@ -759,5 +884,24 @@ mod tests {
     #[test]
     fn utc_reads_as_hours_minutes_seconds() {
         assert_eq!(hms(86_400.0 * 3.0 + 3600.0 * 13.0 + 62.0), "13:01:02");
+    }
+
+    #[test]
+    fn a_mode_with_a_calling_frequency_snaps_and_its_decoder_is_found_again() {
+        for (_, kinds) in Kind::GROUPS {
+            for &k in kinds {
+                match k.digi() {
+                    Some(d) => assert_eq!(Kind::of_digi(d), Some(k), "{k:?}"),
+                    None => assert!(matches!(k, Kind::Olivia | Kind::Thor | Kind::Hfdl), "{k:?}"),
+                }
+            }
+        }
+        // JS8 has frequencies but no decoder here.
+        assert_eq!(Kind::of_digi(digimodes::digi("JS8").unwrap()), None);
+        assert_eq!(Kind::Olivia.audio_passband(1500.0), Some((1150.0, 1850.0)));
+        assert_eq!(Kind::Ft8.audio_passband(1500.0), None);
+        // An older settings file snaps.
+        let s: DecodeSettings = serde_json::from_str("{\"running\": true}").unwrap();
+        assert!(s.snap && s.running);
     }
 }

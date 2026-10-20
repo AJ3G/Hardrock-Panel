@@ -266,8 +266,10 @@ impl RadioPrefs {
     /// on; else the band's last frequency and mode; else its start, in LSB
     /// below 10 MHz and USB above.
     pub(crate) fn band_target(&self, b: &BandDef, digi: Option<&Digi>) -> (u64, String) {
-        if let Some(f) = digi.and_then(|d| d.freq_on(b.name)) {
-            return (f, "USB".into());
+        if let Some(d) = digi
+            && let Some(f) = digi_on(d, b)
+        {
+            return (f, d.rig_mode(f).into());
         }
         match self.bands.get(b.name) {
             Some(m) if m.hz >= b.lo && m.hz <= b.hi => (m.hz, m.mode.clone()),
@@ -276,136 +278,30 @@ impl RadioPrefs {
     }
 }
 
-/// A data mode: its audio passband and its dial frequency (USB) by band.
-#[derive(Debug, PartialEq)]
-pub(crate) struct Digi {
-    pub name: &'static str,
-    pub lo: u32,
-    pub hi: u32,
-    pub freqs: &'static [(&'static str, u64)],
-}
+use crate::scope::digimodes;
+pub(crate) use crate::scope::digimodes::Digi;
 
-impl Digi {
-    pub(crate) fn freq_on(&self, band: &str) -> Option<u64> {
-        self.freqs.iter().find(|(b, _)| *b == band).map(|(_, f)| *f)
-    }
+/// The data modes with a key on the face: the one table the scope's DATA
+/// keys, its band-plan markers and DECODE's snap read too (decision 39).
+pub(crate) fn digis() -> impl Iterator<Item = &'static Digi> {
+    digimodes::keys()
 }
-
-/// Calling frequencies as published by WSJT-X, WSPRnet, JS8Call and common
-/// RTTY and PSK practice.
-pub(crate) const DIGIS: &[Digi] = &[
-    Digi {
-        name: "FT8",
-        lo: 200,
-        hi: 3000,
-        freqs: &[
-            ("160", 1_840_000),
-            ("80", 3_573_000),
-            ("60", 5_357_000),
-            ("40", 7_074_000),
-            ("30", 10_136_000),
-            ("20", 14_074_000),
-            ("17", 18_100_000),
-            ("15", 21_074_000),
-            ("12", 24_915_000),
-            ("10", 28_074_000),
-            ("6", 50_313_000),
-            ("4", 70_154_000),
-            ("2", 144_174_000),
-            ("70 cm", 432_174_000),
-            ("23 cm", 1_296_174_000),
-        ],
-    },
-    Digi {
-        name: "FT4",
-        lo: 200,
-        hi: 3000,
-        freqs: &[
-            ("80", 3_575_500),
-            ("40", 7_047_500),
-            ("30", 10_140_000),
-            ("20", 14_080_000),
-            ("17", 18_104_000),
-            ("15", 21_140_000),
-            ("12", 24_919_000),
-            ("10", 28_180_000),
-            ("6", 50_318_000),
-            ("2", 144_170_000),
-        ],
-    },
-    Digi {
-        name: "WSPR",
-        lo: 1400,
-        hi: 1600,
-        freqs: &[
-            ("160", 1_836_600),
-            ("80", 3_568_600),
-            ("60", 5_364_700),
-            ("40", 7_038_600),
-            ("30", 10_138_700),
-            ("20", 14_095_600),
-            ("17", 18_104_600),
-            ("15", 21_094_600),
-            ("12", 24_924_600),
-            ("10", 28_124_600),
-            ("6", 50_293_000),
-            ("2", 144_489_000),
-        ],
-    },
-    Digi {
-        name: "RTTY",
-        lo: 2000,
-        hi: 2420,
-        freqs: &[
-            ("80", 3_580_000),
-            ("40", 7_043_000),
-            ("30", 10_142_000),
-            ("20", 14_083_000),
-            ("17", 18_101_000),
-            ("15", 21_083_000),
-            ("12", 24_920_000),
-            ("10", 28_083_000),
-            ("6", 50_300_000),
-        ],
-    },
-    Digi {
-        name: "PSK31",
-        lo: 300,
-        hi: 2700,
-        freqs: &[
-            ("160", 1_838_000),
-            ("80", 3_580_000),
-            ("40", 7_070_000),
-            ("30", 10_142_000),
-            ("20", 14_070_000),
-            ("17", 18_100_000),
-            ("15", 21_070_000),
-            ("12", 24_920_000),
-            ("10", 28_120_000),
-            ("6", 50_290_000),
-        ],
-    },
-    Digi {
-        name: "JS8",
-        lo: 200,
-        hi: 3000,
-        freqs: &[
-            ("160", 1_842_000),
-            ("80", 3_578_000),
-            ("40", 7_078_000),
-            ("30", 10_130_000),
-            ("20", 14_078_000),
-            ("17", 18_104_000),
-            ("15", 21_078_000),
-            ("12", 24_922_000),
-            ("10", 28_078_000),
-            ("6", 50_318_000),
-        ],
-    },
-];
 
 pub(crate) fn digi(name: &str) -> Option<&'static Digi> {
-    DIGIS.iter().find(|d| d.name == name)
+    digimodes::digi(name)
+}
+
+/// The mode's dial on band `b`, if it has one there.
+pub(crate) fn digi_on(d: &Digi, b: &BandDef) -> Option<u64> {
+    d.dials.iter().copied().find(|f| (b.lo..=b.hi).contains(f))
+}
+
+/// The bands offered with converter `xvtr`, as a data mode's pick wants them.
+pub(crate) fn pick_bands(xvtr: i64) -> Vec<digimodes::Band> {
+    bands_for(xvtr)
+        .into_iter()
+        .map(|b| digimodes::Band { label: b.label(), lo: b.lo, hi: b.hi })
+        .collect()
 }
 
 /// The receive filter for a data mode's passband `lo..hi` among the radio's
@@ -463,9 +359,11 @@ pub(crate) fn tune_frames(
     Ok(v)
 }
 
-/// A data mode: USB on its frequency for the band the radio is on (or 20 m,
-/// with a note, where it has none there), its passband's filter and, if
-/// `usb_input`, the radio's transmit audio on USB (`TI1` on the FDM-DUO).
+/// A data mode: its frequency on the band the radio is on (or the nearest,
+/// with a note, where it has none there; see [`Digi::pick`]), in its mode,
+/// with its passband's filter and, if `usb_input`, the radio's transmit
+/// audio on USB (`TI1` on the FDM-DUO). Also says where it went, as on the
+/// LCD.
 pub(crate) fn digi_frames(
     p: &dyn Protocol,
     s: &RigStatus,
@@ -474,40 +372,34 @@ pub(crate) fn digi_frames(
     usb_input: bool,
 ) -> Result<(Vec<Frame>, Option<String>), String> {
     let rf = dial_hz(s).map(|f| shown(f, xvtr)).ok_or("The radio's dial hasn't been read yet.")?;
-    let bands = bands_for(xvtr);
-    let here =
-        band_of(rf, xvtr).or_else(|| bands.iter().copied().min_by_key(|b| b.start.abs_diff(rf)));
-    let mut note = None;
-    let f = match here.and_then(|b| d.freq_on(b.name)) {
-        Some(f) => f,
-        None => {
-            let alt = bands
-                .iter()
-                .find_map(|b| d.freq_on(b.name).filter(|_| b.name == "20"))
-                .or_else(|| bands.iter().find_map(|b| d.freq_on(b.name)))
-                .ok_or_else(|| {
-                    format!("No {} frequency on the bands the radio can reach.", d.name)
-                })?;
-            note = Some(format!(
-                "No {} frequency on {}, so {}.",
-                d.name,
-                here.map_or("this band".into(), |b| b.label()),
-                band_of(alt, xvtr).map_or("another band".into(), |b| b.label())
-            ));
-            alt
-        }
-    };
-    let if_hz = if_of(f, xvtr).ok_or("That frequency is outside the radio's range.")?;
-    let mut v = tune_frames(p, s, if_hz, Some("USB"))?;
-    if let Some(w) = digi_filter(&p.filters("USB"), d.lo, d.hi)
-        && let Some(fr) = p.set_filter("USB", w)
+    let pick = d
+        .pick(rf, &pick_bands(xvtr), |f| if_of(f, xvtr).is_some())
+        .ok_or_else(|| format!("No {} frequency inside the radio's reach.", d.name))?;
+    Ok((digi_frames_at(p, s, d, pick.dial, xvtr, usb_input)?, pick.note))
+}
+
+/// [`digi_frames`] at a dial already chosen (`dial` as on the LCD): a
+/// band-plan marker clicked, or DECODE's snap.
+pub(crate) fn digi_frames_at(
+    p: &dyn Protocol,
+    s: &RigStatus,
+    d: &Digi,
+    dial: u64,
+    xvtr: i64,
+    usb_input: bool,
+) -> Result<Vec<Frame>, String> {
+    let if_hz = if_of(dial, xvtr).ok_or("That frequency is outside the radio's range.")?;
+    let mode = d.rig_mode(dial);
+    let mut v = tune_frames(p, s, if_hz, Some(mode))?;
+    if let Some(w) = digi_filter(&p.filters(mode), d.lo, d.filter_width())
+        && let Some(fr) = p.set_filter(mode, w)
     {
         v.push(fr);
     }
     if usb_input {
         v.push(usb_input_frame(p)?);
     }
-    Ok((v, note))
+    Ok(v)
 }
 
 /// The transmit audio input on USB, as a setting (`TI1;` on the FDM-DUO).
@@ -730,11 +622,15 @@ mod tests {
         assert_eq!(texts(&f), ["FA00014095600;", "MD2;", "RF219;"]);
         let (f, _) = digi_frames(&*d, &s, digi("RTTY").unwrap(), 0, false).unwrap();
         assert_eq!(text(&f[2]), "RF209;");
-        // No FT4 on 160 m: 20 m, with a note.
+        // No FT4 on 160 m: the nearest, 80 m, with a note.
         let (f, note) =
             digi_frames(&*d, &rx(1_840_000, "LSB"), digi("FT4").unwrap(), 0, false).unwrap();
-        assert_eq!(text(&f[0]), "FA00014080000;");
-        assert!(note.unwrap().contains("160 m"));
+        assert_eq!(text(&f[0]), "FA00003575500;");
+        assert_eq!(note.as_deref(), Some("No FT4 frequency on 160 m, so 80 m"));
+        // SSTV on 40 m is LSB.
+        let (f, _) =
+            digi_frames(&*d, &rx(7_100_000, "USB"), digi("SSTV").unwrap(), 0, false).unwrap();
+        assert_eq!(texts(&f)[..2], ["FA00007171000;", "MD1;"]);
         // Through a 2 m converter the radio is sent the IF.
         let (f, _) =
             digi_frames(&*d, &rx(28_300_000, "USB"), digi("FT8").unwrap(), 116_000_000, false)

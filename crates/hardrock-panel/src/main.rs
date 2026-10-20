@@ -94,6 +94,8 @@ struct Saved {
     scope: scope::ScopeSettings,
     scope_popped: bool,
     decode: decode::DecodeSettings,
+    /// DECODE was popped out into its own window.
+    decode_popped: bool,
     /// TCI, rigctld and WSJT-X UDP (decision 25).
     outside: outside::OutsideSettings,
 }
@@ -113,6 +115,7 @@ impl Default for Saved {
             scope: scope::ScopeSettings::default(),
             scope_popped: false,
             decode: decode::DecodeSettings::default(),
+            decode_popped: false,
             outside: outside::OutsideSettings::default(),
         }
     }
@@ -613,14 +616,149 @@ impl App {
         if o.settings {
             self.show_settings = true;
         }
-        if let Some(so) = o.scope {
+        if let Some(mut so) = o.scope {
             if so.settings_changed {
                 self.saved.scope = self.scope.settings().clone();
             }
+            let picked = so.data_mode.take();
             let now = rx::RadioNow { link: self.rig.as_deref(), rig, transmitting };
             self.rx.apply_scope(so, &mut self.saved.rx, now);
+            // A DATA key or a band-plan marker: the radio's filter, the
+            // decoder and the note follow, as DECODE's snap does.
+            if let Some(p) = picked {
+                let kind = decode::Kind::of_digi(p.digi);
+                let xvtr = radio::xvtr_hz(ctx);
+                let (note, refused) =
+                    self.snap_to(Some(p.digi), kind, Some(p.dial), rig, transmitting, xvtr);
+                let note = match p.note {
+                    Some(n) if !refused => format!("{n}. {note}"),
+                    _ => note,
+                };
+                self.scope.show_data(Some(p.digi), Some(note.clone()));
+                self.decode.note = Some((note, refused));
+            }
         }
         self.show_scope = open;
+    }
+
+    /// Take the radio and the panel's receiver to data mode `d` (decision
+    /// 39): its frequency on the band they are on (or the nearest), or `at`
+    /// (as on the LCD) when a marker was clicked; its sideband; the
+    /// receiver's passband and, through the rig link, the radio's filter; and
+    /// the decoder `kind` with its audio set for it. Says what it did, and
+    /// whether it was refused.
+    fn snap_to(
+        &mut self,
+        d: Option<&'static scope::Digi>,
+        kind: Option<decode::Kind>,
+        at: Option<u64>,
+        rig: Option<&RigStatus>,
+        transmitting: bool,
+        xvtr: i64,
+    ) -> (String, bool) {
+        use radio::logic;
+        use scope::digimodes::{Pick, mhz};
+        let name = d.map(|d| d.name).or(kind.map(|k| k.label())).unwrap_or("That mode");
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #5 and #9): nothing
+        // is retuned while the radio transmits; the link refuses it then
+        // anyway (#5), and the receiver is where the radio transmits in
+        // split (#9).
+        if transmitting {
+            return (
+                format!(
+                    "{name}: not while transmitting. The radio refuses changes then \
+                     (interlocks #5 and #9)."
+                ),
+                true,
+            );
+        }
+        let now = rx::RadioNow { link: self.rig.as_deref(), rig, transmitting };
+        let cat = rig.filter(|r| r.connected);
+        if let Some(k) = kind {
+            self.saved.decode.kind = k;
+        }
+        let Some(d) = d else {
+            // Olivia, THOR, HFDL: no calling frequency, so only the passband.
+            let pb = kind.and_then(|k| k.audio_passband(self.saved.decode.audio_hz));
+            if let Some(pb) = pb.filter(|_| self.rx.active()) {
+                self.rx.set_mode(sdr::Mode::Usb, Some(pb), now);
+                return (
+                    format!(
+                        "{name}: no calling frequency, so tune to it by hand. Receiver USB {:.0} \
+                         to {:.0} Hz.",
+                        pb.0, pb.1
+                    ),
+                    false,
+                );
+            }
+            return (format!("{name}: no calling frequency, so tune to it by hand."), false);
+        };
+        let map =
+            scope::view::FreqMap { ppm: self.scope.settings().ppm, transverter_hz: xvtr as f64 };
+        let here = if self.rx.active() {
+            Some(map.shown(self.rx.rx_hz).max(0.0).round() as u64)
+        } else {
+            cat.and_then(logic::dial_hz).map(|f| logic::shown(f, xvtr))
+        };
+        let Some(here) = here else {
+            return (
+                format!(
+                    "{name}: no radio or receiver to tune. Choose the radio or the I/Q source \
+                     under SETTINGS."
+                ),
+                true,
+            );
+        };
+        let pick = match at {
+            Some(dial) => Some(Pick { dial, note: None }),
+            None => d.pick(here, &logic::pick_bands(xvtr), |f| logic::if_of(f, xvtr).is_some()),
+        };
+        let Some(pick) = pick else {
+            let how = if xvtr == 0 { ": a converter offset brings others in" } else { "" };
+            return (format!("No {name} frequency inside the radio's 9 kHz to 54 MHz{how}."), true);
+        };
+        let rig_mode = d.rig_mode(pick.dial);
+        let pb = d.passband(pick.dial);
+        let mut did = vec![format!("{name}: {rig_mode} {}", mhz(pick.dial))];
+        let proto = self.saved.rig.model.protocol();
+        let filter = |w: Option<u32>| match w {
+            Some(w) if w >= 1000 => format!("radio filter {:.1} kHz", w as f64 / 1e3),
+            Some(w) => format!("radio filter {w} Hz"),
+            None => "radio filter left as it is".to_string(),
+        };
+        if self.rx.active() {
+            let hz = map.radio(pick.dial as f64);
+            self.rx.set_mode(d.sdr_mode(pick.dial), Some(pb), now);
+            // The I/Q centre, and with the ELAD the DUO's VFO A, onto the
+            // dial; then the receiver.
+            self.rx.recentre(hz, now);
+            self.rx.tune(hz, transmitting);
+            did.push(format!("receiver {:.0} to {:.0} Hz", pb.0, pb.1));
+            let duo = self.rx.source() == rx::IqChoice::Elad && cat.is_some();
+            if duo && self.rx.rate() <= rx::DUO_AUDIO_MAX_RATE as f64 {
+                let w = rx::duo_filter(&proto.filters(rig_mode), d.sdr_mode(pick.dial), pb);
+                did.push(filter(w.or(Some(d.filter_width()))));
+            } else if duo {
+                did.push("the DUO's filter is left: above 192 kHz its audio is muted".into());
+            }
+        } else if let (Some(link), Some(r)) = (&self.rig, cat) {
+            // Read back after each; refused while transmitting (#5).
+            match logic::digi_frames_at(&*proto, r, d, pick.dial, xvtr, false) {
+                Ok(v) => link.set(v),
+                Err(e) => return (format!("{name}: {e}"), true),
+            }
+            did.push(filter(logic::digi_filter(&proto.filters(rig_mode), d.lo, d.filter_width())));
+        }
+        if let Some(a) = d.audio_hz {
+            self.saved.decode.audio_hz = a;
+            self.saved.decode.reverse = false;
+            did.push(format!("decoder at {a:.0} Hz"));
+        }
+        let mut note = did.join(" · ");
+        if let Some(n) = pick.note {
+            note = format!("{n}. {note}");
+        }
+        (note, false)
     }
 
     fn settings_window(&mut self, ctx: &egui::Context, st: &AmpStatus, rig: Option<&RigStatus>) {
@@ -899,14 +1037,26 @@ impl eframe::App for App {
         }
         if self.show_decode {
             let mut open = true;
-            decode::window(
+            let o = decode::window(
                 ctx,
                 &mut open,
+                self.saved.decode_popped,
                 &mut self.decode,
                 &mut self.saved.decode,
                 &self.rx,
                 self.outside.wsjtx.is_some(),
             );
+            if let Some(p) = o.pop {
+                self.saved.decode_popped = p;
+            }
+            if let Some(k) = o.picked.filter(|_| self.saved.decode.snap) {
+                let (note, refused) =
+                    self.snap_to(k.digi(), Some(k), None, rig.as_ref(), transmitting, xvtr);
+                if !refused {
+                    self.scope.show_data(k.digi().filter(|d| d.key), Some(note.clone()));
+                }
+                self.decode.note = Some((note, refused));
+            }
             self.show_decode = open;
         }
 

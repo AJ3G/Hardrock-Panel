@@ -128,7 +128,7 @@ fn mode_pop(ui: &mut Ui, f: &mut Face<'_>) {
         }
     });
     ui.horizontal_wrapped(|ui| {
-        for d in logic::DIGIS {
+        for d in logic::digis() {
             let r = cap(ui, th, f.st.digi == Some(d.name), d.name).on_hover_text(format!(
                 "USB on {}'s frequency on this band, and a filter for its {} to {} Hz audio",
                 d.name, d.lo, d.hi
@@ -177,7 +177,8 @@ fn band_pop(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs) {
     ui.horizontal_wrapped(|ui| {
         for b in logic::bands_for(xvtr) {
             if cap(ui, th, here == Some(b), &b.label()).clicked() {
-                let digi = f.st.digi.and_then(logic::digi).filter(|d| d.freq_on(b.name).is_some());
+                let digi =
+                    f.st.digi.and_then(logic::digi).filter(|d| logic::digi_on(d, b).is_some());
                 if digi.is_none() {
                     f.st.digi = None;
                 }

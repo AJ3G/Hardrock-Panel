@@ -7,10 +7,10 @@
 //! VHF airband, marine VHF and ADS-B. All of it is published public
 //! information; it is a guide on screen, not a licence condition.
 //!
-//! The data-mode calling frequencies are the ones WSJT-X, WSPRnet and JS8Call
-//! publish, and common RTTY and PSK31 practice.
+//! The data modes' dial frequencies drawn over it are in [`digimodes`].
 
-use std::collections::BTreeMap;
+use super::digimodes::{self, Digi, Pick};
+use super::view::FreqMap;
 
 /// What a segment of spectrum is used for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -269,175 +269,31 @@ fn dist(b: &HamBand, hz: f64) -> f64 {
     if hz < b.lo { b.lo - hz } else { hz - b.hi }
 }
 
-/// A data mode the scope has a button for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DataMode {
-    Ft8,
-    Ft4,
-    Wspr,
-    Rtty,
-    Psk31,
-    Js8,
-}
-
-impl DataMode {
-    pub const ALL: [DataMode; 6] = [
-        DataMode::Ft8,
-        DataMode::Ft4,
-        DataMode::Wspr,
-        DataMode::Rtty,
-        DataMode::Psk31,
-        DataMode::Js8,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            DataMode::Ft8 => "FT8",
-            DataMode::Ft4 => "FT4",
-            DataMode::Wspr => "WSPR",
-            DataMode::Rtty => "RTTY",
-            DataMode::Psk31 => "PSK31",
-            DataMode::Js8 => "JS8",
-        }
-    }
-
-    /// The receive passband each mode wants, Hz above the (USB) dial: the
-    /// audio range its decoder listens to.
-    pub fn passband(self) -> (f32, f32) {
-        match self {
-            DataMode::Ft8 | DataMode::Ft4 | DataMode::Js8 => (200.0, 3000.0),
-            DataMode::Wspr => (1400.0, 1600.0),
-            DataMode::Rtty => (2000.0, 2420.0),
-            DataMode::Psk31 => (300.0, 2700.0),
-        }
-    }
-
-    /// The USB dial frequency on each band that has one, Hz.
-    pub fn dials(self) -> &'static [(&'static str, f64)] {
-        match self {
-            DataMode::Ft8 => &[
-                ("160", 1_840_000.0),
-                ("80", 3_573_000.0),
-                ("60", 5_357_000.0),
-                ("40", 7_074_000.0),
-                ("30", 10_136_000.0),
-                ("20", 14_074_000.0),
-                ("17", 18_100_000.0),
-                ("15", 21_074_000.0),
-                ("12", 24_915_000.0),
-                ("10", 28_074_000.0),
-                ("6", 50_313_000.0),
-                ("2", 144_174_000.0),
-                ("70cm", 432_174_000.0),
-                ("23cm", 1_296_174_000.0),
-            ],
-            DataMode::Ft4 => &[
-                ("80", 3_575_500.0),
-                ("40", 7_047_500.0),
-                ("30", 10_140_000.0),
-                ("20", 14_080_000.0),
-                ("17", 18_104_000.0),
-                ("15", 21_140_000.0),
-                ("12", 24_919_000.0),
-                ("10", 28_180_000.0),
-                ("6", 50_318_000.0),
-                ("2", 144_170_000.0),
-            ],
-            DataMode::Wspr => &[
-                ("160", 1_836_600.0),
-                ("80", 3_568_600.0),
-                ("60", 5_364_700.0),
-                ("40", 7_038_600.0),
-                ("30", 10_138_700.0),
-                ("20", 14_095_600.0),
-                ("17", 18_104_600.0),
-                ("15", 21_094_600.0),
-                ("12", 24_924_600.0),
-                ("10", 28_124_600.0),
-                ("6", 50_293_000.0),
-                ("2", 144_489_000.0),
-                ("70cm", 432_300_000.0),
-            ],
-            DataMode::Rtty => &[
-                ("80", 3_580_000.0),
-                ("40", 7_043_000.0),
-                ("30", 10_142_000.0),
-                ("20", 14_083_000.0),
-                ("17", 18_101_000.0),
-                ("15", 21_083_000.0),
-                ("12", 24_920_000.0),
-                ("10", 28_083_000.0),
-                ("6", 50_300_000.0),
-            ],
-            DataMode::Psk31 => &[
-                ("160", 1_838_000.0),
-                ("80", 3_580_000.0),
-                ("40", 7_070_000.0),
-                ("30", 10_142_000.0),
-                ("20", 14_070_000.0),
-                ("17", 18_100_000.0),
-                ("15", 21_070_000.0),
-                ("12", 24_920_000.0),
-                ("10", 28_120_000.0),
-                ("6", 50_290_000.0),
-            ],
-            DataMode::Js8 => &[
-                ("160", 1_842_000.0),
-                ("80", 3_578_000.0),
-                ("40", 7_078_000.0),
-                ("30", 10_130_000.0),
-                ("20", 14_078_000.0),
-                ("17", 18_104_000.0),
-                ("15", 21_078_000.0),
-                ("12", 24_922_000.0),
-                ("10", 28_078_000.0),
-                ("6", 50_318_000.0),
-            ],
-        }
-    }
-
-    pub fn dial_on(self, band: &str) -> Option<f64> {
-        self.dials().iter().find(|(b, _)| *b == band).map(|(_, f)| *f)
+impl HamBand {
+    /// "20 m", "70cm".
+    pub fn label(&self) -> String {
+        if self.name.ends_with("cm") { self.name.to_string() } else { format!("{} m", self.name) }
     }
 }
 
-/// Where a data-mode button sends the receiver.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DataTune {
-    /// The dial, as shown (after any transverter offset).
-    pub dial_hz: f64,
-    pub passband: (f32, f32),
-    /// Said beside the buttons when the mode has no frequency on this band and
-    /// 20 m was used instead.
-    pub note: Option<String>,
+/// The bands, as a data mode's pick wants them (see [`Digi::pick`]).
+pub fn pick_bands() -> Vec<digimodes::Band> {
+    HAM_BANDS
+        .iter()
+        .map(|b| digimodes::Band { label: b.label(), lo: b.lo as u64, hi: b.hi as u64 })
+        .collect()
 }
 
-/// The dial for `mode` on the band `shown_hz` is in (or the nearest band),
-/// falling back to 20 m when the mode has no frequency on that band.
-pub fn data_tune(mode: DataMode, shown_hz: f64) -> DataTune {
-    let band = nearest_band(shown_hz);
-    match mode.dial_on(band.name) {
-        Some(f) => DataTune { dial_hz: f, passband: mode.passband(), note: None },
-        None => DataTune {
-            dial_hz: mode.dial_on("20").expect("every data mode has a 20 m frequency"),
-            passband: mode.passband(),
-            note: Some(format!("No {} frequency on {} m, so 20 m", mode.label(), band.name)),
-        },
-    }
-}
+/// The FDM-DUO's coverage, 9 kHz to 54 MHz, before any converter.
+pub const RADIO_MIN_HZ: f64 = 9_000.0;
+pub const RADIO_MAX_HZ: f64 = 54_000_000.0;
 
-/// Every data-mode calling frequency inside `[lo, hi]` Hz, for the ticks on
-/// the band plan strip, grouped by frequency (FT8 and JS8 may share one).
-pub fn data_marks(lo: f64, hi: f64) -> BTreeMap<i64, Vec<DataMode>> {
-    let mut m: BTreeMap<i64, Vec<DataMode>> = BTreeMap::new();
-    for d in DataMode::ALL {
-        for &(_, f) in d.dials() {
-            if f >= lo && f <= hi {
-                m.entry(f as i64).or_default().push(d);
-            }
-        }
-    }
-    m
+/// Where data mode `d` goes from the receiver at `rx_hz` (the radio's own
+/// Hz): its pick among the frequencies the radio reaches through the
+/// scope's converter offset.
+pub fn data_pick(d: &Digi, rx_hz: f64, map: FreqMap) -> Option<Pick> {
+    let reach = |f: u64| (RADIO_MIN_HZ..=RADIO_MAX_HZ).contains(&map.radio(f as f64));
+    d.pick(map.shown(rx_hz).max(0.0).round() as u64, &pick_bands(), reach)
 }
 
 #[cfg(test)]
@@ -489,26 +345,16 @@ mod tests {
     }
 
     #[test]
-    fn data_buttons_go_to_the_bands_calling_frequency() {
-        let t = data_tune(DataMode::Ft8, 7_150_000.0);
-        assert_eq!(t.dial_hz, 7_074_000.0);
-        assert_eq!(t.passband, (200.0, 3000.0));
-        assert!(t.note.is_none());
-        // RTTY has no 160 m frequency here: 20 m, and it says so.
-        let t = data_tune(DataMode::Rtty, 1_900_000.0);
-        assert_eq!(t.dial_hz, 14_083_000.0);
-        assert!(t.note.unwrap().contains("160 m"));
-        // Through a 2 m transverter: the 2 m frequency.
-        assert_eq!(data_tune(DataMode::Ft8, 144_300_000.0).dial_hz, 144_174_000.0);
-        assert_eq!(data_tune(DataMode::Wspr, 14_000_000.0).passband, (1400.0, 1600.0));
-    }
-
-    #[test]
-    fn calling_frequencies_on_screen_are_grouped() {
-        let m = data_marks(14_060_000.0, 14_100_000.0);
-        assert_eq!(m.get(&14_074_000), Some(&vec![DataMode::Ft8]));
-        assert_eq!(m.get(&14_070_000), Some(&vec![DataMode::Psk31]));
-        assert!(m.contains_key(&14_095_600));
-        assert!(!m.contains_key(&14_140_000));
+    fn data_keys_pick_through_the_converter() {
+        let ft8 = digimodes::digi("FT8").unwrap();
+        let none = FreqMap { ppm: 0.0, transverter_hz: 0.0 };
+        assert_eq!(data_pick(ft8, 7_150_000.0, none).unwrap().dial, 7_074_000);
+        // 2 m through a 116 MHz LO: the radio at 28.3 MHz is 144.3 on the band.
+        let xv = FreqMap { ppm: 0.0, transverter_hz: 116_000_000.0 };
+        assert_eq!(data_pick(ft8, 28_300_000.0, xv).unwrap().dial, 144_174_000);
+        let p = data_pick(digimodes::digi("RTTY").unwrap(), 1_900_000.0, none).unwrap();
+        assert_eq!(p.dial, 3_580_000);
+        assert!(p.note.unwrap().contains("160 m"));
+        assert_eq!(HAM_BANDS[13].label(), "70cm");
     }
 }

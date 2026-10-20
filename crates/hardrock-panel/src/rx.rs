@@ -591,7 +591,8 @@ impl Rx {
         {
             frames.push(f);
         }
-        frames.extend(proto.set_filter(name, width));
+        let filter = duo_filter(&proto.filters(name), self.mode, self.passband);
+        frames.extend(proto.set_filter(name, filter.unwrap_or(width)));
         link.set(frames);
         self.duo_sent = Some((self.mode, width));
     }
@@ -621,6 +622,21 @@ impl Rx {
             self.restart = true;
         }
     }
+}
+
+/// The radio's filter for the receiver's passband `pb` in mode `m`, among
+/// `filters`: as a data mode's (`radio::logic::digi_filter`), so a WSPR or
+/// PSK31 passband gets the narrow data filter it fits in. `None` for CW,
+/// whose filters are centred on its pitch: the nearest width then.
+pub(crate) fn duo_filter(filters: &[u32], m: Mode, pb: (f32, f32)) -> Option<u32> {
+    let (a, b) = (pb.0.abs().round() as u32, pb.1.abs().round() as u32);
+    let (lo, hi) = match m {
+        Mode::Am | Mode::Fm => (0, a + b),
+        // CW's own filters are centred on its pitch: the nearest width.
+        Mode::Cw | Mode::Cwr => return None,
+        _ => (a.min(b), a.max(b)),
+    };
+    crate::radio::logic::digi_filter(filters, lo, hi)
 }
 
 /// How long the receiver must stay put before VFO B is moved to it, so a
@@ -760,5 +776,18 @@ mod tests {
             assert_eq!(sdr_mode(rig_mode(m)), Some(m));
             assert_eq!(mode_of(m.label()), m);
         }
+    }
+
+    #[test]
+    fn the_duos_filter_is_chosen_as_a_data_modes_is() {
+        let f = rigcat::RigModel::FdmDuo.protocol().filters("USB");
+        // WSPR's 1400 to 1600 Hz fits a narrow data filter; FT8 needs 3 kHz.
+        let wspr = duo_filter(&f, Mode::Usb, (1400.0, 1600.0)).unwrap();
+        assert!(wspr <= 1000, "{wspr}");
+        let ft8 = duo_filter(&f, Mode::Usb, (200.0, 3000.0)).unwrap();
+        assert!(ft8 >= 3000, "{ft8}");
+        // LSB reads the same from below.
+        assert_eq!(duo_filter(&f, Mode::Lsb, (-3000.0, -200.0)), Some(ft8));
+        assert_eq!(duo_filter(&f, Mode::Cw, (350.0, 850.0)), None);
     }
 }

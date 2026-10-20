@@ -9,6 +9,7 @@ use eframe::egui::{
 };
 
 use super::bandplan;
+use super::digimodes;
 use super::gpu::{self, SurfaceParams, TraceParams, WfParams};
 use super::levels::{self, level_text, s_unit};
 use super::markers::{fmt_delta, fmt_tenth};
@@ -31,7 +32,9 @@ pub(super) struct Ctx {
 /// The right-hand gutter for the level scale and the colour bar, points.
 const GUTTER: f32 = 44.0;
 const TBAR: f32 = 22.0;
-const BAND_STRIP: f32 = 18.0;
+const BAND_STRIP: f32 = 30.0;
+/// The band plan strip's segment row; the data modes' lane is below it.
+const SEG_H: f32 = 15.0;
 const GRIP: f32 = 9.0;
 const STATUS: f32 = 20.0;
 
@@ -623,8 +626,11 @@ fn paint_surface(
     }
 }
 
-/// The band plan strip: segments, their names where they fit, and the
-/// data-mode calling frequencies as ticks.
+/// The band plan strip: segments along its top with their names where they
+/// fit, and along its bottom lane the data modes' dials (decision 39): a
+/// tick at each, its passband shaded out from it, and its name where there
+/// is room. Clicking a mode's marker tunes there in that mode; elsewhere the
+/// strip tunes to the step.
 fn paint_band_plan(
     sc: &mut Scope,
     ui: &mut egui::Ui,
@@ -638,14 +644,15 @@ fn paint_band_plan(
     let v = cx.view;
     let (slo, shi) = (cx.map.shown(v.lo), cx.map.shown(v.hi));
     let x = |shown: f64| v.x_of(cx.map.radio(shown), rect.left(), rect.width());
-    let inner = rect.shrink2(vec2(0.0, 2.0));
+    let seg = Rect::from_x_y_ranges(rect.x_range(), (rect.top() + 2.0)..=(rect.top() + SEG_H));
+    let lane = Rect::from_x_y_ranges(rect.x_range(), (seg.bottom() + 1.0)..=(rect.bottom() - 1.0));
     for (a, b, u) in bandplan::segments_in(slo, shi) {
         let (xa, xb) = (x(a * 1000.0), x(b * 1000.0));
         let (ca, cb) = (xa.max(rect.left()), xb.min(rect.right()));
         let [r, g, bl] = u.rgb();
         let fill = theme::data_ink((r, g, bl));
         p.rect_filled(
-            Rect::from_x_y_ranges(ca..=(cb - 1.0).max(ca + 1.0), inner.y_range()),
+            Rect::from_x_y_ranges(ca..=(cb - 1.0).max(ca + 1.0), seg.y_range()),
             0.0,
             fill,
         );
@@ -654,47 +661,92 @@ fn paint_band_plan(
             p.layout_no_wrap(name.to_string(), label(10.0), Color32::from_rgb(0xee, 0xf3, 0xf8));
         if cb - ca > gal.size().x + 8.0 {
             let pos =
-                pos2((ca + cb) / 2.0 - gal.size().x / 2.0, rect.center().y - gal.size().y / 2.0);
+                pos2((ca + cb) / 2.0 - gal.size().x / 2.0, seg.center().y - gal.size().y / 2.0);
             p.galley(pos, gal, Color32::WHITE);
         }
     }
-    let narrow = cx.map.width(v.width()) < 60_000.0;
-    for (hz, modes) in bandplan::data_marks(slo, shi) {
-        let xx = x(hz as f64).round();
-        p.vline(xx, rect.y_range(), Stroke::new(1.0, ink()));
-        if narrow {
-            let names: Vec<&str> = modes.iter().map(|m| m.label()).collect();
-            p.text(
-                pos2(xx + 3.0, rect.center().y),
-                Align2::LEFT_CENTER,
-                names.join("/"),
-                label(9.5),
-                ink(),
-            );
+
+    // The data modes: their passbands first, so every tick sits over them.
+    let marks = digimodes::marks(slo, shi);
+    let hover_hz = ui
+        .ctx()
+        .pointer_hover_pos()
+        .filter(|q| rect.contains(*q))
+        .map(|q| cx.map.shown(v.f_at(q.x, rect.left(), rect.width())));
+    let px_hz = cx.map.width(v.width()) / rect.width().max(1.0) as f64;
+    let under = hover_hz.and_then(|hz| digimodes::mark_at(hz, 5.0 * px_hz));
+    for (&dial, modes) in &marks {
+        for d in modes {
+            let (a, b) = d.extent(dial);
+            let (xa, xb) = (x(a).max(rect.left()), x(b).min(rect.right()));
+            let lit = under.is_some_and(|(u, f)| f == dial && std::ptr::eq(u, *d));
+            let c = mode_ink(d.kind).gamma_multiply(if lit { 0.75 } else { 0.38 });
+            p.rect_filled(Rect::from_x_y_ranges(xa..=xb.max(xa + 1.0), lane.y_range()), 0.0, c);
+        }
+    }
+    // Ticks, then names where they fit: the modes with keys first, so FT8
+    // is never the one crowded out by a neighbour.
+    let mut taken: Vec<(f32, f32)> = Vec::new();
+    for key_pass in [true, false] {
+        for (&dial, modes) in &marks {
+            if modes.iter().any(|m| m.key) != key_pass {
+                continue;
+            }
+            let xx = x(dial as f64).round();
+            let lit = under.is_some_and(|(_, f)| f == dial);
+            let c = if lit { ink() } else { mode_ink(modes[0].kind) };
+            p.vline(xx, rect.y_range(), Stroke::new(if lit { 2.0 } else { 1.0 }, c));
+            let names: Vec<&str> = modes.iter().map(|m| m.name).collect();
+            let gal = p.layout_no_wrap(names.join("/"), label(9.5), ink());
+            let span = (xx + 2.0, xx + 3.0 + gal.size().x + 4.0);
+            let free = taken.iter().all(|&(a, b)| span.1 <= a || span.0 >= b);
+            if free && span.0 >= rect.left() && span.1 <= rect.right() {
+                p.galley(pos2(xx + 3.0, lane.center().y - gal.size().y / 2.0), gal, ink());
+                taken.push(span);
+            }
         }
     }
     p.text(gut.center(), Align2::CENTER_CENTER, "R2", label(10.0), dim());
 
     let resp = ui.interact(rect, ui.id().with("scope-bp"), Sense::click());
     let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
-    if let Some(pos) = resp.hover_pos() {
-        let f = v.f_at(pos.x, rect.left(), rect.width());
-        let tol = cx.map.width(v.width()) / 150.0;
-        let shown = cx.map.shown(f);
-        let dm: Vec<&str> = bandplan::data_marks(shown - tol, shown + tol)
-            .values()
-            .flatten()
-            .map(|m| m.label())
-            .collect();
-        sc.cursor = format!(
-            "{}{}",
-            bandplan::describe(shown),
-            if dm.is_empty() { String::new() } else { format!(" · {}", dm.join(", ")) }
-        );
+    if let Some(shown) =
+        resp.hover_pos().map(|pos| cx.map.shown(v.f_at(pos.x, rect.left(), rect.width())))
+    {
+        sc.cursor = match under {
+            Some((d, dial)) => {
+                let (a, b) = d.passband(dial);
+                format!(
+                    "{} · {} {} · {:.0} to {:.0} Hz · click to tune there",
+                    d.name,
+                    d.rig_mode(dial),
+                    digimodes::mhz(dial),
+                    a,
+                    b
+                )
+            }
+            None => bandplan::describe(shown),
+        };
+        // SAFETY INTERLOCK 9: nothing tunes while transmitting.
         if resp.clicked() && !cx.rig.transmitting {
-            // SAFETY INTERLOCK 9: nothing tunes while transmitting.
-            out.tune_to = Some(cx.map.radio(view::snap(shown, sc.settings.step_hz as f64)));
+            match under {
+                Some((d, dial)) => super::controls::pick_data(sc, out, cx, d, dial, None),
+                None => {
+                    out.tune_to = Some(cx.map.radio(view::snap(shown, sc.settings.step_hz as f64)));
+                }
+            }
         }
+    }
+}
+
+/// A data mode marker's ink, by what the mode is: blues, teals and violets
+/// only, never the warning colours.
+fn mode_ink(k: digimodes::Kind) -> Color32 {
+    match k {
+        digimodes::Kind::Weak => accent(),
+        digimodes::Kind::Keyboard => theme::data_ink((0x3f, 0xd0, 0xc8)),
+        digimodes::Kind::Picture => theme::data_ink((0xa0, 0x8c, 0xf0)),
+        digimodes::Kind::Link => theme::data_ink((0x8a, 0xa4, 0xc8)),
     }
 }
 

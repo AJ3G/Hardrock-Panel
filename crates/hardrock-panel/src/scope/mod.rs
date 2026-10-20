@@ -47,6 +47,7 @@
 
 pub mod bandplan;
 mod controls;
+pub mod digimodes;
 pub mod gpu;
 pub mod gpu_fft;
 pub mod gpu_iq;
@@ -71,7 +72,7 @@ use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use sdr::{SpectrumFrame, ZoomRequest};
 
-pub use bandplan::DataMode;
+pub use digimodes::Digi;
 pub use settings::ScopeSettings;
 
 use gpu_run::{Ask, GpuRun, TraceGeom};
@@ -108,9 +109,11 @@ pub struct ScopeOut {
     /// Move the IQ centre (the DUO's VFO A) here, Hz: the receiver has gone
     /// past 0.45 of the span from it.
     pub recentre: Option<f64>,
-    /// A data-mode button was pressed: `tune_to`, `passband` and `mode` carry
-    /// what it sets; this says which, for the panel's own display.
-    pub data_mode: Option<DataMode>,
+    /// A DATA key or a band-plan marker was pressed: `tune_to`, `passband`
+    /// and `mode` carry what it sets on the receiver; this says which mode
+    /// and where, for the radio's filter, the decoder and the note
+    /// (decision 39).
+    pub data_mode: Option<DataPick>,
     /// The SPAN key: ask the radio for this IQ sample rate.
     pub sample_rate: Option<u32>,
     /// For the pipeline: FFT size, window, overlap, averaging, peak hold,
@@ -118,6 +121,16 @@ pub struct ScopeOut {
     pub commands: Vec<sdr::Command>,
     /// A setting changed: save [`Scope::settings`].
     pub settings_changed: bool,
+}
+
+/// A data mode picked on the scope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataPick {
+    pub digi: &'static Digi,
+    /// Its dial (or channel centre), as shown: after the converter offset.
+    pub dial: u64,
+    /// Said when it went to another band than the receiver's.
+    pub note: Option<String>,
 }
 
 /// The spectrum settings last sent to the pipeline.
@@ -158,7 +171,7 @@ pub struct Scope {
     zoom: Option<Arc<SpectrumFrame>>,
     /// The display is frozen (PAUSE); the stream still runs.
     paused: bool,
-    digi: Option<DataMode>,
+    digi: Option<&'static Digi>,
     digi_note: Option<String>,
     fit_at: f64,
     wf_levels: Option<(f32, f32)>,
@@ -317,6 +330,13 @@ impl Scope {
     /// The settings to save.
     pub fn settings(&self) -> &ScopeSettings {
         &self.settings
+    }
+
+    /// Light a DATA key and say what was done, for a data mode picked
+    /// elsewhere (DECODE's snap); `None` puts the keys out.
+    pub fn show_data(&mut self, d: Option<&'static Digi>, note: Option<String>) {
+        self.digi = d;
+        self.digi_note = note;
     }
 
     /// Set the transverter LO from elsewhere (the radio window's offset), Hz.

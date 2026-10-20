@@ -16,7 +16,7 @@
 
 mod controls;
 mod face;
-mod logic;
+pub(crate) mod logic;
 mod rigtheme;
 
 use std::collections::HashMap;
