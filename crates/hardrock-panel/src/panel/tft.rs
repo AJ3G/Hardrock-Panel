@@ -163,7 +163,7 @@ pub(super) fn screen(
                     });
             });
         ui.add_space(10.0 * s);
-        soft_keys(ui, th, &keys, s, &mut out.actions);
+        soft_keys(ui, th, &keys, s, sh.live, &mut out.actions);
     });
 }
 
@@ -212,7 +212,14 @@ fn title_bar(ui: &mut Ui, sh: &Shown, th: &AmpTheme) {
         Tone::Red | Tone::Yellow => tone_col(th, tone),
         _ => th.ink_dim,
     };
-    let state = text(ui, &format!(" · {}", state.to_uppercase()), font.clone(), col, sp);
+    // The reason for a lost link is spelt out on the message line; here it
+    // is kept short, clear of the mode and range.
+    let state = if !sh.st.connected {
+        if tone == Tone::Yellow { "CONNECTING" } else { "NOT CONNECTED" }.to_string()
+    } else {
+        state.to_uppercase()
+    };
+    let state = text(ui, &format!(" · {state}"), font.clone(), col, sp);
     p.galley(pos2(x + w, cy - state.size().y / 2.0), state, col);
 
     let r = &sh.r;
@@ -338,18 +345,21 @@ fn face_meter(
                 let beyond =
                     [(warn, th.warn), (alarm, th.alarm)].into_iter().filter(|&(f, _)| f > 1.0);
                 for (k, (f, col)) in beyond.enumerate() {
-                    let pos = 1.07 + 0.07 * k as f32;
+                    let pos = 1.05 + 0.06 * k as f32;
                     p.line_segment(
                         [at(pos, radius + 2.0 * s), at(pos, radius - 6.0 * s)],
                         thick(col),
                     );
-                    p.text(
-                        at(pos, label_r),
-                        egui::Align2::CENTER_CENTER,
-                        figure(d.full * f),
-                        font.clone(),
-                        col,
-                    );
+                    // Its figure runs away from the scale's own: outward
+                    // from the outer scale, inward from the inner one.
+                    let v = d.full * f;
+                    let v = if v < 20.0 { format!("{v:.1}") } else { format!("{v:.0}") };
+                    let (r, align) = if out {
+                        (radius + 5.0 * s, egui::Align2::LEFT_CENTER)
+                    } else {
+                        (radius - 9.0 * s, egui::Align2::RIGHT_CENTER)
+                    };
+                    p.text(at(pos, r), align, v, font.clone(), col);
                 }
             }
             Zones::Below(low) => {
@@ -697,6 +707,13 @@ fn warnings(sh: &Shown) -> Vec<(String, Tone)> {
     if matches!(tone, Tone::Red | Tone::Yellow) {
         out.push((state, tone));
     }
+    // Interlock #4 is holding PTT: say why, beside the faded key.
+    if super::ptt_overdriven(&sh.r, &sh.limits) && sh.live {
+        out.push((
+            format!("Drive over {:.0} W: lower it before PTT", sh.limits.drive_warn_w),
+            Tone::Yellow,
+        ));
+    }
     if sh.past {
         out.push(("SWR at or past the warning: check the antenna".into(), Tone::Red));
     }
@@ -755,7 +772,15 @@ fn message_line(ui: &mut Ui, sh: &Shown, th: &AmpTheme) {
 
 /// The six soft keys under the screen, each with its label above it: lit in
 /// its tone when on, faded when it can't be pressed.
-fn soft_keys(ui: &mut Ui, th: &AmpTheme, keys: &Keys, s: f32, actions: &mut Vec<AmpAction>) {
+/// With the amplifier not answering, no key shows a state.
+fn soft_keys(
+    ui: &mut Ui,
+    th: &AmpTheme,
+    keys: &Keys,
+    s: f32,
+    live: bool,
+    actions: &mut Vec<AmpAction>,
+) {
     let slots: [Option<&Key>; 6] = [
         Some(&keys.ptt),
         keys.ant.as_ref(),
@@ -779,7 +804,7 @@ fn soft_keys(ui: &mut Ui, th: &AmpTheme, keys: &Keys, s: f32, actions: &mut Vec<
         let p = ui.painter_at(slot.expand(3.0 * s));
         let ink = if !k.enabled {
             th.label.gamma_multiply(0.35)
-        } else if k.lit && k.tone != Tone::Plain {
+        } else if live && k.lit && k.tone != Tone::Plain {
             tone_col(th, k.tone)
         } else {
             th.label
@@ -808,7 +833,7 @@ fn soft_keys(ui: &mut Ui, th: &AmpTheme, keys: &Keys, s: f32, actions: &mut Vec<
             Stroke::new(1.0, th.key_top.lerp_to_gamma(Color32::WHITE, 0.12)),
         );
         // A lit key shows its state as a light in the cap.
-        if k.lit && k.tone != Tone::Plain {
+        if live && k.lit && k.tone != Tone::Plain {
             let led = Rect::from_center_size(cap.center(), vec2(cap_w * 0.36, 3.0 * s));
             p.rect_filled(led, 1.5 * s, tone_col(th, k.tone));
         }
