@@ -24,7 +24,7 @@
 //! is used); the scope adds the transverter offset and the ppm calibration
 //! only for what it shows.
 //!
-//! # Behaviour (docs/design-decisions.md, 22 to 24)
+//! # Behaviour (docs/design-decisions.md, 22 to 25)
 //!
 //! SDR Console's: the IQ centre (the DUO's VFO A) stays put while the panel's
 //! receiver moves inside the span, and the scope asks for a new centre only
