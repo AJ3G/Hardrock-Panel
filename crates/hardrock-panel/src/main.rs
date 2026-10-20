@@ -354,6 +354,17 @@ impl App {
         }
         let secs = self.saved.tune_secs.clamp(*tune::TUNE_SECS.start(), *tune::TUNE_SECS.end());
         let max = Duration::from_secs(secs.into());
+        if t.start.is_some() {
+            // SAFETY INTERLOCK (docs/safety-interlocks.md, #8): one keying at
+            // a time. TUNE isn't started while an outside program holds the
+            // key, and none may take it from now until TUNE shows keyed, so
+            // a running TUNE is never mistaken for a program's transmission
+            // (which isn't watched for TUNE's tone).
+            if self.outside.holder().is_some() {
+                return;
+            }
+            self.outside.panel_tune_starting();
+        }
         // SAFETY INTERLOCKS (docs/safety-interlocks.md, #6 and #7): checked
         // again here, not only by the greyed buttons.
         match t.start {

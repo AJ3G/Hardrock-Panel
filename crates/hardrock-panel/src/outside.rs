@@ -94,6 +94,8 @@ struct Inner {
     updated: Instant,
     /// The program that holds the key, and when it was granted.
     holder: Option<(PttSource, Instant)>,
+    /// When the panel last started a TUNE of its own.
+    panel_tune: Option<Instant>,
     link: Weak<RigLink>,
     ctx: Option<egui::Context>,
 }
@@ -200,6 +202,9 @@ impl links::Rig for PanelRig {
         if let Some(why) = &g.blocked {
             return Err(Refused::new(why.clone()));
         }
+        if g.panel_tune.is_some_and(|t| t.elapsed() < KEY_SETTLE) {
+            return Err(Refused::new("the panel is starting TUNE"));
+        }
         if let Some((h, _)) = g.holder
             && h != req.source
         {
@@ -263,6 +268,7 @@ impl Default for Outside {
                     allow_tx: false,
                     updated: Instant::now(),
                     holder: None,
+                    panel_tune: None,
                     link: Weak::new(),
                     ctx: None,
                 }),
@@ -345,6 +351,12 @@ impl Outside {
     /// Whether an outside program holds the radio's key now.
     pub(crate) fn holder(&self) -> Option<PttSource> {
         self.shared.lock().holder.map(|(h, _)| h)
+    }
+
+    /// The panel is starting a TUNE of its own: refuse outside programs the
+    /// key until it shows keyed (and the checks refuse it from then on).
+    pub(crate) fn panel_tune_starting(&self) {
+        self.shared.lock().panel_tune = Some(Instant::now());
     }
 
     pub(crate) fn allow_tx(&self) -> bool {
@@ -593,6 +605,18 @@ mod tests {
             g.holder = Some((PttSource::Tci { client: 9 }, Instant::now()));
         }
         assert!(rig(&o).request_ptt(req()).unwrap_err().0.contains("another program"));
+    }
+
+    #[test]
+    fn a_program_cannot_key_while_the_panel_starts_its_own_tune() {
+        let o = Outside::default();
+        {
+            let mut g = o.shared.lock();
+            g.allow_tx = true;
+            g.blocked = None;
+        }
+        o.panel_tune_starting();
+        assert!(rig(&o).request_ptt(req()).unwrap_err().0.contains("starting TUNE"));
     }
 
     #[test]
