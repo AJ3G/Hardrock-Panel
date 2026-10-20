@@ -85,6 +85,14 @@ Before removing or loosening any of these, read why it is there.
 - **Tested by:** `transmit_is_refused_unless_the_server_allows_it_and_the_panel_grants_it`, `a_receive_only_radio_never_asks_the_panel_to_key`, `the_transmit_power_cannot_be_set_from_outside` (rigctld/proto.rs); `a_client_that_disconnects_while_keyed_unkeys_the_radio` (rigctld/mod.rs and tci/mod.rs); `transmit_is_refused_while_not_allowed_and_when_the_panel_says_no` and `a_keying_client_is_paced_and_unkeyed_when_its_audio_stops` (tci/mod.rs).
 - **Added:** AJ3G, 20 Oct 2026, with the links for outside programs ("I may use third party decoders … so we will want to use things like TCP/IP or TCI").
 
+## 9. The scope does not retune while the radio transmits
+
+- **Where:** `crates/hardrock-panel/src/scope/pointer.rs`, `Drag::press()` and `Drag::is_click_to_tune()`; `crates/hardrock-panel/src/scope/paint.rs`, `pointer_on()` (presses and the wheel) and the band plan strip's click; `crates/hardrock-panel/src/scope/mod.rs`, `follow()` (recentring); `crates/hardrock-panel/src/scope/controls.rs`, the data-mode keys.
+- **Blocks while transmitting:** click-to-tune, dragging the receiver marker or a filter edge, wheel steps, band-plan clicks, the data-mode keys (which set the frequency, mode and passband), and asking for a new IQ centre (VFO A). While transmitting, a press on the scope can only pan the view. Zoom, markers and display settings still work.
+- **Why:** the scope's outputs move the radio. Moving VFO A or the receiver while keyed changes the transmit frequency under load, and in split it moves `FB` (decision 22), possibly out of the amplifier's band or the band plan.
+- **What the operator sees:** over the spectrum the pointer becomes a not-allowed cursor and the top bar reads "tuning locked while transmitting"; the data-mode keys are greyed, with the reason on hover.
+- **Added:** AJ3G, 20 Oct 2026, with the scope. Tested by `a_press_drags_what_it_grabbed_unless_transmitting` and `the_centre_follows_the_receiver_but_not_while_transmitting`.
+
 ## Not interlocks, but related
 
 - TUNE is allowed while transmitting: tuning needs a carrier, and the ATU switches its own relays under its own control at tuning power.

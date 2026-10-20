@@ -1595,10 +1595,14 @@ dependencies = [
 name = "hardrock-panel"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "cpal",
  "eframe",
+ "half",
  "hardrock",
+ "naga",
  "rigcat",
+ "sdr",
  "serde",
  "serde_json",
  "serialport",

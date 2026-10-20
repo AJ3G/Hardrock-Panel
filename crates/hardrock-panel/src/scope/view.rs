@@ -1,0 +1,385 @@
+//! The scope's frequency axis: the span the radio sends, the part of it on
+//! screen, zooming and panning, and SDR Console's fixed centre.
+//!
+//! Everything here is in the radio's own frequency (its IF when a transverter
+//! is in use); the transverter offset is added only where a frequency is
+//! written on screen or looked up in the band plan.
+
+/// The IQ window the radio is sending: its centre (the DUO's VFO A) and its
+/// width (the sample rate), Hz.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Span {
+    pub center: f64,
+    pub width: f64,
+}
+
+impl Span {
+    pub fn lo(&self) -> f64 {
+        self.center - self.width / 2.0
+    }
+    pub fn hi(&self) -> f64 {
+        self.center + self.width / 2.0
+    }
+    pub fn contains(&self, f: f64) -> bool {
+        f >= self.lo() && f <= self.hi()
+    }
+}
+
+/// The part of the span on screen, Hz.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct View {
+    pub lo: f64,
+    pub hi: f64,
+}
+
+impl View {
+    pub fn width(&self) -> f64 {
+        self.hi - self.lo
+    }
+
+    pub fn center(&self) -> f64 {
+        (self.lo + self.hi) / 2.0
+    }
+
+    pub fn contains(&self, f: f64) -> bool {
+        f >= self.lo && f <= self.hi
+    }
+
+    /// Where `f` lands across a plot `w` wide starting at `left`.
+    pub fn x_of(&self, f: f64, left: f32, w: f32) -> f32 {
+        left + ((f - self.lo) / self.width()) as f32 * w
+    }
+
+    /// The frequency under `x` on a plot `w` wide starting at `left`.
+    pub fn f_at(&self, x: f32, left: f32, w: f32) -> f64 {
+        self.lo + ((x - left) / w.max(1.0)) as f64 * self.width()
+    }
+
+    /// How far in the view is zoomed on `span`: 1 for the whole span.
+    pub fn zoom(&self, span: Span) -> f64 {
+        span.width / self.width()
+    }
+
+    pub fn zoomed(&self, span: Span) -> bool {
+        self.zoom(span) > 1.01
+    }
+}
+
+/// The narrowest the view can be zoomed to: 1/4096 of the span (a few bins at
+/// the FFT sizes offered), but never under 1.5 kHz, which still shows a whole
+/// SSB passband.
+pub fn min_width(span: Span) -> f64 {
+    (span.width / 4096.0).max(1500.0).min(span.width)
+}
+
+/// The view: what was asked for (`None` is the whole span), kept inside the
+/// span and no narrower than [`min_width`].
+pub fn view(span: Span, want: Option<View>) -> View {
+    let Some(w) = want else {
+        return View { lo: span.lo(), hi: span.hi() };
+    };
+    let width = w.width().clamp(min_width(span), span.width);
+    let lo = w.lo.clamp(span.lo(), span.hi() - width);
+    View { lo, hi: lo + width }
+}
+
+/// Zoom in by `k` (out when under 1) about `f`, which stays under the pointer.
+pub fn zoom_at(span: Span, cur: View, f: f64, k: f64) -> View {
+    let width = (cur.width() / k).clamp(min_width(span), span.width);
+    let t = (f - cur.lo) / cur.width();
+    view(span, Some(View { lo: f - t * width, hi: f - t * width + width }))
+}
+
+/// The view a pan drag gives: `start` moved by `df` Hz (positive moves the
+/// band to the right, i.e. the view to lower frequencies, as dragging paper).
+pub fn pan(span: Span, start: View, df: f64) -> View {
+    view(span, Some(View { lo: start.lo - df, hi: start.hi - df }))
+}
+
+/// How far from the centre, as a share of the span, the receiver may go
+/// before the centre follows it (SDR Console's "automatically adjust the
+/// tuning range").
+pub const RECENTRE_AT: f64 = 0.45;
+
+/// SDR Console's fixed centre: the centre stays put while the receiver moves
+/// inside the span, and is moved (to the receiver, on a whole kHz) only once
+/// the receiver is past [`RECENTRE_AT`] of the span from it.
+pub fn needs_recentre(span: Span, rx: f64) -> Option<f64> {
+    if span.width <= 0.0 {
+        return None;
+    }
+    ((rx - span.center).abs() > span.width * RECENTRE_AT).then(|| (rx / 1000.0).round() * 1000.0)
+}
+
+/// A zoomed view that has lost the receiver pans to put it back in the
+/// middle; `None` when the view can stay as it is.
+pub fn keep_in_view(span: Span, cur: View, rx: f64) -> Option<View> {
+    if !cur.zoomed(span) || cur.contains(rx) {
+        return None;
+    }
+    let w = cur.width();
+    Some(view(span, Some(View { lo: rx - w / 2.0, hi: rx + w / 2.0 })))
+}
+
+/// The frequency grid's spacing for a view `w` Hz wide: at most nine lines.
+pub fn grid_step(w: f64) -> f64 {
+    const STEPS: [f64; 16] = [
+        100.0, 200.0, 500.0, 1e3, 2e3, 5e3, 10e3, 25e3, 50e3, 100e3, 250e3, 500e3, 1e6, 2e6, 5e6,
+        10e6,
+    ];
+    STEPS.iter().copied().find(|s| w / s <= 9.0).unwrap_or(10e6)
+}
+
+/// The grid lines inside `v`, every `step`, offset by `shift` (a transverter),
+/// returned in the view's own frequency.
+pub fn grid_lines(v: View, step: f64, shift: f64) -> Vec<f64> {
+    let mut out = Vec::new();
+    let mut f = ((v.lo + shift) / step).ceil() * step;
+    while f <= v.hi + shift && out.len() < 64 {
+        out.push(f - shift);
+        f += step;
+    }
+    out
+}
+
+/// A grid label in MHz, with as many places as the step needs.
+pub fn grid_label(shown_hz: f64, step: f64) -> String {
+    let mhz = shown_hz / 1e6;
+    if step < 1000.0 {
+        format!("{mhz:.5}")
+    } else if step < 10_000.0 {
+        format!("{mhz:.4}")
+    } else {
+        format!("{mhz:.3}")
+    }
+}
+
+/// A frequency in MHz to the hertz, grouped like the radio's display:
+/// 14.074.000.
+pub fn fmt_freq(hz: f64) -> String {
+    let neg = hz < 0.0;
+    let h = hz.abs().round() as u64;
+    let (m, k, u) = (h / 1_000_000, (h / 1000) % 1000, h % 1000);
+    format!("{}{m}.{k:03}.{u:03}", if neg { "-" } else { "" })
+}
+
+/// `f` rounded to the tuning step (SDR Console's snap).
+pub fn snap(f: f64, step: f64) -> f64 {
+    if step <= 0.0 { f } else { (f / step).round() * step }
+}
+
+/// The fractional bin range `[first, last)` of a frame (`n` bins over
+/// `[frame_lo, frame_lo + frame_span)`) that covers `[lo, hi]`, for
+/// [`sdr::pool_max_range`].
+pub fn bin_range(frame_lo: f64, frame_span: f64, n: usize, lo: f64, hi: f64) -> (f64, f64) {
+    let per = n as f64 / frame_span;
+    ((lo - frame_lo) * per, (hi - frame_lo) * per)
+}
+
+/// The band a waterfall or 3D row keeps: the view and a quarter of its width
+/// either side, so a pan shows history rather than an empty edge, kept inside
+/// what the frame actually holds.
+pub fn coverage(frame: Span, v: View) -> View {
+    let m = v.width() * 0.25;
+    let lo = (v.lo - m).max(frame.lo());
+    let hi = (v.hi + m).min(frame.hi());
+    if hi > lo { View { lo, hi } } else { View { lo: frame.lo(), hi: frame.hi() } }
+}
+
+/// The radio's own frequency to what is shown, and back: a frequency
+/// calibration in parts per million (what the radio's reference is off by;
+/// 0 with a GPS-disciplined one) and a transverter's local oscillator.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct FreqMap {
+    pub ppm: f64,
+    pub transverter_hz: f64,
+}
+
+impl FreqMap {
+    /// What the scope shows for the radio's `hz`.
+    pub fn shown(&self, hz: f64) -> f64 {
+        hz * (1.0 + self.ppm * 1e-6) + self.transverter_hz
+    }
+
+    /// The radio's own frequency for a `shown` one.
+    pub fn radio(&self, shown: f64) -> f64 {
+        (shown - self.transverter_hz) / (1.0 + self.ppm * 1e-6)
+    }
+
+    /// The shown width of a band `hz` wide at the radio.
+    pub fn width(&self, hz: f64) -> f64 {
+        hz * (1.0 + self.ppm * 1e-6)
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.ppm == 0.0 && self.transverter_hz == 0.0
+    }
+}
+
+/// The zoom FFT's size for a view `view_w` Hz across `px` pixels when the
+/// zoomed band runs at `rate`: about two bins a pixel, but never finer than
+/// `min_bin` Hz and never more than a second of samples (or the display
+/// would lag the band), between 4096 and 262 144 points.
+pub fn zoom_fft_size(rate: f64, view_w: f64, px: f32, min_bin: f64) -> usize {
+    let want_bin = (view_w / (2.0 * px.max(1.0) as f64)).max(min_bin);
+    let n = (rate / want_bin).max(1.0) as usize;
+    let n = n.next_power_of_two().min((rate.max(1.0) as usize).next_power_of_two());
+    n.clamp(4096, 262_144)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SPAN: Span = Span { center: 14_074_000.0, width: 192_000.0 };
+
+    #[test]
+    fn the_whole_span_unless_zoomed() {
+        let v = view(SPAN, None);
+        assert_eq!((v.lo, v.hi), (13_978_000.0, 14_170_000.0));
+        assert!(!v.zoomed(SPAN));
+        assert_eq!(v.zoom(SPAN), 1.0);
+    }
+
+    #[test]
+    fn a_view_never_leaves_the_span_or_gets_too_narrow() {
+        let v = view(SPAN, Some(View { lo: 13_000_000.0, hi: 13_010_000.0 }));
+        assert_eq!(v.lo, SPAN.lo());
+        assert_eq!(v.width(), 10_000.0);
+        let v = view(SPAN, Some(View { lo: 14_169_000.0, hi: 14_179_000.0 }));
+        assert_eq!(v.hi, SPAN.hi());
+        let v = view(SPAN, Some(View { lo: 14_074_000.0, hi: 14_074_010.0 }));
+        assert_eq!(v.width(), 1500.0);
+        // Wider than the span: the span.
+        let v = view(SPAN, Some(View { lo: 13e6, hi: 15e6 }));
+        assert_eq!(v, view(SPAN, None));
+        // A 6 MHz span zooms to 1/4096 of itself.
+        let wide = Span { center: 10e6, width: 6_144_000.0 };
+        assert_eq!(min_width(wide), 1500.0);
+        assert_eq!(min_width(Span { center: 10e6, width: 1000.0 }), 1000.0);
+    }
+
+    #[test]
+    fn zoom_keeps_the_frequency_under_the_pointer() {
+        let v = view(SPAN, None);
+        let f = 14_100_000.0;
+        let x0 = v.x_of(f, 0.0, 1000.0);
+        let z = zoom_at(SPAN, v, f, 4.0);
+        assert!((z.width() - 48_000.0).abs() < 1e-6);
+        assert!((z.x_of(f, 0.0, 1000.0) - x0).abs() < 1e-3);
+        assert!((z.zoom(SPAN) - 4.0).abs() < 1e-9);
+        // Out again past the whole span: the whole span.
+        let back = zoom_at(SPAN, z, f, 1.0 / 10.0);
+        assert_eq!(back, view(SPAN, None));
+        // Zooming out near an edge slides the view back inside rather than
+        // past it.
+        let edge = View { lo: SPAN.lo(), hi: SPAN.lo() + 20_000.0 };
+        let e = zoom_at(SPAN, edge, SPAN.lo() + 1000.0, 0.5);
+        assert_eq!(e.lo, SPAN.lo());
+        assert!((e.width() - 40_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn x_and_frequency_are_inverse() {
+        let v = View { lo: 14e6, hi: 14.1e6 };
+        for f in [14e6, 14.025e6, 14.1e6] {
+            let x = v.x_of(f, 20.0, 800.0);
+            assert!((v.f_at(x, 20.0, 800.0) - f).abs() < 1.0);
+        }
+        assert_eq!(v.x_of(14.05e6, 20.0, 800.0), 420.0);
+    }
+
+    #[test]
+    fn pan_moves_the_view_with_the_drag_and_stops_at_the_edges() {
+        let z = zoom_at(SPAN, view(SPAN, None), SPAN.center, 4.0);
+        let p = pan(SPAN, z, 10_000.0);
+        assert!((p.lo - (z.lo - 10_000.0)).abs() < 1e-6);
+        let p = pan(SPAN, z, 1e6);
+        assert_eq!(p.lo, SPAN.lo());
+        assert_eq!(p.width(), z.width());
+    }
+
+    #[test]
+    fn the_centre_follows_only_past_045_of_the_span() {
+        assert_eq!(needs_recentre(SPAN, SPAN.center + 86_000.0), None);
+        assert_eq!(needs_recentre(SPAN, SPAN.center - 86_400.0), None);
+        assert_eq!(needs_recentre(SPAN, SPAN.center + 86_500.0), Some(14_160_000.0 + 1000.0));
+        assert_eq!(needs_recentre(SPAN, 7_074_321.0), Some(7_074_000.0));
+        assert_eq!(needs_recentre(Span { center: 0.0, width: 0.0 }, 5.0), None);
+    }
+
+    #[test]
+    fn a_zoomed_view_follows_a_receiver_that_leaves_it() {
+        let z = zoom_at(SPAN, view(SPAN, None), SPAN.center, 8.0);
+        assert_eq!(keep_in_view(SPAN, z, SPAN.center), None);
+        let k = keep_in_view(SPAN, z, 14_150_000.0).unwrap();
+        assert!(k.contains(14_150_000.0));
+        assert!((k.width() - z.width()).abs() < 1e-6);
+        // The whole span never pans.
+        assert_eq!(keep_in_view(SPAN, view(SPAN, None), 20e6), None);
+    }
+
+    #[test]
+    fn grid_and_labels() {
+        assert_eq!(grid_step(192_000.0), 25_000.0);
+        assert_eq!(grid_step(6_144_000.0), 1e6);
+        assert_eq!(grid_step(3000.0), 500.0);
+        let v = View { lo: 14_010_000.0, hi: 14_060_000.0 };
+        assert_eq!(grid_lines(v, 25_000.0, 0.0), [14_025_000.0, 14_050_000.0]);
+        // Through a +116 MHz converter the lines fall on the shown frequency's
+        // round numbers.
+        let v2 = View { lo: 28_010_000.0 + 0.3, hi: 28_060_000.0 };
+        let l = grid_lines(v2, 25_000.0, 116e6);
+        assert_eq!(l, [28_025_000.0, 28_050_000.0]);
+        assert_eq!(grid_label(14_025_000.0, 25_000.0), "14.025");
+        assert_eq!(grid_label(14_025_500.0, 5000.0), "14.0255");
+        assert_eq!(grid_label(14_025_500.0, 500.0), "14.02550");
+        assert_eq!(fmt_freq(14_074_000.0), "14.074.000");
+        assert_eq!(fmt_freq(144_174_050.0), "144.174.050");
+    }
+
+    #[test]
+    fn snap_rounds_to_the_step() {
+        assert_eq!(snap(14_074_049.0, 100.0), 14_074_000.0);
+        assert_eq!(snap(14_074_050.0, 100.0), 14_074_100.0);
+        assert_eq!(snap(14_074_049.0, 0.0), 14_074_049.0);
+    }
+
+    #[test]
+    fn bins_map_to_frequency() {
+        // 1024 bins over 192 kHz starting at 13.978 MHz: 187.5 Hz each.
+        let (a, b) = bin_range(13_978_000.0, 192_000.0, 1024, 14_074_000.0, 14_074_187.5);
+        assert!((a - 512.0).abs() < 1e-9 && (b - 513.0).abs() < 1e-9);
+        let cov = coverage(SPAN, View { lo: 14_070_000.0, hi: 14_078_000.0 });
+        assert_eq!((cov.lo, cov.hi), (14_068_000.0, 14_080_000.0));
+        let cov = coverage(SPAN, view(SPAN, None));
+        assert_eq!(cov, view(SPAN, None));
+    }
+
+    #[test]
+    fn a_transverter_and_a_calibration_map_both_ways() {
+        let m = FreqMap { ppm: 0.0, transverter_hz: 116e6 };
+        assert_eq!(m.shown(28_174_000.0), 144_174_000.0);
+        assert_eq!(m.radio(144_174_000.0), 28_174_000.0);
+        let d = FreqMap { ppm: 0.0, transverter_hz: -116e6 };
+        assert_eq!(d.shown(144_174_000.0), 28_174_000.0);
+        let c = FreqMap { ppm: 1.0, transverter_hz: 0.0 };
+        assert!((c.shown(14e6) - 14_000_014.0).abs() < 1e-6);
+        assert!((c.radio(c.shown(14_074_123.4)) - 14_074_123.4).abs() < 1e-6);
+        assert!(FreqMap::default().is_identity());
+        assert!(!c.is_identity());
+    }
+
+    #[test]
+    fn zoom_fft_size_is_two_bins_a_pixel_within_limits() {
+        // 6 kHz over 1000 px at 12 kHz: 3 Hz bins wanted, 4096 points.
+        assert_eq!(zoom_fft_size(12_000.0, 6000.0, 1000.0, 0.1), 4096);
+        // 1.5 kHz across 2000 px of a 3 kHz band wants 0.375 Hz bins, but a
+        // second of samples is 4096 points.
+        assert_eq!(zoom_fft_size(3000.0, 1500.0, 2000.0, 0.1), 4096);
+        assert_eq!(zoom_fft_size(96_000.0, 40_000.0, 2000.0, 0.1), 16_384);
+        // Never finer than asked.
+        assert_eq!(zoom_fft_size(96_000.0, 40_000.0, 2000.0, 20.0), 8192);
+        assert_eq!(zoom_fft_size(6_144_000.0, 1.0, 2000.0, 0.0001), 262_144);
+    }
+}
