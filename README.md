@@ -27,6 +27,16 @@ from the radio, it reads from the radio's CAT port itself. It does the following
   interlocks that unkey on a trip, high SWR, overdrive or a time limit, and
   TX TUNE only with the radio's input on USB audio. Nothing else is ever sent
   to the radio but reads.
+- Shows the DUO's I/Q (over its USB lead, or a demo band) in a SCOPE window:
+  a GPU waterfall and 3D FFT, a band plan, markers and the panel's own
+  receiver, played on any sound output, with the radio put in split so it
+  transmits where you listen.
+- Decodes FT8, FT4, WSPR, JT65, JT9, FST4, Q65, RTTY, PSK31, NAVTEX, Olivia,
+  THOR, SSTV and WEFAX from the receiver, and HFDL, ACARS, VDL2, AIS and
+  Mode S from the I/Q, in a DECODE window.
+- Serves outside programs over TCI and rigctld and sends WSJT-X UDP decodes,
+  all off until turned on; a program may transmit only when allowed and only
+  when TUNE's checks pass.
 - Refuses to switch a relay while there may be RF in the amplifier. See
   [safety interlocks](docs/safety-interlocks.md).
 
@@ -55,7 +65,8 @@ See the [user guide](docs/user-guide.md). In short:
    radio set them over the amplifier's own CAT or ACC input.
 
 `hardrock-panel.exe --port COM5 --radio COM3` opens straight onto the
-amplifier on COM5 and the radio on COM3.
+amplifier on COM5 and the radio on COM3. `hardrock-panel.exe --demo --decode`
+opens the scope on a made-up band, and DECODE, with no hardware.
 
 ## Building
 
@@ -95,7 +106,11 @@ command line.
 |---|---|
 | `crates/hardrock` | The amplifier's serial protocol and the background link that polls it and holds the interlocks |
 | `crates/rigcat` | The radio's CAT port: a `Protocol` per radio (the FDM-DUO so far), the link, menu 34, menu 32 and TUNE |
-| `crates/hardrock-panel` | The window: panel, meters, settings, TUNE and its tone, and SDRoxide's look |
+| `crates/hardrock-panel` | The window: panel, meters, settings, TUNE and its tone, the scope, the receiver, DECODE, the outside programs' `Rig`, and SDRoxide's look |
+| `crates/elad-iq` | The ELAD's USB I/Q driver |
+| `crates/sdr` | Spectrum, zoom FFT, the receiver, its sound output, and the pipeline |
+| `crates/decoders`, `crates/datalink` | The panel's decoders: WSJT, keyboard and picture modes; HFDL, ACARS, VDL2, AIS, Mode S |
+| `crates/links` | TCI, rigctld and WSJT-X UDP |
 | `docs/` | User guide, [safety interlocks](docs/safety-interlocks.md), [design decisions](docs/design-decisions.md), [ATU values](docs/atu-values.md), [open items](docs/todo.md) |
 | `docs/history/` | The SDRoxide build's notes, test log and bench measurements |
 | `tools/` | The simulated amplifier and radio |

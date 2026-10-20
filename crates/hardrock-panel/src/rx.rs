@@ -374,6 +374,11 @@ impl Rx {
 
     fn spawn(&mut self, src: Box<dyn sdr::IqSource>, scope: &Scope) {
         self.label = src.label();
+        // A receiver left outside this span (another band last time) starts
+        // on the dial, rather than asking for the radio to be moved to it.
+        if (self.rx_hz - self.centre).abs() > 0.45 * src.sample_rate() {
+            self.rx_hz = self.centre;
+        }
         let cfg = PipelineConfig {
             spectrum: scope.spectrum_config(0.0),
             offset_hz: self.rx_hz - self.centre,
@@ -457,7 +462,9 @@ impl Rx {
         s.passband = self.passband;
 
         // Transmit where the panel listens: only on the radio whose I/Q this
-        // is, and once the receiver has settled.
+        // is, and once the receiver has settled. SAFETY INTERLOCK
+        // (docs/safety-interlocks.md, #9): VFO B and split are not touched
+        // while transmitting; the link refuses them then too (#5).
         if self.running == IqChoice::Elad
             && let Some((link, r)) = now.cat()
             && !now.transmitting
@@ -508,6 +515,8 @@ impl Rx {
     /// Tune the receiver. Not while transmitting: the radio follows it in
     /// split (interlock #9).
     pub(crate) fn tune(&mut self, hz: f64, transmitting: bool) {
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #9): in split the
+        // radio transmits on the receiver, so it doesn't move while keyed.
         if !transmitting && hz.is_finite() && hz > 0.0 {
             self.rx_hz = hz;
         }
@@ -516,6 +525,8 @@ impl Rx {
     /// Move the I/Q centre, and so the DUO's VFO A, to `hz`.
     pub(crate) fn recentre(&mut self, hz: f64, now: RadioNow<'_>) {
         let Some(p) = &self.pipeline else { return };
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #9 and #10): the
+        // centre is VFO A, never moved while transmitting.
         if now.transmitting {
             return;
         }

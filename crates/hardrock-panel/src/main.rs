@@ -186,6 +186,8 @@ impl App {
         let view_args = ViewArgs::parse(std::env::args().skip(1));
         if view_args.demo {
             saved.rx.source = rx::IqChoice::Demo;
+        } else if view_args.elad {
+            saved.rx.source = rx::IqChoice::Elad;
         }
         let mut view = AmpMeters::default();
         if let Some(m) = saved.meters {
@@ -205,7 +207,7 @@ impl App {
             render_state,
             scope,
             rx,
-            show_scope: view_args.demo || view_args.scope,
+            show_scope: view_args.demo || view_args.elad || view_args.scope,
             show_decode: view_args.decode,
             decode: decode::Decode::default(),
             outside,
@@ -942,10 +944,12 @@ fn apply_args(cfg: &mut AmpConfig, rig: &mut RigConfig, mut args: impl Iterator<
 const CAT_WAIT: Duration = Duration::from_secs(10);
 
 /// What the command line asks of the windows: `--demo` (the scope on the
-/// demo band), `--scope`, `--decode`, and `--size 1200x900`.
+/// demo band), `--elad` (the scope on the ELAD's I/Q), `--scope`, `--decode`,
+/// and `--size 1200x900`.
 #[derive(Debug, Default, PartialEq)]
 struct ViewArgs {
     demo: bool,
+    elad: bool,
     scope: bool,
     decode: bool,
     size: Option<[f32; 2]>,
@@ -957,6 +961,7 @@ impl ViewArgs {
         while let Some(a) = args.next() {
             match a.as_str() {
                 "--demo" => v.demo = true,
+                "--elad" => v.elad = true,
                 "--scope" => v.scope = true,
                 "--decode" => v.decode = true,
                 "--size" => {

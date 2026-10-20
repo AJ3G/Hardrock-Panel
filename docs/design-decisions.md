@@ -283,7 +283,7 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 
 **What the panel does.** `crates/links` has a TCI server (websocket, port 50001), a Hamlib rigctld server (port 4532) and a WSJT-X UDP sender (port 2237), all bound to 127.0.0.1 by default. Both servers are driven by one `Rig` trait the panel implements: frequency, mode, split and VFO from the panel's state, I/Q and receive audio streamed to TCI clients that ask for them, and transmit audio paced by TCI's chrono messages. Transmitting is off unless the operator allows it, and even then every request goes to the panel, which can refuse it (interlock #8). The transmit power cannot be set from outside. The panel's own WSJT decodes go out as WSJT-X Decode and WSPR Decode messages, so GridTracker, JTAlert and loggers see them as they would see WSJT-X.
 
-**Where.** `crates/links` (`tci`, `rigctld`, `wsjtx`); the panel's `Rig` implementation is the integrator's.
+**Where.** `crates/links` (`tci`, `rigctld`, `wsjtx`); the panel's `Rig` implementation is `crates/hardrock-panel/src/outside.rs` (decision 34).
 
 ## 26. WSJT slot timing comes from the system clock, the radio frequency is exact, and each decode's DT is shown
 
@@ -332,3 +332,45 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 **What the panel does.** In `sdr`, the spectrum runs on its own thread, fed through a bounded queue. If it falls behind, blocks are dropped and counted, and the receiver's audio is never held up. FFT sizes run from 4k to 1M (2²⁰). The windows are Hann, Blackman-Harris, rectangular and flat-top, each with its ENBW, so the RBW shown is true. Overlap can be off, 50 % or 75 %, with the segments' powers averaged (Welch). Each frame carries a noise floor (the median bin, in dBm per bin), which the scope draws as a dashed line and uses for the receiver's SNR. When the view is zoomed past what the main FFT resolves, the scope asks for a zoom FFT on the view. That zoom mixes the view's centre to 0 Hz, decimates by a power of two through half-band filters, and runs its own FFT. The scope uses the zoom's frames while they cover the view, and the main FFT's frames otherwise. The pipeline keeps 16 frames of history, since million-point frames are large.
 
 **Where.** `crates/sdr/src/pipeline.rs`, `spectrum.rs`, `window.rs`, `zoom.rs`; `crates/hardrock-panel/src/scope/mod.rs` (`sync_pipeline`, `zoom_request`).
+
+## 32. The scope runs the panel's own receiver from the ELAD, or from a demo band
+
+**Decided:** by the integrator, 20 Oct 2026, under decisions 22 and 29 to 31, wiring the scope, `sdr`, `elad-iq` and the decoders into the panel.
+
+**What the panel does.** SCOPE, on the top bar beside RADIO, opens the scope over the panel or popped out into its own window, as the radio's window does. SETTINGS, *Scope and receiver*, picks where the I/Q comes from: off (the default), the ELAD over USB, or *Demo signals*, `sdr`'s synthetic band around 14.2 MHz, so the scope and the decoders can be seen with no radio (`--demo` on the command line does the same, `--elad` opens the ELAD). One `sdr::Pipeline` runs the spectrum and the panel's receiver; the scope's SPAN key restarts it at the new I/Q rate (on the FDM-DUO that rate says how the stream is read; the radio's own rate is set on the radio). The ELAD is opened on a thread of its own, since the driver can take seconds, and its error is shown as the driver words it (the WinUSB/Zadig note on Windows) with TRY AGAIN.
+
+**The centre.** The I/Q centre is the DUO's VFO A. The driver tunes the radio when it opens the device, so the panel waits up to 10 s for the CAT link to read VFO A and opens there; with no CAT link it opens at the centre it last used. The radio's dial is read back over USB (`follow_radio_dial`), so turning the knob moves the span, and the receiver moves with it, keeping its offset. When the scope asks for a new centre the panel sets VFO A over CAT (`FA`, interlock #5) and the span follows the read-back; with no CAT link it moves the centre over USB. Neither happens while transmitting (interlocks #9 and #10). A receiver saved outside the span (another band last time) starts on the dial rather than asking for the radio to move.
+
+**The receiver.** It keeps its frequency, mode and passband between runs, plays on the sound output chosen under SETTINGS (the system's default to start, VB-Cable or any other by name), with a volume and a mute on the scope. The DUO plays its own audio up to 192 kHz and mutes it above (decision 22); up to 192 kHz the panel also sets the DUO's mode and receive filter (`MD`, `RF`) to the receiver's, since the DUO's audio is the one heard there. The receiver keeps running while the scope is closed, so DECODE can listen. Its I/Q and audio are copied out of the pipeline by taps (`sdr::Command::SetIqTap`, `SetAudioTap`), each block stamped in UTC from the system clock, to the decoders and to TCI.
+
+**Transverter.** The radio window's offset and the scope's transverter LO are kept the same, whichever was changed last.
+
+**Where.** `crates/hardrock-panel/src/rx.rs`, `scopewin.rs`, `main.rs` (`run_receiver`, `scope_window`, `sync_xvtr`); `crates/sdr/src/pipeline.rs` (the taps).
+
+## 33. Transmit where you listen is a toggle on the scope, on by default
+
+**Decided:** by the integrator, 20 Oct 2026, carrying out decision 22.
+
+**What the panel does.** TX FOLLOWS RX on the scope, on to start. While the receiver is off VFO A, the panel sets `FB` to the receiver and then `SP1`; once they coincide again it sends `SP0`. Each change goes through the CAT link's `set`, which reads it back and refuses it while the radio transmits (interlock #5), and the panel doesn't ask while transmitting either. A change is sent once the receiver has stayed put for 0.3 s, so a drag doesn't send a frame a frame, and asked again only if the radio hasn't read it back after 1.5 s. Turning the toggle off takes out a split the panel made, and leaves the operator's own split alone. It works only with the ELAD's I/Q and the CAT link both connected.
+
+**Still to check on the bench:** that the DUO's I/Q window stays on VFO A while it is in split (decision 22). If it follows VFO B instead, the scope would jump to the receiver on every move, and this has to change.
+
+**Where.** `crates/hardrock-panel/src/rx.rs` (`SplitState`), `scopewin.rs`.
+
+## 34. Outside programs see the panel's receiver as the radio, and key it through TUNE's checks
+
+**Decided:** by the integrator, 20 Oct 2026, under decision 25 and interlock #8. AJ3G's condition, through the coordinator: TCI and rigctld off by default, transmitting from outside off by default, and a program's request to transmit checked as TX TUNE is.
+
+**What the panel does.** SETTINGS, *Outside programs*: a TCI server (port 50001), a rigctld server (port 4532) and the WSJT-X UDP decodes (127.0.0.1:2237), each off until ticked, and *Allow outside programs to transmit*, off. All listen on this computer only. With the panel's receiver running, a program sees one VFO, the receiver: VFO A is the receiver's frequency, TCI's `dds` the I/Q centre, there is no split (the panel transmits where it listens, decision 33), and setting VFO A tunes the receiver, moving VFO A (the centre) only if the frequency is outside the span. Without the receiver, VFO A, B and split are the radio's own over CAT. Every change is made by the panel's loop as its own controls make it, and none while transmitting. The receiver's audio and, up to 384 kHz, its I/Q stream to TCI clients that ask.
+
+**Transmit.** A program's request is granted only when the checks the panel worked out in its last frame pass: `tune_blocked` (interlock #6) at the radio's full power setting, since the program's audio level can bring the power that high, and nothing else keying the radio. The panel then keys through the CAT link's TUNE path: an ordinary transmission (`TX;`, after the link re-reads menu 32 and the mode, #7) for `trx` and `T 1`, the radio's carrier (`TX2;`) for `tune` and `G TUNE`. The program's audio reaches the radio as it would without the panel, on the radio's USB audio; TCI's own transmit audio stream is not taken (a TCI client must send its audio to the radio's sound card). While keyed, the panel watches it as it watches TUNE, ten times a second, and the link's own watchdog unkeys if the panel stops; a grant lasts a minute at most (TUNE's limit), which cuts a two-minute WSPR transmission short. Letting go, disconnecting, the operator's STOP, or turning the permission off all unkey.
+
+**Where.** `crates/hardrock-panel/src/outside.rs`, `tune.rs` (`outside_ptt_blocked`), `main.rs` (`keep_tune`, `outside_req`).
+
+## 35. DECODE runs one decoder at a time, chosen in its window
+
+**Decided:** by the integrator, 20 Oct 2026, under decisions 26 to 28.
+
+**What the panel does.** DECODE, on the top bar, opens a window with every mode in four rows: WSJT (FT8, FT4, WSPR, JT65, JT9, FST4-60, Q65-30A), keyboard (RTTY 45.45 Bd 170 Hz, PSK31, NAVTEX, Olivia 8/500, THOR16), pictures (SSTV, WEFAX) and from the I/Q (HFDL, ACARS, VDL2, AIS, Mode S). RUN starts the chosen one; it keeps running when the window is closed, until STOP. The audio modes take the receiver's 48 kHz audio, the data links the I/Q. The list shows each decode's UTC, SNR, DT, audio frequency and RF frequency (the receiver's dial plus the audio, corrected by the scope's ppm, plus the transverter LO), newest first, and the line above it how many blocks the decoder dropped and how long the last slot took. Keyboard modes show running text with their audio frequency to set; pictures build up as they arrive, WEFAX with its LPM and IOC and a manual start and stop. Data links take the radio window's transverter offset as their LO, so they report true RF, and say when the span doesn't hold their channels. WSJT decodes also go out as WSJT-X UDP Decode, WSPR Decode and Status messages when that is on under SETTINGS. Only one sub-mode of FST4 and Q65 is offered for now.
+
+**Where.** `crates/hardrock-panel/src/decode.rs`.

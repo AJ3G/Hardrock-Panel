@@ -49,7 +49,8 @@ runs.
 **From a shortcut.** `hardrock-panel.exe --port COM5` opens straight onto the
 amplifier on COM5, ahead of the saved settings. Add `--baud 38400` for another
 baud rate. `--radio COM3` (and `--radio-baud 57600`) does the same for the
-radio.
+radio. `--demo` opens the scope on the demo band, `--elad` on the ELAD's I/Q,
+`--decode` opens DECODE, and `--size 1200x900` sets the window's size.
 
 ## The radio
 
@@ -282,6 +283,102 @@ capacitance, judged good to about 10%. How the values were arrived at is in
 **Resizing.** Drag the window to any size: the panel scales to fit its width
 and height and sits centred in it.
 
+## The scope and the panel's receiver
+
+![The scope on the demo band, with DECODE beside it](images/scope.png)
+
+**SCOPE**, on the top bar beside RADIO, opens the panadapter: the spectrum (or
+the 3D FFT), the band plan and the waterfall from the radio's I/Q, with the
+panel's own receiver in it. **POP OUT** puts it in a window of its own; **DOCK**
+brings it back over the panel.
+
+**Where the I/Q comes from** is chosen under SETTINGS, *Scope and receiver*,
+with APPLY:
+
+- **ELAD over USB**: the FDM-DUO's second USB lead (the I/Q device). On
+  Windows that device must be on the **WinUSB** driver, set with Zadig; ELAD's
+  own FDM-SW2 can't see it until its driver is put back. If it won't open, the
+  scope's I/Q line says why in the driver's words, with **TRY AGAIN**. The
+  panel waits a few seconds for the CAT link to read VFO A and opens the I/Q
+  there, so opening doesn't move the radio.
+- **Demo signals**: a made-up band around 14.2 MHz with a few stations and
+  noise, to try the scope and DECODE with no radio.
+
+**Tuning.** As in SDR Console, the span stays centred on the DUO's VFO A
+while the panel's receiver moves inside it. Click a signal to tune to it, drag
+the receiver marker, drag a filter edge to set the width, wheel to step,
+ctrl+wheel to zoom, drag to pan, double-click for the whole span. When the
+receiver nears the edge, the panel moves VFO A (over CAT) and the span
+follows. Turning the radio's own knob moves the span, and the receiver with
+it. **SPAN** changes the I/Q rate (192 kHz to 6.144 MHz; on the DUO set the
+same rate on the radio).
+
+**Listening.** The receiver plays on the sound output chosen under SETTINGS,
+*Receiver sound*: the computer's default output to start, or any other by
+name, VB-Cable's *CABLE Input* included, to feed an outside decoder. The
+scope has its volume and **Mute**. Up to 192 kHz the DUO plays its own audio
+too, and the panel sets the DUO's mode and filter to the receiver's; above
+192 kHz the DUO mutes its own audio and the panel's receiver is the one heard.
+
+**TX follows RX** (on to start) makes the radio transmit where you listen:
+while the receiver is off VFO A, the panel puts the radio in split with VFO B
+on the receiver, and takes split off again when the receiver is back on VFO A.
+It needs both the CAT link and the ELAD's I/Q. Turn it off to leave split to
+you; a split the panel made is taken off.
+
+**While transmitting** the scope tunes nothing: clicks, drags, the wheel, the
+band plan and the data-mode keys are locked, VFO A and B and split are left
+alone, and the top bar says so. Zoom, markers and the display still work.
+
+**Transverter.** The radio window's transverter offset and the scope's
+*Transverter LO* are the same setting: change either and the other follows.
+
+## Decoding
+
+**DECODE**, on the top bar, opens the panel's own decoders. Pick a mode and
+press **RUN**; it keeps decoding with the window closed until **STOP**.
+
+- **WSJT**: FT8, FT4, WSPR, JT65, JT9, FST4-60 and Q65-30A, from the
+  receiver's audio in UTC slots. Each decode shows its UTC, SNR, DT (a
+  drifting PC clock shows here), audio frequency and RF frequency. Put the
+  receiver on the mode's dial frequency (the scope's **Data** keys do it) in
+  USB.
+- **Keyboard**: RTTY (45.45 baud, 170 Hz), PSK31, NAVTEX, Olivia 8/500 and
+  THOR16, as running text. Set the audio frequency the signal sits at.
+- **Pictures**: SSTV (its mode from the picture's header) and WEFAX (choose
+  the LPM; it starts and stops on the tones, or with **Start now** and
+  **Stop**).
+- **From I/Q**: HFDL, VHF ACARS, VDL2, AIS and Mode S, from the I/Q rather
+  than the receiver, every channel in the span at once. Behind a converter,
+  set its LO as the transverter offset and they report the true RF. Mode S
+  needs the DUO's 3.072 or 6.144 MHz rate.
+
+The line above the list says how many blocks of audio or I/Q the decoder had
+to drop because it fell behind; it should stay at 0.
+
+## Outside programs
+
+Under SETTINGS, *Outside programs*, all off to start and taken with APPLY:
+
+- **TCI server** (port 50001): for WSJT-X (rig *TCI Client*), JTDX, MSHV and
+  skimmers. They see the panel's receiver as the radio and can tune it,
+  change its mode and take its audio and, up to 384 kHz, its I/Q.
+- **rigctld server** (port 4532): Hamlib's *NET rigctl* (rig 2) for WSJT-X,
+  fldigi, JS8Call and loggers, with no serial cable.
+- **WSJT-X UDP decodes** (127.0.0.1, port 2237): the panel's own FT8, FT4 and
+  WSPR decodes, for GridTracker, JTAlert and loggers.
+- **Allow outside programs to transmit** (off): with it off, programs see a
+  receive-only radio. With it on, a program may ask to transmit, and the panel
+  keys the radio only when its TUNE checks pass: the amplifier connected, not
+  tripped and on the radio's band, and the radio's power setting (menu 34)
+  under the amplifier's drive limit while it is in line; and for audio, TX IN
+  on USB audio and the radio in USB or LSB. The program's audio goes to the
+  radio's USB audio sound card as usual. The panel unkeys when the program
+  lets go or disconnects, on any of TUNE's stop conditions (a trip, high SWR,
+  overdrive), after a minute at most, when you press STOP on the TUNE strip,
+  or when you untick the setting. The top bar says when a program has the
+  radio keyed.
+
 ## What the panel won't do while you transmit
 
 Switching a relay with RF on it can damage it, and on the Hardrock it makes the
@@ -298,6 +395,12 @@ panel won't switch the antenna, band or tuner:
 
 - The amplifier's band is not changed to follow the radio until the
   transmission ends.
+- The scope, and outside programs, don't retune the receiver or the radio,
+  and the panel doesn't change split, until the transmission ends.
+- The ELAD's I/Q isn't opened, and its centre isn't moved over USB, until the
+  transmission ends.
+- An outside program can't key the radio unless TUNE could be keyed at the
+  radio's full power setting.
 
 Each of these is marked *SAFETY INTERLOCK* in the code and explained in
 [safety-interlocks.md](safety-interlocks.md).

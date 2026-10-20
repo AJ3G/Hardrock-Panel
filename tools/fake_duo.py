@@ -11,8 +11,10 @@ panel's RADIO link without a radio. Linux and macOS only.
 It answers the READ commands the panel sends with fixed readings, takes
 menu 34 (`TPnn;`) and menu 32 to USB audio (`TI1;`), keys its TUNE carrier
 on `TX2;` and an ordinary transmission on `TX;`, both at menu 34's power,
-unkeys on `RX;`, and answers `?;` to anything else. It prints every command
-that changes something, and flags any it should never be sent.
+unkeys on `RX;`, takes the dial, VFO B, split, mode and receive filter
+(`FA`, `FB`, `SP`, `MD`, `RF`), as the panel's scope and receiver set them,
+and answers `?;` to anything else. It prints every command that changes
+something, and flags any it should never be sent.
 """
 
 import os
@@ -25,6 +27,9 @@ state = {
     "tp": 9,
     "ti": 0 if "--mic" in sys.argv else 1,
     "md": sys.argv[sys.argv.index("--mode") + 1] if "--mode" in sys.argv else "2",
+    "fb": 7_074_000,
+    "sp": 0,
+    "rf": "208",
 }
 STEPS_MW = [300, 500, 1000, 1200, 1500, 2000, 3000, 4000, 5000, 8000]
 freq = int(sys.argv[sys.argv.index("--freq") + 1]) if "--freq" in sys.argv else 14_074_000
@@ -35,11 +40,11 @@ print(os.ttyname(slave), flush=True)
 
 READS = {
     "FA": lambda: f"FA{freq:011}",
-    "FB": lambda: "FB00007074000",
+    "FB": lambda: f"FB{state['fb']:011}",
     "FR": lambda: "FR0",
     "MD": lambda: f"MD{state['md']}",
-    "RF": lambda: "RF208",
-    "SP": lambda: "SP0",
+    "RF": lambda: f"RF{state['rf']}",
+    "SP": lambda: f"SP{state['sp']}",
     "RT": lambda: "RT0",
     "AN": lambda: "AN1",
     "TI": lambda: f"TI{state['ti']}",
@@ -72,6 +77,21 @@ while True:
         elif cmd == "TI1":
             state["ti"] = 1
             print("menu 32 set to USB audio", file=sys.stderr, flush=True)
+        elif cmd[:2] in ("FA", "FB") and len(cmd) == 13 and cmd[2:].isdigit():
+            if cmd[:2] == "FA":
+                freq = int(cmd[2:])
+            else:
+                state["fb"] = int(cmd[2:])
+            print(f"{cmd[:2]} set to {int(cmd[2:])}", file=sys.stderr, flush=True)
+        elif cmd in ("SP0", "SP1"):
+            state["sp"] = int(cmd[2])
+            print(f"split {'on' if state['sp'] else 'off'}", file=sys.stderr, flush=True)
+        elif cmd[:2] == "MD" and len(cmd) == 3:
+            state["md"] = cmd[2]
+            print(f"mode set to {cmd[2]}", file=sys.stderr, flush=True)
+        elif cmd[:2] == "RF" and len(cmd) == 5:
+            state["rf"] = cmd[2:]
+            print(f"filter set to {cmd[2:]}", file=sys.stderr, flush=True)
         elif cmd == "RX":
             state["keyed"] = False
             print("unkeyed", file=sys.stderr, flush=True)

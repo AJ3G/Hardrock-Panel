@@ -35,3 +35,23 @@ when the panel was part of SDRoxide and still apply.
   the HR100 needs its own limits. Each needs its manual and a bench test.
 - **Linux and macOS.** It builds for both; it has only been tried on Windows
   11.
+- **The scope and the receiver on the bench.** Open the ELAD's I/Q under
+  WinUSB with the CAT link connected, and check that opening doesn't move the
+  dial, that turning the knob moves the span, that a recentre sets VFO A and
+  the span follows, and the receiver's audio on the PC and on VB-Cable. Check
+  each SPAN with the same rate set on the DUO.
+- **Split on the bench (decision 33).** With TX FOLLOWS RX on, check that the
+  DUO's I/Q window stays on VFO A while it is in split (`SP1`), that `FB`
+  follows the receiver, and that a transmission goes out on the receiver's
+  frequency (into a dummy load, amplifier in OFF first).
+- **Outside programs on the bench.** WSJT-X over TCI and over rigctld,
+  receive first; then, with *Allow outside programs to transmit*, one FT8
+  over into a dummy load in OFF, then in PTT at 5 W, and check that a trip,
+  high SWR, STOP and closing WSJT-X each unkey. WSPR's two-minute
+  transmissions are cut at TUNE's one-minute limit; decide whether outside
+  programs need a longer one.
+- **TCI transmit audio.** `trx:0,true,tci;` is refused: the panel doesn't yet
+  play a TCI client's audio into the radio's USB audio.
+- **The receiver's S-meter calibration.** The pipeline runs at 0 dB
+  calibration, so the scope's dBm and S-units are dBFS until measured against
+  a signal generator.

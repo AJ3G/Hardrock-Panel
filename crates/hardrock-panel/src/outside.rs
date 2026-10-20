@@ -110,8 +110,9 @@ impl Shared {
 
     fn ask(&self, r: Req) -> Result<(), Refused> {
         let g = self.lock();
-        // As the scope's own controls (interlock #9): nothing moves the
-        // radio while it transmits.
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #9): as the scope's
+        // own controls, nothing an outside program asks moves the radio or
+        // the receiver while it transmits.
         if g.transmitting {
             return Err(Refused::new("the radio is transmitting"));
         }
