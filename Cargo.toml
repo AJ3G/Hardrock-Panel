@@ -55,6 +55,7 @@ xng-mode-ais = { path = "vendor/xng/crates/xng-mode-ais" }
 xng-mode-adsb = { path = "vendor/xng/crates/xng-mode-adsb" }
 xng-dsp = { path = "vendor/xng/crates/xng-dsp" }
 xng-types = { path = "vendor/xng/crates/xng-types" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 # The decoders are unusably slow unoptimised, tests included.
 [profile.dev.package.mfsk-core]
@@ -74,6 +75,8 @@ opt-level = 2
 [profile.dev.package.xng-mode-ais]
 opt-level = 2
 [profile.dev.package.xng-mode-adsb]
+opt-level = 2
+[profile.dev.package.xng-acars]
 opt-level = 2
 [profile.dev.package.rustfft]
 opt-level = 2
