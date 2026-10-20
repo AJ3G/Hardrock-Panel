@@ -11,9 +11,9 @@ mod bits;
 pub mod adsc;
 pub mod airline5z;
 pub mod arinc622;
+pub mod cpdlc;
 pub mod block;
 pub mod cfb;
-pub mod cpdlc;
 pub mod fpn;
 pub mod media_adv;
 pub mod met;
@@ -172,11 +172,7 @@ pub fn summary(app: &AcarsApp) -> Option<String> {
                 p.version,
                 p.pdu_type,
                 p.app_id.as_deref().map(|a| format!(" app={a}")).unwrap_or_default(),
-                if p.compressed {
-                    format!(" ({} bytes inflated)", p.data_len)
-                } else {
-                    String::new()
-                }
+                if p.compressed { format!(" ({} bytes inflated)", p.data_len) } else { String::new() }
             ),
             miam::MiamFrame::FileTransferReq { file_id, file_size } => {
                 format!("MIAM file-transfer-req id={file_id} size={file_size}")

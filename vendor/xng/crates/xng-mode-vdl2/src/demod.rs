@@ -39,8 +39,16 @@ pub(crate) const UW_DELTAS: [u8; 16] = [0, 3, 2, 4, 0, 1, 6, 4, 1, 7, 2, 5, 6, 5
 /// → Δφ in π/4 units.
 pub const GRAY_FWD: [u8; 8] = [0, 7, 3, 4, 1, 6, 2, 5];
 /// Δφ index → (X, Y, Z).
-pub const GRAY_INV: [(u8, u8, u8); 8] =
-    [(0, 0, 0), (0, 0, 1), (0, 1, 1), (0, 1, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1), (1, 0, 0)];
+pub const GRAY_INV: [(u8, u8, u8); 8] = [
+    (0, 0, 0),
+    (0, 0, 1),
+    (0, 1, 1),
+    (0, 1, 0),
+    (1, 1, 0),
+    (1, 1, 1),
+    (1, 0, 1),
+    (1, 0, 0),
+];
 
 const CORR_THRESHOLD: f32 = 0.6;
 /// Maximum weighted residual variance (rad²) of the coherent preamble
@@ -197,9 +205,9 @@ impl Vdl2Demod {
             pr[k] = pr[k - 1] + UW_DELTAS[k] as f32 * PI / 4.0;
         }
         let mut best: Option<(f32, f64, f32)> = None; // (cost, pos, theta)
-                                                      // Search ±0.7 symbol (at least ±3 samples): the differential
-                                                      // trigger localizes the UW no better than a fraction of a symbol,
-                                                      // and its peak width in samples scales with the channel rate.
+        // Search ±0.7 symbol (at least ±3 samples): the differential
+        // trigger localizes the UW no better than a fraction of a symbol,
+        // and its peak width in samples scales with the channel rate.
         let half = (0.63 * self.sps).max(3.0);
         let mut t = -half;
         while t <= half {
@@ -409,10 +417,7 @@ impl Vdl2Demod {
                         ) {
                             Some((avlc_bits, fixed, soft)) => {
                                 if std::env::var("VDL2_DEBUG").is_ok() {
-                                    eprintln!(
-                                        "RSOK   tl_bits={tl_bits} syms={} soft={soft}",
-                                        n / 3
-                                    );
+                                    eprintln!("RSOK   tl_bits={tl_bits} syms={} soft={soft}", n / 3);
                                 }
                                 STAT_BURST_OK.fetch_add(1, AOrd::Relaxed);
                                 if soft {
@@ -453,8 +458,11 @@ impl Vdl2Demod {
                                         ),
                                         &c.bits[HEADER_BITS..n],
                                     );
-                                    let conf_txt: String =
-                                        c.conf.iter().map(|v| format!("{v:.3}\n")).collect();
+                                    let conf_txt: String = c
+                                        .conf
+                                        .iter()
+                                        .map(|v| format!("{v:.3}\n"))
+                                        .collect();
                                     let _ = std::fs::write(
                                         format!(
                                             "{dir}/rx_tl{tl_bits}_{k}_at{}.conf",

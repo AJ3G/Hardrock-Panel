@@ -143,8 +143,9 @@ impl AdsbDecoder {
         rc_m: Option<u32>,
     ) -> Option<(f64, f64, PosTrust)> {
         if self.track.len() >= TRACK_MAX {
-            self.track
-                .retain(|_, s| s.last_pos.map_or(false, |(_, _, t)| now - t < CPR_LOCAL_SECS));
+            self.track.retain(|_, s| {
+                s.last_pos.map_or(false, |(_, _, t)| now - t < CPR_LOCAL_SECS)
+            });
         }
         let st = self.track.entry(icao).or_default();
         if cpr.odd {
@@ -156,25 +157,27 @@ impl AdsbDecoder {
         // Candidate fix + provisional trust grade, tagged by resolution
         // path. `ref_age` carries the reference's age for the local
         // containment gate (`None` for the reference-free global path).
-        let (cand, trust, ref_age): (Option<(f64, f64)>, PosTrust, Option<f64>) = match st.last_pos
-        {
-            Some((rlat, rlon, t)) if now - t < CPR_LOCAL_SECS => {
-                (Some(decode::cpr_local(cpr, rlat, rlon)), PosTrust::LocalContained, Some(now - t))
-            }
-            _ if !cpr.surface => match (st.even, st.odd) {
-                (Some((e, te)), Some((o, to))) if (te - to).abs() < CPR_PAIR_SECS => {
-                    (decode::cpr_global_airborne(e, o, to >= te), PosTrust::GlobalUnambiguous, None)
-                }
-                _ => (None, PosTrust::GlobalUnambiguous, None),
-            },
-            // Surface (or airborne first fix) with no fresh aircraft
-            // fix: the receiver location is the reference.
-            _ => (
-                self.receiver.map(|(rlat, rlon)| decode::cpr_local(cpr, rlat, rlon)),
-                PosTrust::LocalReceiver,
-                None,
-            ),
-        };
+        let (cand, trust, ref_age): (Option<(f64, f64)>, PosTrust, Option<f64>) =
+            match st.last_pos {
+                Some((rlat, rlon, t)) if now - t < CPR_LOCAL_SECS => (
+                    Some(decode::cpr_local(cpr, rlat, rlon)),
+                    PosTrust::LocalContained,
+                    Some(now - t),
+                ),
+                _ if !cpr.surface => match (st.even, st.odd) {
+                    (Some((e, te)), Some((o, to))) if (te - to).abs() < CPR_PAIR_SECS => {
+                        (decode::cpr_global_airborne(e, o, to >= te), PosTrust::GlobalUnambiguous, None)
+                    }
+                    _ => (None, PosTrust::GlobalUnambiguous, None),
+                },
+                // Surface (or airborne first fix) with no fresh aircraft
+                // fix: the receiver location is the reference.
+                _ => (
+                    self.receiver.map(|(rlat, rlon)| decode::cpr_local(cpr, rlat, rlon)),
+                    PosTrust::LocalReceiver,
+                    None,
+                ),
+            };
         let cand = cand
             .filter(|(lat, lon)| (-90.0..=90.0).contains(lat) && (-180.0..=180.0).contains(lon));
 
@@ -186,14 +189,7 @@ impl AdsbDecoder {
         let cand = match (cand, trust, ref_age, st.last_pos) {
             (Some((lat, lon)), PosTrust::LocalContained, Some(age), Some((rlat, rlon, _))) => {
                 if decode::within_local_containment(
-                    lat,
-                    lon,
-                    rlat,
-                    rlon,
-                    rc_m,
-                    age,
-                    MAX_SPEED_MPS,
-                    SPEED_GATE_SLACK_M,
+                    lat, lon, rlat, rlon, rc_m, age, MAX_SPEED_MPS, SPEED_GATE_SLACK_M,
                     flat_distance_m,
                 ) {
                     Some((lat, lon))
@@ -254,7 +250,11 @@ fn flat_distance_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 }
 
 /// Convert a decoded frame into the normalized message model.
-pub fn to_message(f: &frame::AdsbFrame, frequency_hz: u64, source: Provenance) -> Message {
+pub fn to_message(
+    f: &frame::AdsbFrame,
+    frequency_hz: u64,
+    source: Provenance,
+) -> Message {
     // Fold the position trust grade into the adsb_status JSON channel the
     // crate already serializes (xng-types `MessageBody::ModeS` has no typed
     // position-trust field — see shared_needs). Only emitted alongside a

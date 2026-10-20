@@ -59,10 +59,11 @@ pub fn rrc_taps(beta: f64, sps: f64, num_taps: usize) -> Vec<f32> {
                 1.0 - beta + 4.0 * beta / PI
             } else if beta > 0.0 && (t.abs() - 1.0 / (4.0 * beta)).abs() < 1e-9 {
                 let a = PI / (4.0 * beta);
-                (beta / 2.0_f64.sqrt()) * ((1.0 + 2.0 / PI) * a.sin() + (1.0 - 2.0 / PI) * a.cos())
+                (beta / 2.0_f64.sqrt())
+                    * ((1.0 + 2.0 / PI) * a.sin() + (1.0 - 2.0 / PI) * a.cos())
             } else {
-                let num =
-                    (PI * t * (1.0 - beta)).sin() + 4.0 * beta * t * (PI * t * (1.0 + beta)).cos();
+                let num = (PI * t * (1.0 - beta)).sin()
+                    + 4.0 * beta * t * (PI * t * (1.0 + beta)).cos();
                 let den = PI * t * (1.0 - (4.0 * beta * t).powi(2));
                 num / den
             }
@@ -112,7 +113,13 @@ impl Fir {
     pub fn with_decimation(taps: Vec<f32>, decim: usize) -> Self {
         assert!(!taps.is_empty() && decim >= 1);
         let n = taps.len();
-        Self { taps, hist: vec![IqSample::new(0.0, 0.0); 2 * n], head: 0, decim, phase: 0 }
+        Self {
+            taps,
+            hist: vec![IqSample::new(0.0, 0.0); 2 * n],
+            head: 0,
+            decim,
+            phase: 0,
+        }
     }
 
     /// Push input samples; append filtered (and decimated) output to `out`.

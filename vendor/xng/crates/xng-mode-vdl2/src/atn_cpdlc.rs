@@ -13,7 +13,7 @@
 //! module. Elements with arguments report the argument type and the
 //! phrase; argument value rendering follows (the FANS-1/A path).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 include!("atn_cpdlc_tables.rs");
 
@@ -26,7 +26,9 @@ struct Per<'a> {
 impl<'a> Per<'a> {
     fn new(bytes: &'a [u8], store: &'a mut Vec<u8>) -> Per<'a> {
         store.clear();
-        store.extend(bytes.iter().flat_map(|&b| (0..8).rev().map(move |i| (b >> i) & 1)));
+        store.extend(
+            bytes.iter().flat_map(|&b| (0..8).rev().map(move |i| (b >> i) & 1)),
+        );
         Per { bits: store, pos: 0 }
     }
 
@@ -40,7 +42,9 @@ impl<'a> Per<'a> {
         if self.pos + n > self.bits.len() {
             return None;
         }
-        let v = self.bits[self.pos..self.pos + n].iter().fold(0u64, |v, &b| (v << 1) | b as u64);
+        let v = self.bits[self.pos..self.pos + n]
+            .iter()
+            .fold(0u64, |v, &b| (v << 1) | b as u64);
         self.pos += n;
         Some(v)
     }
@@ -168,7 +172,9 @@ pub(crate) fn build_downlink_wilco_for_test() -> Vec<u8> {
     o.extend(&m);
     push(&mut o, 0, 1); // integrityCheck length determinant
     push(&mut o, 0, 7); // integrityCheck length 0
-    o.chunks(8).map(|c| c.iter().enumerate().fold(0u8, |v, (i, &b)| v | (b << (7 - i)))).collect()
+    o.chunks(8)
+        .map(|c| c.iter().enumerate().fold(0u8, |v, (i, &b)| v | (b << (7 - i))))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -498,8 +504,16 @@ fn read_atc_forward_message(p: &mut Per, _downlink: bool) -> Option<Value> {
     // marker in the module, so there is no leading preamble bit here.
     // DateTimeGroup: Date{year 1996..2095, month 1..12, day 1..31} +
     // Timehhmmss{hours 0..23, minutes 0..59, seconds 0..59}.
-    let (y, mo, d) = (p.constrained(1996, 2095)?, p.constrained(1, 12)?, p.constrained(1, 31)?);
-    let (h, mi, sec) = (p.constrained(0, 23)?, p.constrained(0, 59)?, p.constrained(0, 59)?);
+    let (y, mo, d) = (
+        p.constrained(1996, 2095)?,
+        p.constrained(1, 12)?,
+        p.constrained(1, 31)?,
+    );
+    let (h, mi, sec) = (
+        p.constrained(0, 23)?,
+        p.constrained(0, 59)?,
+        p.constrained(0, 59)?,
+    );
     let aircraft_id = p.ia5(2, 8)?;
     // AircraftAddress ::= BIT STRING (SIZE(24)) — fixed size, no length field.
     let addr = p.remaining_bytes(24)?;
@@ -575,14 +589,18 @@ fn atc_message(bytes: &[u8], nbits: usize, downlink: bool) -> Option<Value> {
     let msg_ref = if has_ref { Some(p.constrained(0, 63)?) } else { None };
     // DateTimeGroup: Date{year 1996..2095, month 1..12, day 1..31} +
     // Timehhmmss{hours 0..23, minutes 0..59, seconds 0..59}.
-    let (y, mo, d) = (p.constrained(1996, 2095)?, p.constrained(1, 12)?, p.constrained(1, 31)?);
-    let (h, mi, sec) = (p.constrained(0, 23)?, p.constrained(0, 59)?, p.constrained(0, 59)?);
+    let (y, mo, d) = (
+        p.constrained(1996, 2095)?,
+        p.constrained(1, 12)?,
+        p.constrained(1, 31)?,
+    );
+    let (h, mi, sec) = (
+        p.constrained(0, 23)?,
+        p.constrained(0, 59)?,
+        p.constrained(0, 59)?,
+    );
     let ack = if has_ack {
-        if p.constrained(0, 1)? == 0 {
-            "required"
-        } else {
-            "not-required"
-        }
+        if p.constrained(0, 1)? == 0 { "required" } else { "not-required" }
     } else {
         "not-required"
     };
@@ -626,7 +644,8 @@ fn walk_message_data(p: &mut Per, downlink: bool) -> Option<(Value, Option<Value
     // MessageData: SEQUENCE {elementIds SIZE(1..5), constrainedData OPT}.
     let has_constrained = p.bit()? == 1;
     let count = p.constrained(1, 5)? as usize;
-    let table: &[(&str, &str, &str)] = if downlink { &DOWNLINK_ELEMENTS } else { &UPLINK_ELEMENTS };
+    let table: &[(&str, &str, &str)] =
+        if downlink { &DOWNLINK_ELEMENTS } else { &UPLINK_ELEMENTS };
     let idx_bits = 64 - (table.len() as u64 - 1).leading_zeros() as usize;
 
     let mut elements = Vec::new();
@@ -683,6 +702,7 @@ fn walk_message_data(p: &mut Per, downlink: bool) -> Option<(Value, Option<Value
     }
     Some((json!(elements), route_clearances))
 }
+
 
 /// PublishedIdentifier: fixName | navaid (both name + optional latlon).
 fn read_published(p: &mut Per) -> Option<String> {
@@ -798,6 +818,7 @@ fn read_route_clearance(p: &mut Per) -> Option<Value> {
     Some(Value::Object(out))
 }
 
+
 /// Render a decoded argument into the phrase template's placeholder.
 fn fill_phrase(phrase: &str, vals: &[String]) -> String {
     let mut out = String::new();
@@ -856,9 +877,10 @@ fn read_argument(p: &mut Per, ty: &str) -> Option<Vec<String>> {
         "RouteClearanceIndex" => {
             vec![format!("(route clearance #{})", p.constrained(1, 2)?)]
         }
-        "PositionRouteClearanceIndex" => {
-            vec![read_position(p)?, format!("(route clearance #{})", p.constrained(1, 2)?)]
-        }
+        "PositionRouteClearanceIndex" => vec![
+            read_position(p)?,
+            format!("(route clearance #{})", p.constrained(1, 2)?),
+        ],
 
         // --- VDL2-1.1: extended argument-type coverage (ICAO Doc 9880 module,
         // docs/asn1/atn-cpdlc.asn; unaligned PER per ITU-T X.691). ---
@@ -936,7 +958,13 @@ fn read_argument(p: &mut Per, ty: &str) -> Option<Vec<String>> {
         "TimePositionLevelSpeed" => {
             // { timeposition TimePosition, levelspeed LevelSpeed }; LevelSpeed
             // carries a SpeedSpeed (two speeds).
-            vec![read_time(p)?, read_position(p)?, read_level(p)?, read_speed(p)?, read_speed(p)?]
+            vec![
+                read_time(p)?,
+                read_position(p)?,
+                read_level(p)?,
+                read_speed(p)?,
+                read_speed(p)?,
+            ]
         }
 
         // Distance/direction offset family.
@@ -964,9 +992,12 @@ fn read_argument(p: &mut Per, ty: &str) -> Option<Vec<String>> {
         "TimeToFromPosition" => {
             vec![read_time(p)?, read_tofrom(p)?, read_position(p)?]
         }
-        "TimeDistanceToFromPosition" => {
-            vec![read_time(p)?, read_distance(p)?, read_tofrom(p)?, read_position(p)?]
-        }
+        "TimeDistanceToFromPosition" => vec![
+            read_time(p)?,
+            read_distance(p)?,
+            read_tofrom(p)?,
+            read_position(p)?,
+        ],
 
         // Vertical rate and remaining-fuel/POB.
         "VerticalRate" => vec![read_vertical_rate(p)?],
@@ -1027,22 +1058,17 @@ fn read_speed(p: &mut Per) -> Option<String> {
 
 fn read_degrees(p: &mut Per) -> Option<String> {
     let mag = p.bit()? == 0;
-    Some(format!("{}°{}", p.constrained(1, 360)?, if mag { "M" } else { "T" }))
+    Some(format!(
+        "{}°{}",
+        p.constrained(1, 360)?,
+        if mag { "M" } else { "T" }
+    ))
 }
 
 fn read_direction(p: &mut Per) -> Option<String> {
     const DIRS: [&str; 11] = [
-        "LEFT",
-        "RIGHT",
-        "EITHER SIDE",
-        "NORTH",
-        "SOUTH",
-        "EAST",
-        "WEST",
-        "NORTH-EAST",
-        "NORTH-WEST",
-        "SOUTH-EAST",
-        "SOUTH-WEST",
+        "LEFT", "RIGHT", "EITHER SIDE", "NORTH", "SOUTH", "EAST", "WEST",
+        "NORTH-EAST", "NORTH-WEST", "SOUTH-EAST", "SOUTH-WEST",
     ];
     DIRS.get(p.constrained(0, 10)? as usize).map(|s| s.to_string())
 }
@@ -1191,8 +1217,10 @@ fn read_traffic_type(p: &mut Per) -> Option<String> {
     if p.bit()? != 0 {
         return Some("(extended)".to_string());
     }
-    const TT: [&str; 6] =
-        ["NONE", "OPPOSITE DIRECTION", "SAME DIRECTION", "CONVERGING", "CROSSING", "DIVERGING"];
+    const TT: [&str; 6] = [
+        "NONE", "OPPOSITE DIRECTION", "SAME DIRECTION", "CONVERGING",
+        "CROSSING", "DIVERGING",
+    ];
     TT.get(p.constrained(0, 5)? as usize).map(|s| s.to_string())
 }
 
@@ -1203,18 +1231,8 @@ fn read_clearance_type(p: &mut Per) -> Option<String> {
         return Some("(extended)".to_string());
     }
     const CT: [&str; 12] = [
-        "NONE",
-        "APPROACH",
-        "DEPARTURE",
-        "FURTHER",
-        "START-UP",
-        "PUSHBACK",
-        "TAXI",
-        "TAKE-OFF",
-        "LANDING",
-        "OCEANIC",
-        "EN-ROUTE",
-        "DOWNSTREAM",
+        "NONE", "APPROACH", "DEPARTURE", "FURTHER", "START-UP", "PUSHBACK",
+        "TAXI", "TAKE-OFF", "LANDING", "OCEANIC", "EN-ROUTE", "DOWNSTREAM",
     ];
     CT.get(p.constrained(0, 11)? as usize).map(|s| s.to_string())
 }
@@ -1258,15 +1276,8 @@ fn read_facility_function(p: &mut Per) -> Option<String> {
         return Some("(extended)".to_string());
     }
     const FF: [&str; 9] = [
-        "CENTER",
-        "APPROACH",
-        "TOWER",
-        "FINAL",
-        "GROUND",
-        "DELIVERY",
-        "DEPARTURE",
-        "CONTROL",
-        "RADIO",
+        "CENTER", "APPROACH", "TOWER", "FINAL", "GROUND", "DELIVERY",
+        "DEPARTURE", "CONTROL", "RADIO",
     ];
     FF.get(p.constrained(0, 8)? as usize).map(|s| s.to_string())
 }
@@ -1295,8 +1306,10 @@ fn read_speed_type(p: &mut Per) -> Option<String> {
     if p.bit()? != 0 {
         return Some("(extended)".to_string());
     }
-    const ST: [&str; 9] =
-        ["NONE", "INDICATED", "TRUE", "GROUND", "MACH", "APPROACH", "CRUISE", "MINIMUM", "MAXIMUM"];
+    const ST: [&str; 9] = [
+        "NONE", "INDICATED", "TRUE", "GROUND", "MACH", "APPROACH", "CRUISE",
+        "MINIMUM", "MAXIMUM",
+    ];
     ST.get(p.constrained(0, 8)? as usize).map(|s| s.to_string())
 }
 
@@ -1406,7 +1419,10 @@ fn read_short_tsap(p: &mut Per) -> Option<Value> {
     let mut out = serde_json::Map::new();
     if has_ars {
         let ars = p.remaining_bytes(3 * 8)?;
-        out.insert("ars".into(), json!(ars.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+        out.insert(
+            "ars".into(),
+            json!(ars.iter().map(|b| format!("{b:02x}")).collect::<String>()),
+        );
     }
     // OCTET STRING SIZE(10..11): constrained length (2 values → 1 bit) then
     // the octets.
@@ -1464,7 +1480,8 @@ fn read_app_list(p: &mut Per, with_address: bool) -> Option<Vec<Value>> {
 /// DateTime ::= SEQUENCE { date Date, time Time }; Date = Year(1996..2095) +
 /// Month(1..12) + Day(1..31); Time = Timehours(0..23) + Timeminutes(0..59).
 fn read_cm_datetime(p: &mut Per) -> Option<String> {
-    let (y, mo, d) = (p.constrained(1996, 2095)?, p.constrained(1, 12)?, p.constrained(1, 31)?);
+    let (y, mo, d) =
+        (p.constrained(1996, 2095)?, p.constrained(1, 12)?, p.constrained(1, 31)?);
     let (h, mi) = (p.constrained(0, 23)?, p.constrained(0, 59)?);
     Some(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}Z"))
 }
@@ -1687,7 +1704,9 @@ mod tests {
         fn bytes(&self) -> Vec<u8> {
             self.0
                 .chunks(8)
-                .map(|c| c.iter().enumerate().fold(0u8, |v, (i, &b)| v | (b << (7 - i))))
+                .map(|c| {
+                    c.iter().enumerate().fold(0u8, |v, (i, &b)| v | (b << (7 - i)))
+                })
                 .collect()
         }
     }
@@ -1716,7 +1735,7 @@ mod tests {
         o.push(0, 1); // sequence not extended
         o.push(0, 1); // no algorithmIdentifier
         o.push(1, 1); // protectedMessage present
-                      // BIT STRING length determinant (short form).
+        // BIT STRING length determinant (short form).
         o.push(0, 1);
         o.push(inner_bits as u64, 7);
         o.0.extend(&m.0);
@@ -1755,7 +1774,7 @@ mod tests {
         m.push(0, 1);
         m.push(0, 3); // 1 element
         m.push(20, 8); // uM20 (238 → 8 bits)
-                       // Level argument: singleLevel, flight level, FL360.
+        // Level argument: singleLevel, flight level, FL360.
         m.push(0, 1); // CHOICE: singleLevel
         m.push(2, 2); // LevelType: levelFlightLevel
         m.push(360 - 30, 10); // INTEGER (30..700) → 10 bits
@@ -1813,7 +1832,7 @@ mod tests {
         b.push(0, 1); // not extended
         b.push(0, 2); // cmLogonRequest
         b.push(0, 6); // six absent optionals
-                      // AircraftFlightIdentification IA5 SIZE(2..8): "UAL123" len 6.
+        // AircraftFlightIdentification IA5 SIZE(2..8): "UAL123" len 6.
         b.push(4, 3); // 6 - 2
         for c in b"UAL123" {
             b.push(*c as u64, 7);
@@ -1827,7 +1846,10 @@ mod tests {
         assert_eq!(v["flight_id"], "UAL123");
         assert_eq!(v["cm_long_tsap"]["rdp"], "4700270102");
         assert_eq!(v["cm_long_tsap"]["short_tsap"]["ars"], "abcdef");
-        assert_eq!(v["cm_long_tsap"]["short_tsap"]["loc_sys_nsel_tsel"], "00010203040506070809");
+        assert_eq!(
+            v["cm_long_tsap"]["short_tsap"]["loc_sys_nsel_tsel"],
+            "00010203040506070809"
+        );
     }
 
     #[test]
@@ -1897,7 +1919,7 @@ mod tests {
         b.push(0, 3); // logon-response
         b.push(1, 1); // air list present
         b.push(0, 1); // ground list absent
-                      // SEQUENCE SIZE(1..256): count 1 → offset 0, 8 bits.
+        // SEQUENCE SIZE(1..256): count 1 → offset 0, 8 bits.
         b.push(1 - 1, 8);
         // AEQualifierVersionAddress: aeQualifier INTEGER(0..255)=22,
         // apVersion INTEGER(1..255)=1, apAddress = shortTsap (CHOICE bit 1).
@@ -2061,14 +2083,14 @@ mod tests {
         let mut b = Bits::new();
         b.push(0, 1); // CHOICE not extended
         b.push(4, 3); // ground PDUs: forward
-                      // ForwardHeader.dateTime (DateTimeGroup with seconds).
+        // ForwardHeader.dateTime (DateTimeGroup with seconds).
         b.push(30, 7); // year 2026
         b.push(5, 4); // June
         b.push(10, 5); // day 11
         b.push(8, 5);
         b.push(15, 6);
         b.push(0, 6); // 08:15:00
-                      // aircraftID IA5(2..8) "DLH7" len 4 → offset 2.
+        // aircraftID IA5(2..8) "DLH7" len 4 → offset 2.
         b.push(4 - 2, 3);
         b.ia5("DLH7");
         // aircraftAddress BIT STRING(24) = 0xABCDEF.
@@ -2200,7 +2222,7 @@ mod route_tests {
         m.push(0, 3); // one element
         m.push(80, 8); // uM80RouteClearance (index arg)
         m.push(0, 1); // RouteClearanceIndex = 1
-                      // constrainedData: ext 0, routeClearanceData present, count 1.
+        // constrainedData: ext 0, routeClearanceData present, count 1.
         m.push(0, 1);
         m.push(1, 1);
         m.push(0, 1);
@@ -2235,10 +2257,11 @@ mod route_tests {
         o.0.extend(&m.0);
         o.push(0, 1);
         o.push(0, 7);
-        let bytes: Vec<u8> =
-            o.0.chunks(8)
-                .map(|c| c.iter().enumerate().fold(0u8, |v, (i, &b)| v | (b << (7 - i))))
-                .collect();
+        let bytes: Vec<u8> = o
+            .0
+            .chunks(8)
+            .map(|c| c.iter().enumerate().fold(0u8, |v, (i, &b)| v | (b << (7 - i))))
+            .collect();
 
         let v = parse_pdus(&bytes, false).expect("apdu");
         let msg = &v["message"];
@@ -2399,7 +2422,10 @@ mod arg_tests {
         b.push(0, 4); // function = CENTER
         b.push(1, 2); // frequency vhf
         b.push(26830 - 23600, 12); // 134.150 MHz
-        assert_eq!(decode(&b, "UnitNameFrequency"), vec!["KZAK OAKLAND CENTER", "134.150 MHz"]);
+        assert_eq!(
+            decode(&b, "UnitNameFrequency"),
+            vec!["KZAK OAKLAND CENTER", "134.150 MHz"]
+        );
     }
 
     #[test]
@@ -2485,7 +2511,10 @@ mod arg_tests {
         b.push(30, 6); // 10:30
         b.push(11, 5);
         b.push(45, 6); // 11:45
-        assert_eq!(decode(&b, "PositionTimeTime"), vec!["KSFO", "10:30", "11:45"]);
+        assert_eq!(
+            decode(&b, "PositionTimeTime"),
+            vec!["KSFO", "10:30", "11:45"]
+        );
     }
 
     #[test]
@@ -2516,7 +2545,10 @@ mod arg_tests {
         b.push(1, 4); // direction RIGHT (1)
         b.push(1, 1); // legType: legTime
         b.push(5, 4); // INTEGER(0..10) → 5 min
-        assert_eq!(decode(&b, "HoldClearance"), vec!["KSFO", "FL250", "270°M", "RIGHT", "5 MIN"]);
+        assert_eq!(
+            decode(&b, "HoldClearance"),
+            vec!["KSFO", "FL250", "270°M", "RIGHT", "5 MIN"]
+        );
     }
 
     #[test]
@@ -2531,7 +2563,10 @@ mod arg_tests {
         b.ia5("DLH456");
         b.push(2, 3); // position: airport
         b.ia5("EDDF");
-        assert_eq!(decode(&b, "DepartureClearance"), vec!["DLH456 CLEARED TO EDDF"]);
+        assert_eq!(
+            decode(&b, "DepartureClearance"),
+            vec!["DLH456 CLEARED TO EDDF"]
+        );
     }
 
     #[test]
@@ -2559,7 +2594,10 @@ mod arg_tests {
         b.push(0, 1); // level singleLevel
         b.push(2, 2); // FL
         b.push(350 - 30, 10);
-        assert_eq!(decode(&b, "PositionReport"), vec!["KSFO 12:00 FL350"]);
+        assert_eq!(
+            decode(&b, "PositionReport"),
+            vec!["KSFO 12:00 FL350"]
+        );
     }
 
     #[test]
@@ -2570,7 +2608,10 @@ mod arg_tests {
         b.push(2, 5);
         b.push(30, 6); // 02:30
         b.push(150 - 1, 10);
-        assert_eq!(decode(&b, "RemainingFuelPersonsOnBoard"), vec!["02:30", "150"]);
+        assert_eq!(
+            decode(&b, "RemainingFuelPersonsOnBoard"),
+            vec!["02:30", "150"]
+        );
     }
 
     #[test]

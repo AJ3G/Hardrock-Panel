@@ -70,7 +70,8 @@ pub fn parse(octets: &[u8]) -> Option<AcarsBlock> {
         NAK => None,
         c => Some(c as char),
     };
-    let label: String = ch[9..11].iter().map(|&c| if c == DEL { 'd' } else { c as char }).collect();
+    let label: String =
+        ch[9..11].iter().map(|&c| if c == DEL { 'd' } else { c as char }).collect();
     let block_id = match ch[11] {
         0 => None,
         c => Some(c as char),
@@ -108,7 +109,9 @@ pub fn parse(octets: &[u8]) -> Option<AcarsBlock> {
             more_to_come: ch[suffix_idx] == ETB,
             reassembled: false,
             assstat: None,
-            app: appdec.app.map(|a| serde_json::to_value(&a).unwrap_or_default()),
+            app: appdec
+                .app
+                .map(|a| serde_json::to_value(&a).unwrap_or_default()),
             vdl2_link: None,
         },
         downlink,
@@ -197,8 +200,17 @@ mod tests {
         // A downlink block's text begins with the 4-char MIN + 6-char
         // flight id. libacars splits the MIN into msg_num (3) + the 4th
         // sequence char; the block must surface both.
-        let octets =
-            build('2', "N12345", None, "H1", '4', Some("M07C"), Some("UA1234"), "HELLO", false);
+        let octets = build(
+            '2',
+            "N12345",
+            None,
+            "H1",
+            '4',
+            Some("M07C"),
+            Some("UA1234"),
+            "HELLO",
+            false,
+        );
         let b = parse(&octets).expect("must parse");
         assert!(b.crc_ok);
         assert_eq!(b.core.msg_num.as_deref(), Some("M07C"));

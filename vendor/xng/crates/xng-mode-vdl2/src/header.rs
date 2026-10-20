@@ -67,12 +67,7 @@ mod tests {
     /// Spec-derived parity vectors (R = 000).
     #[test]
     fn parity_vectors() {
-        for (tl, p) in [
-            (1u32, [0, 1, 0, 1, 0]),
-            (100, [0, 1, 1, 1, 0]),
-            (1000, [1, 0, 1, 1, 1]),
-            (131071, [0, 1, 1, 0, 1]),
-        ] {
+        for (tl, p) in [(1u32, [0, 1, 0, 1, 0]), (100, [0, 1, 1, 1, 0]), (1000, [1, 0, 1, 1, 1]), (131071, [0, 1, 1, 0, 1])] {
             let enc = encode(tl);
             assert_eq!(&enc[20..], &p, "TL={tl}");
             assert_eq!(decode(&enc), Some(tl));

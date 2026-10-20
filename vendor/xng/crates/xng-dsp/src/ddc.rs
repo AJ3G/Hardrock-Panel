@@ -46,7 +46,9 @@ impl Ddc {
         // remainder and skips the resampler entirely (unchanged fast path).
         let decim = ratio.floor() as usize;
         if decim == 0 {
-            return Err(format!("input rate {input_rate} is below output rate {output_rate}"));
+            return Err(format!(
+                "input rate {input_rate} is below output rate {output_rate}"
+            ));
         }
         if output_rate < 2.0 * passband_hz {
             return Err(format!(

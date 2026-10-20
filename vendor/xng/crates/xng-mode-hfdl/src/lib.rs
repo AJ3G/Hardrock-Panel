@@ -47,7 +47,8 @@ impl HfdlChannelDecoder {
             Some(Ddc::new(input_rate, CHANNEL_RATE, sub, CHANNEL_PASSBAND_HZ)?)
         };
         let selectivity = if ddc.is_none() {
-            let taps = xng_dsp::lowpass_taps(CHANNEL_PASSBAND_HZ / CHANNEL_RATE, 101);
+            let taps =
+                xng_dsp::lowpass_taps(CHANNEL_PASSBAND_HZ / CHANNEL_RATE, 101);
             Some(xng_dsp::Fir::new(taps))
         } else {
             None
@@ -99,17 +100,18 @@ impl HfdlChannelDecoder {
 }
 
 /// Convert a decoded event into the normalized message model.
-pub fn to_message(
-    e: &pdu::HfdlEvent,
-    frequency_hz: u64,
-    level_dbfs: f32,
-    source: Provenance,
-) -> Message {
+pub fn to_message(e: &pdu::HfdlEvent, frequency_hz: u64, level_dbfs: f32, source: Provenance) -> Message {
     let (body, crc_ok, errors) = match &e.acars {
-        Some(b) => (MessageBody::Acars(b.core.clone()), b.crc_ok, Some(b.parity_errors)),
-        None => {
-            (MessageBody::Hfdl { kind: e.kind.clone(), details: e.details.clone() }, true, None)
-        }
+        Some(b) => (
+            MessageBody::Acars(b.core.clone()),
+            b.crc_ok,
+            Some(b.parity_errors),
+        ),
+        None => (
+            MessageBody::Hfdl { kind: e.kind.clone(), details: e.details.clone() },
+            true,
+            None,
+        ),
     };
     Message {
         mode: Mode::Hfdl,

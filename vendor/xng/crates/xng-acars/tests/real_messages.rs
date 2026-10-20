@@ -36,7 +36,8 @@ fn vt_anb_basic_report_with_refs_and_meteo() {
     assert!(r.nav_redundancy_ok);
     assert!(!r.tcas_ok);
 
-    let AdscTag::EarthRef { true_track_deg, ground_speed_kt, vert_speed_fpm, .. } = &tags[1] else {
+    let AdscTag::EarthRef { true_track_deg, ground_speed_kt, vert_speed_fpm, .. } = &tags[1]
+    else {
         panic!("tag 1: {tags:?}")
     };
     assert!(close(*true_track_deg, 263.7, 0.1));
@@ -304,6 +305,7 @@ fn label_4j_poswx_met_fields() {
     assert_eq!(m.altitude_ft, Some(27000));
 }
 
+
 // --- ACARS-3.1: real off-air CPDLC argument decode ---
 // `/AKLCDYA.AT1.9M-MTB...` is one of the real off-air FANS-1/A messages
 // embedded in libacars' own `examples/decode_acars_apps.c` (MIT). Running
@@ -331,6 +333,7 @@ fn aklcdya_real_cpdlc_contact_with_unit_and_frequency() {
     assert_eq!(m.args, vec!["LUNBI", "AUCKLAND control", "123.900 MHz"]);
     assert_eq!(m.text, "AT LUNBI CONTACT AUCKLAND control 123.900 MHz");
 }
+
 
 // --- ACARS-2.4: H1 FPN flight-plan decode ---
 // Real off-air messages from airframes' acars-decoder-typescript
@@ -360,6 +363,7 @@ fn h1_fpn_flight_plan_with_waypoints() {
     assert!(close3(kayex.latitude, 36.487), "lat {}", kayex.latitude);
     assert!(close3(kayex.longitude, -120.948), "lon {}", kayex.longitude);
 }
+
 
 // --- ACARS-2.4: label 5Z United telex / structured downlink ---
 // Real documented examples from airframes' acars-decoder-typescript

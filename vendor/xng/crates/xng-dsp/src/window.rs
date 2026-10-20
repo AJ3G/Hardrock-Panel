@@ -4,7 +4,9 @@ use std::f64::consts::PI;
 
 /// Hamming window of length `n`.
 pub fn hamming(n: usize) -> Vec<f64> {
-    (0..n).map(|i| 0.54 - 0.46 * (2.0 * PI * i as f64 / (n as f64 - 1.0)).cos()).collect()
+    (0..n)
+        .map(|i| 0.54 - 0.46 * (2.0 * PI * i as f64 / (n as f64 - 1.0)).cos())
+        .collect()
 }
 
 /// 4-term Blackman-Harris window of length `n` (high stopband attenuation,

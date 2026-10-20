@@ -109,7 +109,11 @@ impl ChannelizedDdc {
             });
         }
 
-        Ok(Self { pfb, bins: vec![Vec::new(); m], channels })
+        Ok(Self {
+            pfb,
+            bins: vec![Vec::new(); m],
+            channels,
+        })
     }
 
     /// Number of channels.

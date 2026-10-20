@@ -17,7 +17,9 @@ pub mod sublabel;
 use chrono::Utc;
 use num_complex::Complex;
 use xng_dsp::{ChannelizedDdc, Ddc, SharedDdc};
-use xng_types::{AcarsCore, DecodeQuality, Message, MessageBody, Mode, Provenance, SignalQuality};
+use xng_types::{
+    AcarsCore, DecodeQuality, Message, MessageBody, Mode, Provenance, SignalQuality,
+};
 
 /// Internal demod sample rate: 10 samples per bit at 2400 bd.
 pub const CHANNEL_RATE: f64 = 24_000.0;

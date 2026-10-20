@@ -100,8 +100,11 @@ impl Reassembler {
         }
         let final_block = !core.more_to_come;
 
-        let key =
-            Key { tail: core.tail.clone().unwrap_or_default(), label: core.label.clone(), msg_num };
+        let key = Key {
+            tail: core.tail.clone().unwrap_or_default(),
+            label: core.label.clone(),
+            msg_num,
+        };
         // The common case: a single-block message with no pending state.
         if final_block && !self.entries.contains_key(&key) && (seq == 0 || !downlink) {
             return Reasm::Skipped;
@@ -145,14 +148,7 @@ impl Reassembler {
 mod tests {
     use super::*;
 
-    fn core(
-        tail: &str,
-        label: &str,
-        block_id: char,
-        msg_num: Option<&str>,
-        text: &str,
-        more: bool,
-    ) -> AcarsCore {
+    fn core(tail: &str, label: &str, block_id: char, msg_num: Option<&str>, text: &str, more: bool) -> AcarsCore {
         AcarsCore {
             mode: '2',
             tail: Some(tail.into()),

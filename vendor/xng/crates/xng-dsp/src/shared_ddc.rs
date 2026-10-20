@@ -128,8 +128,10 @@ impl SharedDdc {
                      choose a friendlier sample rate"
                 ));
             }
-            let fine =
-                Fir::with_decimation(lowpass_taps(passband_hz / inter_rate, ntaps), fine_decim);
+            let fine = Fir::with_decimation(
+                lowpass_taps(passband_hz / inter_rate, ntaps),
+                fine_decim,
+            );
             let resampler = if (post_rate - output_rate).abs() > 1e-6 {
                 Some(Resampler::new(post_rate, output_rate))
             } else {
@@ -144,7 +146,12 @@ impl SharedDdc {
             });
         }
 
-        Ok(Self { coarse, inter: Vec::new(), coarse_inter: Vec::new(), channels })
+        Ok(Self {
+            coarse,
+            inter: Vec::new(),
+            coarse_inter: Vec::new(),
+            channels,
+        })
     }
 
     /// Number of channels.

@@ -87,24 +87,12 @@ pub struct BasicReport {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "tag", rename_all = "snake_case")]
 pub enum AdscTag {
-    Ack {
-        contract: u8,
-    },
-    Nack {
-        contract: u8,
-        reason: u8,
-        reason_text: String,
-        ext: Option<u8>,
-    },
-    Noncompliance {
-        contract: u8,
-        groups: Vec<NoncomplianceGroup>,
-    },
+    Ack { contract: u8 },
+    Nack { contract: u8, reason: u8, reason_text: String, ext: Option<u8> },
+    Noncompliance { contract: u8, groups: Vec<NoncomplianceGroup> },
     CancelEmergency,
     Report(BasicReport),
-    FlightId {
-        id: String,
-    },
+    FlightId { id: String },
     PredictedRoute {
         next_lat: f64,
         next_lon: f64,
@@ -114,57 +102,18 @@ pub enum AdscTag {
         next_next_lon: f64,
         next_next_alt_ft: i32,
     },
-    EarthRef {
-        true_track_valid: bool,
-        true_track_deg: f64,
-        ground_speed_kt: f64,
-        vert_speed_fpm: i32,
-    },
-    AirRef {
-        true_heading_valid: bool,
-        true_heading_deg: f64,
-        mach: f64,
-        vert_speed_fpm: i32,
-    },
-    Meteo {
-        wind_speed_kt: f64,
-        wind_dir_valid: bool,
-        wind_dir_deg: f64,
-        temperature_c: f64,
-    },
-    AirframeId {
-        icao: String,
-    },
-    IntermediateProjection {
-        distance_nm: f64,
-        true_track_valid: bool,
-        true_track_deg: f64,
-        alt_ft: i32,
-        eta_s: u32,
-    },
-    FixedProjection {
-        lat: f64,
-        lon: f64,
-        alt_ft: i32,
-        eta_s: u32,
-    },
-    DisconnectReason {
-        code: u8,
-        text: String,
-    },
+    EarthRef { true_track_valid: bool, true_track_deg: f64, ground_speed_kt: f64, vert_speed_fpm: i32 },
+    AirRef { true_heading_valid: bool, true_heading_deg: f64, mach: f64, vert_speed_fpm: i32 },
+    Meteo { wind_speed_kt: f64, wind_dir_valid: bool, wind_dir_deg: f64, temperature_c: f64 },
+    AirframeId { icao: String },
+    IntermediateProjection { distance_nm: f64, true_track_valid: bool, true_track_deg: f64, alt_ft: i32, eta_s: u32 },
+    FixedProjection { lat: f64, lon: f64, alt_ft: i32, eta_s: u32 },
+    DisconnectReason { code: u8, text: String },
     // Uplink (contract requests)
     CancelAllContracts,
-    CancelContract {
-        contract: u8,
-    },
-    UplinkCancelEmergency {
-        contract: u8,
-    },
-    ContractRequest {
-        kind: ContractKind,
-        contract: u8,
-        groups: Vec<RequestGroup>,
-    },
+    CancelContract { contract: u8 },
+    UplinkCancelEmergency { contract: u8 },
+    ContractRequest { kind: ContractKind, contract: u8, groups: Vec<RequestGroup> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -332,8 +281,11 @@ fn parse_downlink(mut buf: &[u8], msg: &mut AdscMessage) {
                 if reason > 13 {
                     return None;
                 }
-                let ext =
-                    if matches!(reason, 1 | 2 | 7) { Some(take(&mut buf, 1)?[0]) } else { None };
+                let ext = if matches!(reason, 1 | 2 | 7) {
+                    Some(take(&mut buf, 1)?[0])
+                } else {
+                    None
+                };
                 Some(AdscTag::Nack {
                     contract: b[0],
                     reason,
@@ -402,15 +354,12 @@ fn parse_downlink(mut buf: &[u8], msg: &mut AdscMessage) {
                     temperature_c: temperature_c(r.read(12)?),
                 })
             }),
-            17 => take(&mut buf, 3).map(|b| AdscTag::AirframeId {
-                icao: format!("{:02X}{:02X}{:02X}", b[0], b[1], b[2]),
-            }),
+            17 => take(&mut buf, 3)
+                .map(|b| AdscTag::AirframeId { icao: format!("{:02X}{:02X}{:02X}", b[0], b[1], b[2]) }),
             18 => take(&mut buf, 10)
                 .and_then(|b| parse_basic_report(b, ReportKind::VerticalRateChange)),
             19 => take(&mut buf, 10).and_then(|b| parse_basic_report(b, ReportKind::AltitudeRange)),
-            20 => {
-                take(&mut buf, 10).and_then(|b| parse_basic_report(b, ReportKind::WaypointChange))
-            }
+            20 => take(&mut buf, 10).and_then(|b| parse_basic_report(b, ReportKind::WaypointChange)),
             22 => take(&mut buf, 8).and_then(|b| {
                 let mut r = BitReader::new(b);
                 let d = distance_nm(r.read(16)?);
@@ -506,8 +455,7 @@ fn parse_request_groups(buf: &mut &[u8]) -> Vec<RequestGroup> {
         let Some((&tag, rest)) = buf.split_first() else { return groups };
         let mut b = rest;
         let parsed: Option<RequestGroup> = match tag {
-            10 => take(&mut b, 1)
-                .map(|x| RequestGroup::LateralDeviationThreshold { nm: x[0] as f64 / 8.0 }),
+            10 => take(&mut b, 1).map(|x| RequestGroup::LateralDeviationThreshold { nm: x[0] as f64 / 8.0 }),
             11 => take(&mut b, 1).map(|x| {
                 let sf = [0u32, 1, 8, 64][(x[0] >> 6) as usize];
                 RequestGroup::ReportingInterval { seconds: sf * ((x[0] & 0x3F) as u32 + 1) }
@@ -518,15 +466,18 @@ fn parse_request_groups(buf: &mut &[u8]) -> Vec<RequestGroup> {
             15 => take(&mut b, 1).map(|x| RequestGroup::AirRefModulus { every_n: x[0] }),
             16 => take(&mut b, 1).map(|x| RequestGroup::MeteoModulus { every_n: x[0] }),
             17 => take(&mut b, 1).map(|x| RequestGroup::AirframeIdModulus { every_n: x[0] }),
-            18 => take(&mut b, 1)
-                .map(|x| RequestGroup::VerticalSpeedThreshold { fpm: (x[0] as i8) as i32 * 64 }),
+            18 => take(&mut b, 1).map(|x| RequestGroup::VerticalSpeedThreshold {
+                fpm: (x[0] as i8) as i32 * 64,
+            }),
             19 => take(&mut b, 4).map(|x| RequestGroup::AltitudeRange {
                 ceiling_ft: altitude_ft(u32::from_be_bytes([0, 0, x[0], x[1]])),
                 floor_ft: altitude_ft(u32::from_be_bytes([0, 0, x[2], x[3]])),
             }),
             20 => Some(RequestGroup::ReportWaypointChanges),
-            21 => take(&mut b, 2)
-                .map(|x| RequestGroup::AircraftIntent { modulus: x[0], projection_time_min: x[1] }),
+            21 => take(&mut b, 2).map(|x| RequestGroup::AircraftIntent {
+                modulus: x[0],
+                projection_time_min: x[1],
+            }),
             _ => None,
         };
         match parsed {

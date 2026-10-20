@@ -69,7 +69,10 @@ pub fn decode_scaled(s: &str) -> Option<Position> {
     }
     let lat: f64 = lat_digits.parse().ok()?;
     let lon: f64 = lon_digits.parse().ok()?;
-    Some(Position { latitude: (lat / 1000.0) * lat_sign, longitude: (lon / 1000.0) * lon_sign })
+    Some(Position {
+        latitude: (lat / 1000.0) * lat_sign,
+        longitude: (lon / 1000.0) * lon_sign,
+    })
 }
 
 /// Decode a coordinate where the digit run is degrees followed by tenths of
@@ -113,7 +116,10 @@ fn decode_literal_dot(s: &str) -> Option<Position> {
 
     let lat = parse_deg_min(lat_field, 2)?;
     let lon = parse_deg_min(lon_field, 3)?;
-    Some(Position { latitude: lat * lat_sign, longitude: lon * lon_sign })
+    Some(Position {
+        latitude: lat * lat_sign,
+        longitude: lon * lon_sign,
+    })
 }
 
 /// Parse `DDMM.m` (degrees = first `deg_digits` chars, the rest are
@@ -194,7 +200,8 @@ mod tests {
     #[test]
     fn label_20_pos_scaled() {
         // Label_20_POS.test.ts: 38.160 / -77.075.
-        let p = decode("20", "POSN38160W077075,,211733,360,OTT,212041,,N42,19689,40,544").unwrap();
+        let p = decode("20", "POSN38160W077075,,211733,360,OTT,212041,,N42,19689,40,544")
+            .unwrap();
         assert!(close(p.latitude, 38.160), "lat {}", p.latitude);
         assert!(close(p.longitude, -77.075), "lon {}", p.longitude);
     }
@@ -246,8 +253,11 @@ mod tests {
     #[test]
     fn label_4j_legacy_literal_dot() {
         // research/4J.md: "/POS N5043.5E01121.8" → 50°43.5' / 11°21.8'.
-        let p = decode("4J", "4J01 POSWX 0318/20 ETAD/ETAD .00318S\n/POS N5043.5E01121.8/OVR 0817")
-            .unwrap();
+        let p = decode(
+            "4J",
+            "4J01 POSWX 0318/20 ETAD/ETAD .00318S\n/POS N5043.5E01121.8/OVR 0817",
+        )
+        .unwrap();
         assert!(close(p.latitude, 50.0 + 43.5 / 60.0), "lat {}", p.latitude);
         assert!(close(p.longitude, 11.0 + 21.8 / 60.0), "lon {}", p.longitude);
     }

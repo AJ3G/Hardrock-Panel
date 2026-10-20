@@ -39,11 +39,7 @@ pub struct Burst {
 enum State {
     Hunt,
     /// A1 found at this absolute position (first A1 symbol center).
-    Collect {
-        a1_pos: f64,
-        theta: f32,
-        needed_syms: Option<(Setting, usize)>,
-    },
+    Collect { a1_pos: f64, theta: f32, needed_syms: Option<(Setting, usize)> },
 }
 
 /// Symbol-spaced LMS feed-forward equalizer (VERIFY-5: as-built this crate
@@ -91,7 +87,8 @@ impl Lms {
     fn step(&mut self, d: Complex<f32>, y: Complex<f32>) {
         let n = self.x.len();
         let e = d - y;
-        let energy: f32 = self.x.iter().map(|v| v.norm_sqr()).sum::<f32>().max(1e-9);
+        let energy: f32 =
+            self.x.iter().map(|v| v.norm_sqr()).sum::<f32>().max(1e-9);
         let g = self.mu / energy;
         for k in 0..n {
             let xk = self.x[(self.pos + n - k) % n];
@@ -462,9 +459,11 @@ impl HfdlDemod {
         // decisions to the nearest valid convolutional codeword, which is
         // exactly the number of channel symbols the Viterbi corrected.
         let recoded = self.viterbi.encode(&bits);
-        let fec_corrected =
-            recoded.iter().zip(vit_in.iter()).filter(|(&c, &y)| (c == 1) != (y > 0.0)).count()
-                as u32;
+        let fec_corrected = recoded
+            .iter()
+            .zip(vit_in.iter())
+            .filter(|(&c, &y)| (c == 1) != (y > 0.0))
+            .count() as u32;
         let payload: Vec<u8> = bits
             .chunks(8)
             .map(|c| c.iter().enumerate().fold(0u8, |b, (i, &v)| b | (v << i)))
@@ -478,7 +477,8 @@ impl HfdlDemod {
         // assumed. `theta` is referenced to a1_pos so it already excludes
         // the +1440 Hz subcarrier (removed upstream by the DDC/derotation).
         let cfo_rad_per_sym = theta + carr_fr;
-        let freq_skew_hz = (cfo_rad_per_sym as f64 * SYMBOL_RATE / std::f64::consts::TAU) as f32;
+        let freq_skew_hz =
+            (cfo_rad_per_sym as f64 * SYMBOL_RATE / std::f64::consts::TAU) as f32;
 
         // EVM-based SNR (HFDL-5): S/N over the post-convergence embedded T
         // training symbols. Only emitted when such symbols were processed
@@ -523,19 +523,14 @@ impl HfdlDemod {
                         for s in &SETTINGS {
                             let bits: Vec<u8> =
                                 (0..127).map(|j| m[(s.m1_shift + j) % 127]).collect();
-                            if let Some((_, metric)) =
-                                self.coherent_with_energy(m1_pos, &bits, theta)
-                            {
+                            if let Some((_, metric)) = self.coherent_with_energy(m1_pos, &bits, theta) {
                                 if best.map(|(b, _)| metric > b).unwrap_or(true) {
                                     best = Some((metric, *s));
                                 }
                             }
                         }
                         #[cfg(feature = "demod-debug")]
-                        eprintln!(
-                            "DBG m1: best {:?}",
-                            best.map(|(m, s)| (m, s.bps, s.double_slot))
-                        );
+                        eprintln!("DBG m1: best {:?}", best.map(|(m, s)| (m, s.bps, s.double_slot)));
                         match best {
                             Some((metric, s)) if metric > CORR_M1 * 0.5 => {
                                 let total = PREAMBLE_SYMS + s.data_segments() * 45;
@@ -573,7 +568,9 @@ impl HfdlDemod {
                             let mut chosen = nominal;
                             'rescue: for dt in [-1.0f64, -0.5, 0.5, 1.0] {
                                 for dth in [0.0f32, -0.007, 0.007, -0.017, 0.017] {
-                                    if let Some(b) = self.finish(a1_pos + dt, theta + dth, s) {
+                                    if let Some(b) =
+                                        self.finish(a1_pos + dt, theta + dth, s)
+                                    {
                                         if clean(&b) {
                                             chosen = Some(b);
                                             break 'rescue;
@@ -591,10 +588,7 @@ impl HfdlDemod {
                     eprintln!("DBG finish: ok={} ", fin.is_some());
                     if let Some(b) = fin {
                         #[cfg(feature = "demod-debug")]
-                        eprintln!(
-                            "DBG payload head: {:02X?}",
-                            &b.payload[..16.min(b.payload.len())]
-                        );
+                        eprintln!("DBG payload head: {:02X?}", &b.payload[..16.min(b.payload.len())]);
                         out.push(b);
                     }
                     self.cursor = end;

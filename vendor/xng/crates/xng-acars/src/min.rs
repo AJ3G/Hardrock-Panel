@@ -63,7 +63,11 @@ pub fn split_downlink(raw_min: &str) -> Option<DownlinkMin> {
     }
     let msg_num: String = raw_min.chars().take(3).collect();
     let msg_num_seq = bytes[3] as char;
-    let seq = if msg_num_seq.is_ascii_uppercase() { Some(msg_num_seq as u8 - b'A') } else { None };
+    let seq = if msg_num_seq.is_ascii_uppercase() {
+        Some(msg_num_seq as u8 - b'A')
+    } else {
+        None
+    };
     Some(DownlinkMin { msg_num, msg_num_seq, seq })
 }
 

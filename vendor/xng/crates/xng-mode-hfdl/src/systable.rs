@@ -200,8 +200,9 @@ impl SystableAssembler {
 
 /// Encode one ground-station record.
 pub fn build_gs_record(gs: &GroundStation) -> Vec<u8> {
-    let coord =
-        |deg: f64| -> u32 { ((deg * (1 << 19) as f64 / 180.0).round() as i32 as u32) & 0xFFFFF };
+    let coord = |deg: f64| -> u32 {
+        ((deg * (1 << 19) as f64 / 180.0).round() as i32 as u32) & 0xFFFFF
+    };
     let (lat, lon) = (coord(gs.lat), coord(gs.lon));
     let mut v = vec![
         gs.gs_id & 0x7F | if gs.utc_sync { 0x80 } else { 0 },
@@ -269,7 +270,9 @@ mod tests {
                 lat: -37.6691,
                 lon: 144.8410,
                 spdu_version: 2,
-                frequencies: vec![GsFrequency { freq_hz: 21_949_000, master_frame_slot: 1 }],
+                frequencies: vec![
+                    GsFrequency { freq_hz: 21_949_000, master_frame_slot: 1 },
+                ],
             },
         ]
     }
@@ -315,7 +318,8 @@ mod tests {
 
     #[test]
     fn reassembly_out_of_order() {
-        let body: Vec<u8> = sample_stations().iter().flat_map(|g| build_gs_record(g)).collect();
+        let body: Vec<u8> =
+            sample_stations().iter().flat_map(|g| build_gs_record(g)).collect();
         let pdus = build_systable_hfnpdus(52, &body, 3);
         let mut asm = SystableAssembler::new();
         assert!(asm.store(52, 2, 3, &pdus[2][5..]).is_none());
@@ -328,7 +332,8 @@ mod tests {
 
     #[test]
     fn version_change_discards_partial_set() {
-        let body: Vec<u8> = sample_stations().iter().flat_map(|g| build_gs_record(g)).collect();
+        let body: Vec<u8> =
+            sample_stations().iter().flat_map(|g| build_gs_record(g)).collect();
         let old = build_systable_hfnpdus(51, &body, 2);
         let new = build_systable_hfnpdus(52, &body, 2);
         let mut asm = SystableAssembler::new();
@@ -350,10 +355,11 @@ mod tests {
     /// Unique temp path so concurrent test runs don't collide (no
     /// tempfile dependency in this crate).
     fn temp_path(tag: &str) -> std::path::PathBuf {
-        let nanos =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        std::env::temp_dir()
-            .join(format!("xng_hfdl_systable_{tag}_{}_{nanos}.json", std::process::id()))
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("xng_hfdl_systable_{tag}_{}_{nanos}.json", std::process::id()))
     }
 
     #[test]

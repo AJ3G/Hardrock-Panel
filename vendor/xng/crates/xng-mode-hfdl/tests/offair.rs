@@ -10,9 +10,11 @@ use xng_mode_hfdl::HfdlChannelDecoder;
 
 #[test]
 fn decodes_real_squitter() {
-    let raw =
-        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/hfdl_21931khz_8s.i16"))
-            .expect("fixture present");
+    let raw = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/hfdl_21931khz_8s.i16"
+    ))
+    .expect("fixture present");
     let samples: Vec<Complex<f32>> = raw
         .chunks_exact(4)
         .map(|b| {
@@ -56,7 +58,10 @@ fn decodes_real_squitter() {
     assert_eq!(slots.len(), 96, "48 octets of reservation data");
     assert_eq!(
         slots,
-        squitters[0].raw[4..52].iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        squitters[0].raw[4..52]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
         "assignment region surfaced verbatim from the off-air bytes"
     );
     // HFDL-5: the demod path stamps the Viterbi corrected-symbol count on

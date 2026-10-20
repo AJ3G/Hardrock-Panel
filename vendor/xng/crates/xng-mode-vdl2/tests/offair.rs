@@ -8,8 +8,11 @@ use xng_mode_vdl2::Vdl2ChannelDecoder;
 
 #[test]
 fn decodes_real_acars() {
-    let raw = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/vdl2_offair_6s.i16"))
-        .expect("fixture present");
+    let raw = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/vdl2_offair_6s.i16"
+    ))
+    .expect("fixture present");
     let samples: Vec<Complex<f32>> = raw
         .chunks_exact(4)
         .map(|b| {

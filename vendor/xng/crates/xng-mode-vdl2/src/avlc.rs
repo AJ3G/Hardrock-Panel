@@ -101,14 +101,10 @@ pub enum Payload {
     /// ACARS over AVLC (information field led by 0xFF).
     Acars,
     /// ATN: CLNP (0x81), ES-IS (0x82), IDRP (0x83).
-    Atn {
-        ipi: u8,
-    },
+    Atn { ipi: u8 },
     Xid,
     Empty,
-    Other {
-        first: u8,
-    },
+    Other { first: u8 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -321,7 +317,8 @@ pub fn parse_xid(info: &[u8]) -> Option<Vec<XidParam>> {
                 XID_GID_PUBLIC => pub_param_name(id),
                 _ => None,
             };
-            let printable = value.len() >= 2 && value.iter().all(|&b| (0x20..0x7F).contains(&b));
+            let printable = value.len() >= 2
+                && value.iter().all(|&b| (0x20..0x7F).contains(&b));
             // Ground-station-list parameters carry 4-octet AVLC addresses:
             // replacement (0x41), GS-address-filter (0x48),
             // alternate (0x82), and system-mask (0xC5).
@@ -393,11 +390,7 @@ pub fn parse_xid(info: &[u8]) -> Option<Vec<XidParam>> {
         }
         pos = end;
     }
-    if params.is_empty() {
-        None
-    } else {
-        Some(params)
-    }
+    if params.is_empty() { None } else { Some(params) }
 }
 
 /// Scan a descrambled, RS-corrected bit stream for AVLC frames.
@@ -600,8 +593,14 @@ mod tests {
     fn sabme_u_command_recognized() {
         // SABME control octet 0x6F (ISO/IEC 13239 §5.5.3.3); 0x7F with
         // the poll bit set must decode identically with poll=true.
-        assert_eq!(parse_control(0x6F), Control::Unnumbered { kind: "SABME", poll: false });
-        assert_eq!(parse_control(0x7F), Control::Unnumbered { kind: "SABME", poll: true });
+        assert_eq!(
+            parse_control(0x6F),
+            Control::Unnumbered { kind: "SABME", poll: false }
+        );
+        assert_eq!(
+            parse_control(0x7F),
+            Control::Unnumbered { kind: "SABME", poll: true }
+        );
     }
 
     #[test]
@@ -668,7 +667,9 @@ mod body_tests {
         // parameter-set-id (0x00) = "V", destination-airport (0x83) = "KSMF".
         // (Destination-airport is parameter 0x83 in the VDL group, per
         // dumpvdl2 xid_vdl_params — NOT 0x42, which is Timer T4.)
-        let info = [0x82, 0xF0, 0x00, 0x09, 0x00, 0x01, b'V', 0x83, 0x04, b'K', b'S', b'M', b'F'];
+        let info = [
+            0x82, 0xF0, 0x00, 0x09, 0x00, 0x01, b'V', 0x83, 0x04, b'K', b'S', b'M', b'F',
+        ];
         let params = parse_xid(&info).expect("params");
         assert_eq!(params.len(), 2);
         assert_eq!(params[0].name, Some("parameter-set-id"));
@@ -798,7 +799,9 @@ mod xid_vdl2_3_tests {
     #[test]
     fn public_group_params_named() {
         // ISO 8885 HDLC parameter set, group 0x80.
-        let info = [0x82, 0x80, 0x00, 0x06, 0x09, 0x02, 0x00, 0x64, 0x0A, 0x00];
+        let info = [
+            0x82, 0x80, 0x00, 0x06, 0x09, 0x02, 0x00, 0x64, 0x0A, 0x00,
+        ];
         // 0x09 = timer-t1-downlink (len 2, value 0x0064 = 100),
         // 0x0A = counter-n2 (len 0).
         let params = parse_xid(&info).unwrap();

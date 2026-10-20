@@ -93,7 +93,9 @@ pub fn parse(text: &str, downlink: bool) -> Option<AcarsApp> {
 
     // First IMI from the table found anywhere in the text wins, but the
     // ground address before it must span exactly the start of the text.
-    let (pos, imi) = IMI_TABLE.iter().find_map(|(pat, imi)| txt.find(pat).map(|p| (p, *imi)))?;
+    let (pos, imi) = IMI_TABLE
+        .iter()
+        .find_map(|(pat, imi)| txt.find(pat).map(|p| (p, *imi)))?;
     if pos != 7 && pos != 4 {
         return None;
     }
@@ -120,20 +122,29 @@ pub fn parse(text: &str, downlink: bool) -> Option<AcarsApp> {
     digest.update(&bytes);
     let crc_ok = digest.finalize() == ARINC_CRC_GOOD;
 
-    let envelope =
-        Envelope { gs_addr: gs_addr.to_owned(), air_reg: air_reg.to_owned(), imi, crc_ok };
+    let envelope = Envelope {
+        gs_addr: gs_addr.to_owned(),
+        air_reg: air_reg.to_owned(),
+        imi,
+        crc_ok,
+    };
     // CRC failure is recorded but does not abort decoding (libacars
     // behavior).
     let body = &bytes[..bytes.len() - 2];
 
     Some(match imi {
-        Imi::Ads | Imi::Dis => {
-            AcarsApp::Adsc { message: adsc::parse(body, downlink, imi == Imi::Dis), envelope }
-        }
+        Imi::Ads | Imi::Dis => AcarsApp::Adsc {
+            message: adsc::parse(body, downlink, imi == Imi::Dis),
+            envelope,
+        },
         Imi::At1 | Imi::Cr1 | Imi::Cc1 | Imi::Dr1 => AcarsApp::Cpdlc {
             // Only AT1 carries ATCDownlink/UplinkMessage; CR1/CC1/DR1 are
             // context-management bodies (different ASN.1, not decoded yet).
-            message: if imi == Imi::At1 { crate::cpdlc::decode(body, downlink) } else { None },
+            message: if imi == Imi::At1 {
+                crate::cpdlc::decode(body, downlink)
+            } else {
+                None
+            },
             envelope,
             payload_hex: body.iter().map(|b| format!("{b:02x}")).collect(),
         },
@@ -178,7 +189,11 @@ mod tests {
                 d.finalize() == ARINC_CRC_GOOD
             })
             .expect("a valid CRC trailer exists");
-        let hex: String = body.iter().chain(&crc_bytes).map(|b| format!("{b:02X}")).collect();
+        let hex: String = body
+            .iter()
+            .chain(&crc_bytes)
+            .map(|b| format!("{b:02X}"))
+            .collect();
         let app = parse(&format!("/MSTEC7X.AT1.N123AB{hex}"), true).expect("parses");
         let AcarsApp::Cpdlc { envelope, message, .. } = &app else {
             panic!("expected CPDLC");

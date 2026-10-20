@@ -25,7 +25,10 @@ pub struct AppInfo {
 
 impl AppInfo {
     pub fn xng() -> Self {
-        Self { name: "xng".to_owned(), version: env!("CARGO_PKG_VERSION").to_owned() }
+        Self {
+            name: "xng".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        }
     }
 }
 

@@ -293,11 +293,7 @@ impl PduParser {
                 return;
             }
             let sizes = (0..n).map(|i| p[6 + i] as usize + 1).collect();
-            (
-                hdr,
-                sizes,
-                json!({ "dir": "downlink", "gs_id": p[1] & 0x7F, "gs_name": gs_name(p[1] & 0x7F), "aircraft_id": p[2] }),
-            )
+            (hdr, sizes, json!({ "dir": "downlink", "gs_id": p[1] & 0x7F, "gs_name": gs_name(p[1] & 0x7F), "aircraft_id": p[2] }))
         } else {
             let n_ac = ((p[0] >> 4) & 0x7) as usize + 1;
             let mut sizes = Vec::new();
@@ -319,11 +315,7 @@ impl PduParser {
                 idx += count;
                 acs.push(json!({ "aircraft_id": ac_id, "lpdus": count }));
             }
-            (
-                idx,
-                sizes,
-                json!({ "dir": "uplink", "gs_id": p[1] & 0x7F, "gs_name": gs_name(p[1] & 0x7F), "aircraft": acs }),
-            )
+            (idx, sizes, json!({ "dir": "uplink", "gs_id": p[1] & 0x7F, "gs_name": gs_name(p[1] & 0x7F), "aircraft": acs }))
         };
         if p.len() < hdr_len + 2 || !fcs_ok(&p[..hdr_len], &p[hdr_len..]) {
             return;
@@ -338,13 +330,7 @@ impl PduParser {
         }
     }
 
-    fn parse_lpdu(
-        &mut self,
-        l: &[u8],
-        who: &serde_json::Value,
-        bps: u32,
-        out: &mut Vec<HfdlEvent>,
-    ) {
+    fn parse_lpdu(&mut self, l: &[u8], who: &serde_json::Value, bps: u32, out: &mut Vec<HfdlEvent>) {
         if l.len() < 3 || !fcs_ok(&l[..l.len() - 2], &l[l.len() - 2..]) {
             return;
         }
@@ -462,13 +448,7 @@ impl PduParser {
         }
     }
 
-    fn parse_hfnpdu(
-        &mut self,
-        h: &[u8],
-        who: &serde_json::Value,
-        bps: u32,
-        out: &mut Vec<HfdlEvent>,
-    ) {
+    fn parse_hfnpdu(&mut self, h: &[u8], who: &serde_json::Value, bps: u32, out: &mut Vec<HfdlEvent>) {
         // Never drop a CRC-valid data LPDU on the floor: when the HFNPDU
         // contents don't parse, emit the envelope with the payload hex
         // (dumphfdl-equivalent behaviour; silent drops cost 4+ frames on
@@ -511,11 +491,14 @@ impl PduParser {
             0xD1 if h.len() >= 47 => {
                 // Performance data — full 47-octet record (dumphfdl
                 // hfnpdu.c performance_data_parse, facts only).
-                let flight: String = h[2..8].iter().map(|&c| (c & 0x7F) as char).collect();
-                let lat =
-                    coordinate(h[8] as u32 | (h[9] as u32) << 8 | ((h[10] as u32 & 0x0F) << 16));
-                let lon =
-                    coordinate((h[10] as u32 >> 4) | (h[11] as u32) << 4 | (h[12] as u32) << 12);
+                let flight: String =
+                    h[2..8].iter().map(|&c| (c & 0x7F) as char).collect();
+                let lat = coordinate(
+                    h[8] as u32 | (h[9] as u32) << 8 | ((h[10] as u32 & 0x0F) << 16),
+                );
+                let lon = coordinate(
+                    (h[10] as u32 >> 4) | (h[11] as u32) << 4 | (h[12] as u32) << 12,
+                );
                 let (hour, min, sec) = utc_hms(u16::from_le_bytes([h[13], h[14]]));
                 let utc_s = u16::from_le_bytes([h[13], h[14]]) as u32 * 2;
                 let utc = json!({ "hour": hour, "min": min, "sec": sec });
@@ -565,11 +548,14 @@ impl PduParser {
                 });
             }
             0xD5 if h.len() >= 15 => {
-                let flight: String = h[2..8].iter().map(|&c| (c & 0x7F) as char).collect();
-                let lat =
-                    coordinate(h[8] as u32 | (h[9] as u32) << 8 | ((h[10] as u32 & 0x0F) << 16));
-                let lon =
-                    coordinate((h[10] as u32 >> 4) | (h[11] as u32) << 4 | (h[12] as u32) << 12);
+                let flight: String =
+                    h[2..8].iter().map(|&c| (c & 0x7F) as char).collect();
+                let lat = coordinate(
+                    h[8] as u32 | (h[9] as u32) << 8 | ((h[10] as u32 & 0x0F) << 16),
+                );
+                let lon = coordinate(
+                    (h[10] as u32 >> 4) | (h[11] as u32) << 4 | (h[12] as u32) << 12,
+                );
                 let (hour, min, sec) = utc_hms(u16::from_le_bytes([h[13], h[14]]));
                 let utc_s = u16::from_le_bytes([h[13], h[14]]) as u32 * 2;
                 let utc = json!({ "hour": hour, "min": min, "sec": sec });
@@ -730,8 +716,14 @@ pub fn build_lpdu_acars(acars_block: &[u8]) -> Vec<u8> {
 
 /// Downlink MPDU wrapping LPDUs.
 pub fn build_mpdu_downlink(gs_id: u8, aircraft_id: u8, lpdus: &[Vec<u8>]) -> Vec<u8> {
-    let mut p =
-        vec![0b0000_0011 | ((lpdus.len() as u8 & 0x0F) << 2), gs_id & 0x7F, aircraft_id, 0, 0, 0];
+    let mut p = vec![
+        0b0000_0011 | ((lpdus.len() as u8 & 0x0F) << 2),
+        gs_id & 0x7F,
+        aircraft_id,
+        0,
+        0,
+        0,
+    ];
     for l in lpdus {
         p.push((l.len() - 1) as u8);
     }
@@ -882,7 +874,8 @@ mod tests {
         let s = with_fcs(p.clone());
         let ev = PduParser::new().parse(&s, 300);
         let d = &ev[0].details;
-        let expect: String = p[4..52].iter().map(|b| format!("{b:02x}")).collect();
+        let expect: String =
+            p[4..52].iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(d["slot_assignment_hex"], expect);
         // 48 octets -> 96 hex chars; boundary is exactly buf[4..52).
         assert_eq!(d["slot_assignment_hex"].as_str().unwrap().len(), 96);
@@ -892,13 +885,7 @@ mod tests {
     #[test]
     fn mpdu_with_acars_roundtrip() {
         let block = xng_acars::block::build(
-            '2',
-            "N471XG",
-            None,
-            "B6",
-            '4',
-            Some("M11A"),
-            Some("UA0042"),
+            '2', "N471XG", None, "B6", '4', Some("M11A"), Some("UA0042"),
             "/BOMASAI.ADS.VT-ANB072501A070A988CA73248F0E5DC10200000F5EE1ABC000102B885E0A19F5",
             false,
         );
@@ -995,7 +982,7 @@ mod tests {
         h[21..23].copy_from_slice(&5u16.to_le_bytes()); // cur_leg freq_search_cnt
         h[23..25].copy_from_slice(&300u16.to_le_bytes()); // prev disabled dur
         h[25..27].copy_from_slice(&60u16.to_le_bytes()); // cur disabled dur
-                                                         // mpdus_rx: 1800=27, 1200=28, 600=29, 300=30.
+        // mpdus_rx: 1800=27, 1200=28, 600=29, 300=30.
         h[27] = 18;
         h[28] = 12;
         h[29] = 6;
@@ -1007,7 +994,7 @@ mod tests {
         h[34] = 4;
         h[35..37].copy_from_slice(&1000u16.to_le_bytes()); // spdus_rx
         h[37] = 9; // spdus_rx_errs
-                   // mpdus_tx 38..42.
+        // mpdus_tx 38..42.
         h[38] = 80;
         h[39] = 70;
         h[40] = 60;
@@ -1075,7 +1062,7 @@ mod tests {
         let mut h = vec![0xFF, 0xD5];
         h.extend_from_slice(b"DLH456"); // flight_id at 2..8
         h.extend_from_slice(&[0u8; 7]); // coord(5) + utc(2) -> fills 8..15
-                                        // Two GS records.
+        // Two GS records.
         let push_gs = |h: &mut Vec<u8>, gs_id: u8, prop: u32, tuned: u32| {
             h.push(gs_id);
             h.push((prop & 0xFF) as u8);

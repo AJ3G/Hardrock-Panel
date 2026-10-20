@@ -59,7 +59,8 @@ pub fn frame_octets(spec: &FrameSpec) -> Vec<u8> {
     chars.extend(&label);
     chars.push(spec.block_id as u8);
 
-    let has_text = !spec.text.is_empty() || spec.msg_num.is_some() || spec.flight.is_some();
+    let has_text =
+        !spec.text.is_empty() || spec.msg_num.is_some() || spec.flight.is_some();
     if has_text {
         chars.push(STX);
         if let Some(m) = spec.msg_num {

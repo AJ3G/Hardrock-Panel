@@ -69,12 +69,7 @@ pub fn burst_symbols(payload: &[u8], s: &Setting) -> Vec<f64> {
 }
 
 /// Render symbols as IQ at `sample_rate` with a carrier offset.
-pub fn modulate(
-    symbols: &[f64],
-    sample_rate: f64,
-    freq_offset_hz: f64,
-    amplitude: f32,
-) -> Vec<Complex<f32>> {
+pub fn modulate(symbols: &[f64], sample_rate: f64, freq_offset_hz: f64, amplitude: f32) -> Vec<Complex<f32>> {
     let sps = sample_rate / SYMBOL_RATE;
     let n = (symbols.len() as f64 * sps).ceil() as usize;
     (0..n)

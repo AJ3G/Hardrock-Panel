@@ -100,15 +100,12 @@ pub fn modulate_iq_gmsk(
         // Abramowitz-Stegun 7.1.26
         let t = 1.0 / (1.0 + 0.3275911 * x.abs());
         let y = 1.0
-            - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
+            - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736)
+                * t
                 + 0.254829592)
                 * t
                 * (-x * x).exp();
-        if x < 0.0 {
-            -y
-        } else {
-            y
-        }
+        if x < 0.0 { -y } else { y }
     };
     // Integrated phase pulse q(t): 0 → 1/2 over the pulse, in bit units.
     let q = |t: f64| -> f64 {
@@ -170,10 +167,5 @@ pub fn burst_iq(
     freq_offset_hz: f64,
     amplitude: f32,
 ) -> Vec<Complex<f32>> {
-    modulate_iq(
-        &hdlc_bits(&wire_bytes_from_message_bits(message_bits)),
-        sample_rate,
-        freq_offset_hz,
-        amplitude,
-    )
+    modulate_iq(&hdlc_bits(&wire_bytes_from_message_bits(message_bits)), sample_rate, freq_offset_hz, amplitude)
 }

@@ -14,30 +14,17 @@ use serde::Serialize;
 #[serde(tag = "frame", rename_all = "snake_case")]
 pub enum MiamFrame {
     SingleTransfer(CorePdu),
-    FileTransferReq {
-        file_id: u16,
-        file_size: u32,
-    },
-    FileTransferAccept {
-        file_id: u16,
-        segment_size: u8,
-    },
+    FileTransferReq { file_id: u16, file_size: u32 },
+    FileTransferAccept { file_id: u16, segment_size: u8 },
     FileSegment {
         file_id: u16,
         segment_id: u16,
         /// CORE-PDU text fragment carried by this segment.
         payload: String,
     },
-    FileTransferAbort {
-        file_id: u16,
-        reason: u8,
-    },
-    XoffInd {
-        file_id: Option<u16>,
-    },
-    XonInd {
-        file_id: Option<u16>,
-    },
+    FileTransferAbort { file_id: u16, reason: u8 },
+    XoffInd { file_id: Option<u16> },
+    XonInd { file_id: Option<u16> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -147,12 +134,17 @@ impl FileReassembler {
                     return None;
                 }
                 // Contiguous from segment 1.
-                let contiguous =
-                    e.parts.keys().copied().zip(1u16..).all(|(have, want)| have == want);
+                let contiguous = e
+                    .parts
+                    .keys()
+                    .copied()
+                    .zip(1u16..)
+                    .all(|(have, want)| have == want);
                 if !contiguous {
                     return None;
                 }
-                let combined: String = e.parts.values().map(String::as_str).collect();
+                let combined: String =
+                    e.parts.values().map(String::as_str).collect();
                 self.pending.remove(&(tail.to_owned(), file_id));
                 core_pdu(&combined)
             }
@@ -294,9 +286,7 @@ fn core_pdu(text: &str) -> Option<CorePdu> {
         body
     };
     pdu.data_len = data.len();
-    if !data.is_empty()
-        && data.iter().all(|&c| c == b'\r' || c == b'\n' || c == b'\t' || (0x20..0x7F).contains(&c))
-    {
+    if !data.is_empty() && data.iter().all(|&c| c == b'\r' || c == b'\n' || c == b'\t' || (0x20..0x7F).contains(&c)) {
         pdu.text = Some(String::from_utf8_lossy(&data).into_owned());
     }
     Some(pdu)
@@ -339,7 +329,11 @@ mod tests {
         );
         assert_eq!(
             parse("S012003abc"),
-            Some(MiamFrame::FileSegment { file_id: 12, segment_id: 3, payload: "abc".into() })
+            Some(MiamFrame::FileSegment {
+                file_id: 12,
+                segment_id: 3,
+                payload: "abc".into()
+            })
         );
         assert_eq!(parse("not miam"), None);
     }
@@ -349,20 +343,21 @@ mod tests {
         // Build a v1 DATA PDU: header (ver 1, type 0), pdu_len, aircraft
         // id, msg_num/ack, compression=DEFLATE, app_type=2-char + CRC32.
         let inner = b"#T2BThis is the embedded MIAM payload";
-        let compressed = miniz_oxide::deflate::compress_to_vec(inner, 6);
+        let compressed =
+            miniz_oxide::deflate::compress_to_vec(inner, 6);
         let mut hdr = vec![0x01u8]; // version 1, pdu_type DATA
         let total = 20 + compressed.len();
         hdr.extend_from_slice(&[(total >> 16) as u8, (total >> 8) as u8, total as u8]);
         hdr.extend_from_slice(b".N12345"); // aircraft id (7)
         hdr.push((42 << 1) | 1); // msg_num 42, ack
-                                 // compression DEFLATE (0x1), encoding ISO5, app_type 0 (2-char):
-                                 // comp = ((h0<<2)|(h1>>6))&7 → h0=0x00, h1=0b01_00_0000
+        // compression DEFLATE (0x1), encoding ISO5, app_type 0 (2-char):
+        // comp = ((h0<<2)|(h1>>6))&7 → h0=0x00, h1=0b01_00_0000
         hdr.push(0x00);
         hdr.push(0x40);
         hdr.extend_from_slice(b"T2"); // app id
         hdr.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // CRC32 (not checked)
-                                                          // Pad both parts to whole base85 words; the pad counts ride in
-                                                          // the two characters after the frame id.
+        // Pad both parts to whole base85 words; the pad counts ride in
+        // the two characters after the frame id.
         let hpad = (4 - hdr.len() % 4) % 4;
         let bpad = (4 - compressed.len() % 4) % 4;
         let mut hdr_p = hdr.clone();

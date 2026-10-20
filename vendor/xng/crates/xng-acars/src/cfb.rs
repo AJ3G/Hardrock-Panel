@@ -66,40 +66,43 @@ pub fn classify(text: &str) -> Option<Cfb> {
 
     // Longest-prefix match so APM_REPORT is not shadowed by a shorter token.
     // Order matters only for the dotted form vs the bare tokens.
-    let (subtype, kind, description): (&str, CfbKind, &str) = if rest.starts_with(".01")
-        || rest.starts_with(".1")
-    {
-        let tok = if rest.starts_with(".01") { ".01" } else { ".1" };
-        (tok, CfbKind::FailureRecord, "Failure/fault/warning record")
-    } else if rest.starts_with("APM_REPORT") {
-        ("APM_REPORT", CfbKind::ApmReport, "Aircraft Performance Monitoring / ACMF snapshot report")
-    } else if rest.starts_with("APM") {
-        ("APM", CfbKind::ApmReport, "Aircraft Performance Monitoring report")
-    } else if rest.starts_with("ATA") {
-        ("ATA", CfbKind::AtaFault, "ATA-chapter fault report")
-    } else if rest.starts_with("FDE") {
-        ("FDE", CfbKind::FlightDeckEffect, "Flight Deck Effect")
-    } else if rest.starts_with("FLR") {
-        ("FLR", CfbKind::RealtimeFailure, "Realtime failure")
-    } else if rest.starts_with("ECT") {
-        ("ECT", CfbKind::EngineStatus, "Engine status / fault report")
-    } else if rest.starts_with("LIGHTS") {
-        ("LIGHTS", CfbKind::Lights, "Lighting status / fault report")
-    } else if rest.starts_with("MIL") {
-        ("MIL", CfbKind::VibrationReport, "Engine spool vibration units report")
-    } else if rest.starts_with("MPF") {
-        ("MPF", CfbKind::MaintenancePlanning, "Maintenance Planning Function")
-    } else if rest.starts_with("PAGE") {
-        ("PAGE", CfbKind::McduPage, "MDC report page")
-    } else if rest.starts_with("WRN") {
-        ("WRN", CfbKind::Warning, "Warning")
-    } else if rest.starts_with("AL") {
-        ("AL", CfbKind::EngineStatus, "Air temperature / FADEC bleed status report")
-    } else {
-        ("", CfbKind::Generic, "Crew Flight Bag message")
-    };
+    let (subtype, kind, description): (&str, CfbKind, &str) =
+        if rest.starts_with(".01") || rest.starts_with(".1") {
+            let tok = if rest.starts_with(".01") { ".01" } else { ".1" };
+            (tok, CfbKind::FailureRecord, "Failure/fault/warning record")
+        } else if rest.starts_with("APM_REPORT") {
+            ("APM_REPORT", CfbKind::ApmReport, "Aircraft Performance Monitoring / ACMF snapshot report")
+        } else if rest.starts_with("APM") {
+            ("APM", CfbKind::ApmReport, "Aircraft Performance Monitoring report")
+        } else if rest.starts_with("ATA") {
+            ("ATA", CfbKind::AtaFault, "ATA-chapter fault report")
+        } else if rest.starts_with("FDE") {
+            ("FDE", CfbKind::FlightDeckEffect, "Flight Deck Effect")
+        } else if rest.starts_with("FLR") {
+            ("FLR", CfbKind::RealtimeFailure, "Realtime failure")
+        } else if rest.starts_with("ECT") {
+            ("ECT", CfbKind::EngineStatus, "Engine status / fault report")
+        } else if rest.starts_with("LIGHTS") {
+            ("LIGHTS", CfbKind::Lights, "Lighting status / fault report")
+        } else if rest.starts_with("MIL") {
+            ("MIL", CfbKind::VibrationReport, "Engine spool vibration units report")
+        } else if rest.starts_with("MPF") {
+            ("MPF", CfbKind::MaintenancePlanning, "Maintenance Planning Function")
+        } else if rest.starts_with("PAGE") {
+            ("PAGE", CfbKind::McduPage, "MDC report page")
+        } else if rest.starts_with("WRN") {
+            ("WRN", CfbKind::Warning, "Warning")
+        } else if rest.starts_with("AL") {
+            ("AL", CfbKind::EngineStatus, "Air temperature / FADEC bleed status report")
+        } else {
+            ("", CfbKind::Generic, "Crew Flight Bag message")
+        };
 
-    Some(Cfb { subtype: subtype.to_owned(), kind, description })
+    Some(Cfb {
+        subtype: subtype.to_owned(),
+        kind,
+        description,
+    })
 }
 
 #[cfg(test)]

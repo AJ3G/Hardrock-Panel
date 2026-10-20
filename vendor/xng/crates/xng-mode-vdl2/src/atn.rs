@@ -10,7 +10,7 @@
 //! spec — hex is preserved).
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
 /// A decoded X.25 packet (ISO 8208 packet layer over AVLC).
@@ -258,7 +258,8 @@ pub fn parse_x25(b: &[u8]) -> Option<X25Packet> {
                     let fac_len = b[fac_pos] as usize;
                     let mut pos = fac_pos + 1 + fac_len;
                     if fac_len > 0 && pos <= b.len() {
-                        pkt.facilities = parse_facilities(&b[fac_pos + 1..fac_pos + 1 + fac_len]);
+                        pkt.facilities =
+                            parse_facilities(&b[fac_pos + 1..fac_pos + 1 + fac_len]);
                     }
                     // SNDCF: on a Call-Request the field is identifier 0xC1,
                     // length, then a value whose 4th octet (after version 1)
@@ -624,8 +625,9 @@ fn parse_esis(b: &[u8]) -> Value {
                 if pos + len > b.len() || len > 20 {
                     break;
                 }
-                addrs
-                    .push(b[pos..pos + len].iter().map(|x| format!("{x:02x}")).collect::<String>());
+                addrs.push(
+                    b[pos..pos + len].iter().map(|x| format!("{x:02x}")).collect::<String>(),
+                );
                 pos += len;
             }
         }
@@ -634,8 +636,9 @@ fn parse_esis(b: &[u8]) -> Value {
             let len = len as usize;
             pos += 1;
             if pos + len <= b.len() && len <= 20 {
-                addrs
-                    .push(b[pos..pos + len].iter().map(|x| format!("{x:02x}")).collect::<String>());
+                addrs.push(
+                    b[pos..pos + len].iter().map(|x| format!("{x:02x}")).collect::<String>(),
+                );
                 pos += len;
             }
         }
@@ -823,8 +826,9 @@ fn parse_idrp_open(b: &[u8]) -> Option<Value> {
         "max_pdu_size": max_pdu_size,
     });
     if 6 + rdi_len <= b.len() {
-        out["src_rdi"] =
-            json!(b[6..6 + rdi_len].iter().map(|x| format!("{x:02x}")).collect::<String>());
+        out["src_rdi"] = json!(
+            b[6..6 + rdi_len].iter().map(|x| format!("{x:02x}")).collect::<String>()
+        );
         // The RIB-Atts-Set, Confed-IDs and auth-mech/auth-data fields
         // follow the source RDI but are variable-length and complex; they
         // remain in the preserved raw hex rather than being guessed at.
@@ -843,7 +847,10 @@ fn parse_idrp_update(b: &[u8]) -> Option<Value> {
         let mut withdrawn = Vec::new();
         for _ in 0..num_withdrawn {
             let id = b.get(pos..pos + 4)?;
-            withdrawn.push(format!("{:08x}", u32::from_be_bytes([id[0], id[1], id[2], id[3]])));
+            withdrawn.push(format!(
+                "{:08x}",
+                u32::from_be_bytes([id[0], id[1], id[2], id[3]])
+            ));
             pos += 4;
         }
         out["withdrawn_routes"] = json!(withdrawn);
@@ -1111,7 +1118,8 @@ fn parse_atn_security_tag(name: u8, v: &[u8]) -> Value {
             if let Some(n) = atn_subnet_name(v[0]) {
                 out["subnet_name"] = json!(n);
             }
-            out["permitted_traffic_types"] = json!(bitfield_names(v[1], atn_traffic_type_name));
+            out["permitted_traffic_types"] =
+                json!(bitfield_names(v[1], atn_traffic_type_name));
         }
         // Supported ATSC classes: typecode 6 or 7, single bitfield octet.
         0x06 | 0x07 if v.len() == 1 => {
@@ -1155,8 +1163,7 @@ fn parse_atn_security_label(b: &[u8]) -> Value {
     if pos + srid_len > b.len() {
         return out;
     }
-    out["reg_id"] =
-        json!(b[pos..pos + srid_len].iter().map(|x| format!("{x:02x}")).collect::<String>());
+    out["reg_id"] = json!(b[pos..pos + srid_len].iter().map(|x| format!("{x:02x}")).collect::<String>());
     pos += srid_len;
     // Security info part (optional): length octet, then tag sets.
     let Some(&sinfo_len) = b.get(pos) else {
@@ -1215,7 +1222,8 @@ fn parse_clnp_options(b: &[u8]) -> Vec<Value> {
                 o["security_label"] = parse_atn_security_label(&v[1..]);
             }
             _ => {
-                o["value_hex"] = json!(v.iter().map(|x| format!("{x:02x}")).collect::<String>());
+                o["value_hex"] =
+                    json!(v.iter().map(|x| format!("{x:02x}")).collect::<String>());
             }
         }
         out.push(o);
@@ -1378,8 +1386,10 @@ impl CotpReassembler {
         // Begin or continue a multi-segment TSDU. A fresh seq-0 fragment
         // (re)starts the buffer; otherwise the seq must match what is expected.
         if seq == 0 {
-            self.pending
-                .insert(dst_ref, CotpPending { data: user.clone(), next_seq: 1, last: now });
+            self.pending.insert(
+                dst_ref,
+                CotpPending { data: user.clone(), next_seq: 1, last: now },
+            );
         } else {
             let entry = self.pending.get_mut(&dst_ref)?;
             if seq != entry.next_seq {
@@ -1499,7 +1509,8 @@ fn parse_cotp_params(b: &[u8]) -> Vec<Value> {
                 p["value"] = json!(u32::from_be_bytes([val[0], val[1], val[2], val[3]]));
             }
             _ => {
-                p["value_hex"] = json!(val.iter().map(|x| format!("{x:02x}")).collect::<String>());
+                p["value_hex"] =
+                    json!(val.iter().map(|x| format!("{x:02x}")).collect::<String>());
             }
         }
         out.push(p);
@@ -1521,7 +1532,11 @@ fn parse_cotp(b: &[u8]) -> Option<Value> {
     }
     let code = *b.get(1)?;
     // dst_ref occupies b[2..4] for every COTP TPDU.
-    let dst_ref = if b.len() >= 4 { Some(u16::from_be_bytes([b[2], b[3]])) } else { None };
+    let dst_ref = if b.len() >= 4 {
+        Some(u16::from_be_bytes([b[2], b[3]]))
+    } else {
+        None
+    };
     // Classify by the high nibble; CR/CC/AK/RJ carry credit in the low
     // nibble (normal format), DT carries the ROA bit in bit 0.
     let high = code & 0xF0;
@@ -1601,7 +1616,8 @@ fn parse_cotp(b: &[u8]) -> Option<Value> {
                     return None;
                 }
                 out["eot"] = json!(b[4] & 0x80 != 0);
-                out["tpdu_seq"] = json!(u32::from_be_bytes([b[4], b[5], b[6], b[7]]) & 0x7FFF_FFFF);
+                out["tpdu_seq"] =
+                    json!(u32::from_be_bytes([b[4], b[5], b[6], b[7]]) & 0x7FFF_FFFF);
                 var_off = 8;
             } else {
                 // code, dst_ref(2), EOT|seq(1).
@@ -1619,7 +1635,8 @@ fn parse_cotp(b: &[u8]) -> Option<Value> {
                 if b.len() < 10 {
                     return None;
                 }
-                out["tpdu_seq"] = json!(u32::from_be_bytes([b[4], b[5], b[6], b[7]]) & 0x7FFF_FFFF);
+                out["tpdu_seq"] =
+                    json!(u32::from_be_bytes([b[4], b[5], b[6], b[7]]) & 0x7FFF_FFFF);
                 out["credit"] = json!(u16::from_be_bytes([b[8], b[9]]));
                 var_off = 10;
             } else {
@@ -1638,7 +1655,8 @@ fn parse_cotp(b: &[u8]) -> Option<Value> {
                 if b.len() < 8 {
                     return None;
                 }
-                out["tpdu_seq"] = json!(u32::from_be_bytes([b[4], b[5], b[6], b[7]]) & 0x7FFF_FFFF);
+                out["tpdu_seq"] =
+                    json!(u32::from_be_bytes([b[4], b[5], b[6], b[7]]) & 0x7FFF_FFFF);
                 var_off = 8;
             } else {
                 // code, dst_ref(2), seq(1).
@@ -1655,7 +1673,8 @@ fn parse_cotp(b: &[u8]) -> Option<Value> {
                 if b.len() < 10 {
                     return None;
                 }
-                out["tpdu_seq"] = json!(u32::from_be_bytes([b[4], b[5], b[6], b[7]]) & 0x7FFF_FFFF);
+                out["tpdu_seq"] =
+                    json!(u32::from_be_bytes([b[4], b[5], b[6], b[7]]) & 0x7FFF_FFFF);
                 out["credit"] = json!(u16::from_be_bytes([b[8], b[9]]));
                 var_off = 10;
             } else {
@@ -1757,8 +1776,8 @@ mod tests {
         b.extend(3u32.to_be_bytes()); // ack
         b.extend([0, 0]); // credits
         b.extend([0u8; 16]); // validation
-                             // body: 1 withdrawn route, attrs: multi-exit-disc(7)=5,
-                             // rd-hop-count(13)=2; NLRI: CLNP, prefix 47.0027 (24 bits)
+        // body: 1 withdrawn route, attrs: multi-exit-disc(7)=5,
+        // rd-hop-count(13)=2; NLRI: CLNP, prefix 47.0027 (24 bits)
         b.extend([0x00, 0x01]); // num withdrawn
         b.extend(0xDEADBEEFu32.to_be_bytes());
         let attrs: &[u8] = &[
@@ -1824,7 +1843,9 @@ mod tests {
     #[test]
     fn idrp_open_body_fields_decode() {
         // OPEN body: version=1, hold-time=90 s, max-PDU=1024, src-RDI len 3.
-        let body: &[u8] = &[0x01, 0x00, 0x5A, 0x04, 0x00, 0x03, 0x47, 0x00, 0x27];
+        let body: &[u8] = &[
+            0x01, 0x00, 0x5A, 0x04, 0x00, 0x03, 0x47, 0x00, 0x27,
+        ];
         let v = parse_network(&idrp_pdu(1, body)).unwrap();
         assert_eq!(v["type"], "OPEN");
         let o = &v["open"];
@@ -2035,8 +2056,8 @@ mod tests {
         let mut b = vec![0x81, 15, 1, 0x3F, 0x1C, 0x00, 0x14, 0x00, 0x00];
         b.extend_from_slice(&[2, 0x47, 0x01]); // dst NSAP
         b.extend_from_slice(&[2, 0x47, 0x02]); // src NSAP
-                                               // COTP DT, normal format: LI=4, code 0xF0, dst_ref=1, EOT|seq=0x80,
-                                               // then user data "HI" (ISO/IEC 8073 §13.7).
+        // COTP DT, normal format: LI=4, code 0xF0, dst_ref=1, EOT|seq=0x80,
+        // then user data "HI" (ISO/IEC 8073 §13.7).
         b.extend_from_slice(&[0x04, 0xF0, 0x00, 0x01, 0x80, b'H', b'I']);
         let v = parse_network(&b).unwrap();
         assert_eq!(v["protocol"], "CLNP");
@@ -2353,7 +2374,7 @@ mod tests {
         ];
         b.extend_from_slice(&[2, 0x47, 0x01]); // dst NSAP
         b.extend_from_slice(&[2, 0x47, 0x02]); // src NSAP
-                                               // segmentation part: pdu_id, segment offset, total length.
+        // segmentation part: pdu_id, segment offset, total length.
         b.extend_from_slice(&pdu_id.to_be_bytes());
         b.extend_from_slice(&seg_offset.to_be_bytes());
         b.extend_from_slice(&total_len.to_be_bytes());

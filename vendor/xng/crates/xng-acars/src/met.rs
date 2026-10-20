@@ -94,11 +94,7 @@ pub fn decode(label: &str, text: &str) -> Option<Met> {
             }
         }
     }
-    if m.is_empty() {
-        None
-    } else {
-        Some(m)
-    }
+    if m.is_empty() { None } else { Some(m) }
 }
 
 #[cfg(test)]

@@ -25,7 +25,7 @@ fn audit_qq_fields_in_json() {
     for chunk in iq.chunks(1024) {
         frames.extend(dec.process(chunk));
     }
-
+    
     let source = Provenance {
         station: xng_types::StationIdentity::new("XX-TEST-ACARS"),
         app: xng_types::AppInfo::xng(),
@@ -34,17 +34,17 @@ fn audit_qq_fields_in_json() {
     };
     let msg = xng_mode_acars::to_message(&frames[0], 131_550_000, -20.0, -55.0, source);
     let MessageBody::Acars(core) = &msg.body else { panic!("not acars") };
-
+    
     println!("\n=== QQ Message Fields ===");
     println!("sublabel: {:?}", core.sublabel);
     println!("mfi: {:?}", core.mfi);
     println!("reassembled: {}", core.reassembled);
-
+    
     if let Some(app_json) = core.app.as_ref() {
         println!("app JSON keys: {:?}", app_json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
         println!("Full JSON:\n{}", serde_json::to_string_pretty(app_json).unwrap());
     }
-
+    
     // Verify expected fields are present
     if let Some(app_json) = core.app.as_ref() {
         assert_eq!(app_json["depa"], "KEWR", "depa should be present");
