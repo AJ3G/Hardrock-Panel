@@ -8,7 +8,9 @@
 //!
 //! `--rate` picks the I/Q rate (one of the DUO's), `--3d` starts with the 3D
 //! FFT over the spectrum, `--scf` with the SCF view on the CW station (`--heat` as a heat map), `--fft N` sets the FFT size, `--height H` the window's height, `--screenshot` saves the
-//! window after a few seconds as a binary PPM and exits. The demo stands in
+//! window after a few seconds as a binary PPM and exits. `--cpu` computes the
+//! spectrum on the CPU instead of the GPU, `--bench` prints the repaint rate
+//! and the I/Q going to the GPU every two seconds. The demo stands in
 //! for the radio: a tune moves the pipeline's receiver, a recentre moves the
 //! synthetic source's centre (its stations move with it, unlike a real band),
 //! and the SPAN key restarts the pipeline at the new rate.
@@ -28,6 +30,7 @@ mod style;
 #[path = "../src/theme.rs"]
 mod theme;
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use eframe::egui;
@@ -48,6 +51,18 @@ struct Demo {
     started: Instant,
     screenshot: Option<String>,
     asked: bool,
+    gpu_sink: Option<Sink>,
+    bench: Option<(Instant, u32)>,
+}
+
+type Sink = Arc<dyn Fn(&[f32], f64, f64) + Send + Sync>;
+
+/// The raw I/Q onto the GPU from the pipeline's thread, as the panel's
+/// receiver taps it.
+fn tap(p: &Pipeline, sink: &Option<Sink>) {
+    if let Some(s) = sink.clone() {
+        p.send(Command::SetIqTap(Some(Box::new(move |iq, c, r| s(iq, c, r)))));
+    }
 }
 
 fn start(scope: &Scope, rate: f64, center_hz: f64, rx_hz: f64, mode: Mode) -> Pipeline {
@@ -64,13 +79,15 @@ fn start(scope: &Scope, rate: f64, center_hz: f64, rx_hz: f64, mode: Mode) -> Pi
 impl Demo {
     fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Demo {
         theme::apply(&cc.egui_ctx);
-        let Args { rate, screenshot, settings } = args;
+        let Args { rate, screenshot, settings, bench } = args;
         // The SCF view starts on the CW station, 300 Hz into its lane.
         let scf = settings.top == scope::settings::TopView::Scf;
         let scope = Scope::new(cc.wgpu_render_state.as_ref(), settings);
         let rx_hz = CENTER_HZ + if scf { -27_100.0 } else { 12_500.0 };
         let mode = Mode::Usb;
         let pipeline = start(&scope, rate, CENTER_HZ, rx_hz, mode);
+        let gpu_sink: Option<Sink> = scope.gpu_iq_sink().map(Arc::from);
+        tap(&pipeline, &gpu_sink);
         Demo {
             scope,
             pipeline,
@@ -83,6 +100,8 @@ impl Demo {
             started: Instant::now(),
             screenshot,
             asked: false,
+            gpu_sink,
+            bench: bench.then(|| (Instant::now(), 0)),
         }
     }
 
@@ -170,6 +189,22 @@ impl eframe::App for Demo {
         if let Some(rate) = out.sample_rate {
             self.rate = rate as f64;
             self.pipeline = start(&self.scope, self.rate, self.center_hz, self.rx_hz, self.mode);
+            tap(&self.pipeline, &self.gpu_sink);
+        }
+        if let Some((t, n)) = self.bench.as_mut() {
+            *n += 1;
+            let dt = t.elapsed().as_secs_f64();
+            if dt >= 2.0 {
+                println!(
+                    "bench: {:.0} kS/s · {} · {:.1} repaints/s · I/Q to the GPU {:.1} MB/s",
+                    self.rate / 1e3,
+                    if self.scope.gpu_fft() { "FFT on GPU" } else { "FFT on CPU" },
+                    *n as f64 / dt,
+                    self.scope.gpu_iq_bytes_per_sec() / 1e6
+                );
+                *t = Instant::now();
+                *n = 0;
+            }
         }
         self.take_screenshot(ui);
         ui.ctx().request_repaint();
@@ -180,10 +215,16 @@ struct Args {
     rate: f64,
     screenshot: Option<String>,
     settings: ScopeSettings,
+    bench: bool,
 }
 
 fn main() -> eframe::Result {
-    let mut a = Args { rate: 192_000.0, screenshot: None, settings: ScopeSettings::default() };
+    let mut a = Args {
+        rate: 192_000.0,
+        screenshot: None,
+        settings: ScopeSettings::default(),
+        bench: false,
+    };
     let mut height = 860.0;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -201,6 +242,8 @@ fn main() -> eframe::Result {
                 height = h.unwrap_or(height);
             }
             "--screenshot" => a.screenshot = args.next(),
+            "--cpu" => a.settings.fft_gpu = false,
+            "--bench" => a.bench = true,
             _ => eprintln!("unknown argument {arg}"),
         }
     }

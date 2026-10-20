@@ -19,7 +19,7 @@
 //!
 //! Every stage computes only the outputs it keeps (the polyphase saving), so
 //! an FIR stage of `n` taps decimating by `m` costs `n/m` multiply-adds per
-//! output. Which is the default, and why, is decision 36 in
+//! output. Which is the default, and why, is decision 38 in
 //! docs/design-decisions.md; the numbers are from this file's tests.
 
 use crate::Complex32;
@@ -413,7 +413,7 @@ mod tests {
             .fold(f64::INFINITY, f64::min)
     }
 
-    /// The table behind decision 36:
+    /// The table behind decision 38:
     /// `cargo test --release -p sdr -- --ignored --nocapture decimator_report`.
     #[test]
     #[ignore]

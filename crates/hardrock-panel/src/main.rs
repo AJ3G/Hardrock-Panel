@@ -201,6 +201,10 @@ impl App {
         let render_state = cc.wgpu_render_state.clone();
         let scope = scope::Scope::new(render_state.as_ref(), saved.scope.clone());
         let rx = rx::Rx::new(&saved.rx);
+        // The raw I/Q onto the GPU for its spectrum, on the pipeline's thread.
+        if let Some(sink) = scope.gpu_iq_sink() {
+            rx.taps.set_iq("scope-gpu", Some(Box::new(move |b| sink(b.iq, b.center, b.rate))));
+        }
         let mut outside = outside::Outside::default();
         outside.apply(&saved.outside, &rx.taps);
         App {

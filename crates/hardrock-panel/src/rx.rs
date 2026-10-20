@@ -129,6 +129,8 @@ pub(crate) const DUO_AUDIO_MAX_RATE: u32 = 192_000;
 pub(crate) struct IqBlock<'a> {
     pub iq: &'a [f32],
     pub rate: f64,
+    /// The span's centre, the radio's own Hz.
+    pub center: f64,
     /// UTC (Unix seconds, system clock) of the first sample.
     pub utc: f64,
 }
@@ -173,13 +175,13 @@ impl Taps {
         }
     }
 
-    fn feed_iq(&self, iq: &[f32], rate: f64) {
+    fn feed_iq(&self, iq: &[f32], center: f64, rate: f64) {
         let v = self.iq.lock().unwrap_or_else(|e| e.into_inner());
         if v.is_empty() {
             return;
         }
         let utc = utc_now() - (iq.len() / 2) as f64 / rate.max(1.0);
-        let b = IqBlock { iq, rate, utc };
+        let b = IqBlock { iq, rate, center, utc };
         for (_, s) in v.iter() {
             s(&b);
         }
@@ -389,7 +391,7 @@ impl Rx {
         };
         let p = Pipeline::spawn(src, cfg);
         let t = self.taps.clone();
-        p.send(Command::SetIqTap(Some(Box::new(move |iq, _, r| t.feed_iq(iq, r)))));
+        p.send(Command::SetIqTap(Some(Box::new(move |iq, c, r| t.feed_iq(iq, c, r)))));
         let t = self.taps.clone();
         p.send(Command::SetAudioTap(Some(Box::new(move |a| t.feed_audio(a)))));
         self.offset_sent = self.rx_hz - self.centre;

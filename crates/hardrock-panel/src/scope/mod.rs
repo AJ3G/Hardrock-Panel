@@ -34,10 +34,24 @@
 //! space to pan, double-click for the whole span, right-click to place a
 //! measurement marker. Nothing tunes while the radio transmits (safety
 //! interlock 9).
+//!
+//! # The FFT on the GPU (decision 37)
+//!
+//! With a GPU that has compute shaders, and "FFT on GPU" (the default), the
+//! raw I/Q goes to the GPU ([`Scope::gpu_iq_sink`], fed on the pipeline's
+//! thread) and the spectrum, its waterfall and 3D rows and the trace are all
+//! computed and drawn there; the pipeline's own spectrum thread is told to
+//! stop. Only the trace's columns, the noise floor and the markers' peaks
+//! come back, a frame or two late. "FFT on CPU" goes back to the
+//! pipeline's spectrum, as before.
 
 pub mod bandplan;
 mod controls;
 pub mod gpu;
+pub mod gpu_fft;
+pub mod gpu_iq;
+mod gpu_run;
+pub mod gpu_spec;
 pub mod levels;
 mod markers;
 mod paint;
@@ -60,11 +74,15 @@ use sdr::{SpectrumFrame, ZoomRequest};
 pub use bandplan::DataMode;
 pub use settings::ScopeSettings;
 
-use markers::Markers;
+use gpu_run::{Ask, GpuRun, TraceGeom};
+use markers::{Exact, ExactPeak, Markers};
 use persistence::Persistence;
 use pointer::{Drag, Wheel};
 use rows::{Rows, Upload};
 use view::{FreqMap, Span, View};
+
+/// The GPU's I/Q tap: `sink(iq, centre Hz, rate)`, interleaved f32.
+pub type IqSink = Box<dyn Fn(&[f32], f64, f64) + Send + Sync>;
 
 /// What the scope needs to know about the radio each frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -164,6 +182,22 @@ pub struct Scope {
     frame_times: VecDeque<f64>,
     xvtr_text: String,
     scf: scf::Scf,
+    /// The GPU spectrum, when the GPU can run one.
+    gpu_run: Option<GpuRun>,
+    /// Its newest peaks at full resolution, its real bin width, and where
+    /// its trace columns are this repaint.
+    exact: Vec<ExactPeak>,
+    bin_hz: f64,
+    trace_geom: Option<TraceGeom>,
+    /// The trace's width last drawn, physical pixels.
+    trace_px: u32,
+    /// The zoom FFT the GPU spectrum runs (worked out after each repaint).
+    gpu_zoom: Option<ZoomRequest>,
+    spectrum_on_sent: Option<bool>,
+    cal_db: f32,
+    /// The 3D surface's floor and ceiling, easing to the scale's.
+    s3_levels: Option<(f32, f32)>,
+    s3_levels_at: f64,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -174,6 +208,9 @@ impl Scope {
     pub fn new(render_state: Option<&RenderState>, mut settings: ScopeSettings) -> Scope {
         settings.sanitise();
         let gpu = render_state.map(gpu::init);
+        let gpu_run = render_state
+            .filter(|_| gpu.is_some_and(|g| g.compute))
+            .map(|rs| GpuRun::new(&rs.device, &rs.queue));
         let tex_w = gpu.map_or(4096, |g| g.tex_w) as usize;
         let xvtr_text = view::fmt_freq(settings.transverter_hz);
         Scope {
@@ -211,7 +248,70 @@ impl Scope {
             frame_times: VecDeque::new(),
             xvtr_text,
             scf: scf::Scf::new(render_state),
+            gpu_run,
+            exact: Vec::new(),
+            bin_hz: 1.0,
+            trace_geom: None,
+            trace_px: 0,
+            gpu_zoom: None,
+            spectrum_on_sent: None,
+            cal_db: 0.0,
+            s3_levels: None,
+            s3_levels_at: 0.0,
         }
+    }
+
+    /// The tap that puts the raw I/Q on the GPU, for the receiver's I/Q
+    /// taps (it is called on the pipeline's thread and never waits): `None`
+    /// without a GPU that can compute the spectrum. Take it once; each call
+    /// starts the GPU's stream afresh.
+    pub fn gpu_iq_sink(&self) -> Option<IqSink> {
+        let run = self.gpu_run.as_ref()?;
+        Some(Box::new(run.iq.sink()))
+    }
+
+    /// The I/Q ring on the GPU, for other GPU views (see [`gpu_iq`]).
+    pub(crate) fn gpu_iq(&self) -> Option<&Arc<gpu_iq::GpuIq>> {
+        self.gpu_run.as_ref().map(|r| &r.iq)
+    }
+
+    /// The spectrum is computed on the GPU.
+    pub fn gpu_fft(&self) -> bool {
+        self.settings.fft_gpu && self.gpu_run.is_some()
+    }
+
+    /// Bytes a second of I/Q going to the GPU lately.
+    pub fn gpu_iq_bytes_per_sec(&self) -> f64 {
+        self.gpu_run.as_ref().map_or(0.0, |r| r.samples_per_sec * 8.0)
+    }
+
+    /// The dBFS to dBm calibration the GPU spectrum uses (the pipeline's
+    /// own comes from [`Scope::spectrum_config`]).
+    pub fn set_calibration_db(&mut self, db: f32) {
+        self.cal_db = db;
+    }
+
+    /// What the markers read: the frame on screen, with the GPU's peaks.
+    fn bins<'a>(&'a self, f: &'a SpectrumFrame) -> Exact<'a> {
+        if self.gpu_fft() {
+            Exact { frame: f, peaks: &self.exact, bin_hz: self.bin_hz }
+        } else {
+            Exact { frame: f, peaks: &[], bin_hz: f.bin_width() }
+        }
+    }
+
+    /// The 3D surface's floor and ceiling: the scale's, eased over a
+    /// fifth of a second so a FIT or a new level grows the surface rather
+    /// than jumps it.
+    fn s3_levels(&mut self, now: f64) -> (f32, f32) {
+        let want = (self.settings.floor_dbm, self.settings.ceil_dbm);
+        let dt = (now - self.s3_levels_at).clamp(0.0, 0.25) as f32;
+        self.s3_levels_at = now;
+        let k = 1.0 - (-dt / 0.2).exp();
+        let (f, c) = self.s3_levels.unwrap_or(want);
+        let eased = (f + (want.0 - f) * k, c + (want.1 - c) * k);
+        self.s3_levels = Some(eased);
+        eased
     }
 
     /// The settings to save.
@@ -314,6 +414,9 @@ impl Scope {
         v: View,
         now: f64,
     ) -> Option<Arc<Upload>> {
+        if self.gpu_fft() {
+            return self.take_gpu(v, now);
+        }
         let mut up = Upload::default();
         let new_main = fresh(&snap.history, snap.generation, &mut self.last_gen);
         let new_zoom = fresh(&snap.zoom_history, snap.zoom_generation, &mut self.last_zgen);
@@ -362,6 +465,57 @@ impl Scope {
             self.rows.clear_surface();
         }
         let _ = span;
+        let up = self.rows.seal(up);
+        (!up.is_empty()).then(|| Arc::new(up))
+    }
+
+    /// [`Scope::take_frames`] with the FFT on the GPU: plan what it runs
+    /// this repaint, and take what came back.
+    fn take_gpu(&mut self, v: View, now: f64) -> Option<Arc<Upload>> {
+        let run = self.gpu_run.as_mut()?;
+        if let Some(r) = run.take_readout() {
+            self.cols.clone_from(&r.frame.db);
+            self.peak_cols = r.frame.peak.clone().unwrap_or_default();
+            self.exact = r.peaks;
+            self.bin_hz = r.bin_hz;
+            let f = Arc::new(r.frame);
+            self.zoom = r.zoom.then(|| f.clone());
+            self.main = Some(f);
+        }
+        // The view's strongest bin, and each tracking marker's.
+        let window = (v.width() / 200.0).max(self.bin_hz * 3.0);
+        let mut queries = vec![(v.lo, v.hi)];
+        for m in self.markers.m.iter().flatten().filter(|m| m.track) {
+            queries.push((m.hz - window, m.hz + window));
+        }
+        let ask = Ask {
+            settings: &self.settings,
+            cal_db: self.cal_db,
+            view: v,
+            zoom: self.gpu_zoom,
+            paused: self.paused,
+            trace_cols: self.trace_px,
+            queries,
+            now,
+            utc: utc_now(),
+        };
+        let mut up = Upload::default();
+        let had = self.rows.wf_count();
+        let planned = run.plan(&ask, &mut self.rows, &mut up);
+        self.trace_geom = planned.trace;
+        if planned.wf_rows > 0 {
+            let gap = (now - self.row_at).clamp(0.0, 0.5);
+            if had > 0 && gap > 0.0 {
+                self.row_interval += (gap / planned.wf_rows as f64 - self.row_interval) * 0.2;
+            }
+            self.row_at = now;
+        }
+        for _ in 0..planned.main_frames {
+            self.frame_times.push_back(now);
+        }
+        while self.frame_times.front().is_some_and(|&t| now - t > 1.0) {
+            self.frame_times.pop_front();
+        }
         let up = self.rows.seal(up);
         (!up.is_empty()).then(|| Arc::new(up))
     }
@@ -445,6 +599,22 @@ impl Scope {
         }
 
         let req = self.zoom_request(snap, cx, px);
+        let on_gpu = self.gpu_fft();
+        if let Some(r) = &self.gpu_run {
+            r.iq.set_enabled(on_gpu);
+        }
+        if self.spectrum_on_sent != Some(!on_gpu) {
+            out.commands.push(sdr::Command::SetSpectrumOn(!on_gpu));
+            self.spectrum_on_sent = Some(!on_gpu);
+            if !on_gpu {
+                // Back to the pipeline's frames: take them from now.
+                self.last_gen = snap.generation;
+                self.last_zgen = snap.zoom_generation;
+            }
+        }
+        // The GPU runs its own zoom FFT; the pipeline's is not needed then.
+        self.gpu_zoom = req;
+        let req = if on_gpu { None } else { req };
         if self.zoom_sent != Some(req) {
             out.commands.push(sdr::Command::SetZoom(req));
             self.zoom_sent = Some(req);

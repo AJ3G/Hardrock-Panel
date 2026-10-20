@@ -76,6 +76,7 @@ pub mod device;
 pub mod error;
 pub mod fpga;
 pub mod handle;
+pub mod priority;
 pub mod protocol;
 pub mod stream;
 pub mod trace;

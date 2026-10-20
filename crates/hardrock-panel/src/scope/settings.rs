@@ -223,6 +223,13 @@ pub struct ScopeSettings {
     pub top: TopView,
     /// 3D drawn as a solid coloured surface (true) or as lines.
     pub solid_3d: bool,
+    /// The solid 3D surface lit and shaded, SDR Console's look (true), or
+    /// flat-coloured as SDRoxide draws it. Needs a GPU with compute.
+    pub lit_3d: bool,
+    /// The spectrum computed on the GPU from the raw I/Q (true), or on the
+    /// CPU by the pipeline's spectrum thread. The GPU's needs compute
+    /// shaders; without them the CPU's is used whatever this says.
+    pub fft_gpu: bool,
     /// 3D rows laid down a second: how deep in time the surface reaches.
     pub surface_rows_per_sec: f32,
     /// The whole scope's height, points.
@@ -281,6 +288,8 @@ impl Default for ScopeSettings {
             palette: Palette::Elad,
             top: TopView::Spectrum,
             solid_3d: true,
+            lit_3d: true,
+            fft_gpu: true,
             surface_rows_per_sec: 16.0,
             height: 420.0,
             split: 0.42,

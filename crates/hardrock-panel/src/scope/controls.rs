@@ -115,7 +115,9 @@ fn press(sc: &mut Scope, k: &str, snap: &sdr::Snapshot, out: &mut ScopeOut) {
         "MKR" => {
             if let Some(f) = sc.shown().cloned() {
                 let v = view::view(super::span_of(snap), sc.want_view);
-                sc.markers.snap_to_peak(&f, v.lo, v.hi);
+                let mut m = sc.markers;
+                m.snap_to_peak(&sc.bins(&f), v.lo, v.hi);
+                sc.markers = m;
             }
         }
         "PAUSE" => sc.paused = !sc.paused,
@@ -170,6 +172,15 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
             if chip(ui, !sc.settings.solid_3d, "Lines").clicked() {
                 sc.settings.solid_3d = false;
             }
+            let can_light = sc.settings.solid_3d && sc.gpu.is_some_and(|g| g.compute);
+            ui.add_enabled_ui(can_light, |ui| {
+                if chip(ui, sc.settings.lit_3d, "Lit")
+                    .on_hover_text("Shade the solid surface by its slopes, as SDR Console does")
+                    .clicked()
+                {
+                    sc.settings.lit_3d = !sc.settings.lit_3d;
+                }
+            });
             ui.add(
                 egui::Slider::new(&mut sc.settings.surface_rows_per_sec, 4.0..=60.0)
                     .text("rows/s")
@@ -290,6 +301,23 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
                 sc.settings.fft_size as f64 / cx.span.width * 1000.0
             ),
         );
+        caption(ui, "· FFT on");
+        let compute = sc.gpu.is_some_and(|g| g.compute);
+        ui.add_enabled_ui(compute, |ui| {
+            if chip(ui, sc.settings.fft_gpu && compute, "GPU")
+                .on_hover_text("The raw I/Q goes to the GPU and the spectrum is computed there")
+                .on_disabled_hover_text("This GPU has no compute shaders: the CPU computes it")
+                .clicked()
+            {
+                sc.settings.fft_gpu = true;
+            }
+        });
+        if chip(ui, !(sc.settings.fft_gpu && compute), "CPU")
+            .on_hover_text("The pipeline's spectrum thread computes it")
+            .clicked()
+        {
+            sc.settings.fft_gpu = false;
+        }
     });
     ui.horizontal_wrapped(|ui| {
         caption(ui, "Window");
@@ -330,7 +358,9 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
         if chip(ui, false, "To peak").clicked()
             && let Some(f) = sc.shown().cloned()
         {
-            sc.markers.snap_to_peak(&f, cx.view.lo, cx.view.hi);
+            let mut m = sc.markers;
+            m.snap_to_peak(&sc.bins(&f), cx.view.lo, cx.view.hi);
+            sc.markers = m;
         }
         if chip(ui, false, "Clear").clicked() {
             sc.markers.clear();
