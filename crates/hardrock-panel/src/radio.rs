@@ -159,6 +159,11 @@ fn prefs_id() -> egui::Id {
     egui::Id::new("radio-window-prefs")
 }
 
+/// The transverter LO set in the radio window, in Hz; 0 when none is set.
+pub(crate) fn xvtr_hz(ctx: &egui::Context) -> i64 {
+    ctx.data_mut(|d| d.get_persisted::<RadioPrefs>(prefs_id())).map_or(0, |p| p.xvtr_hz)
+}
+
 fn ui_id() -> egui::Id {
     egui::Id::new("radio-window-ui")
 }

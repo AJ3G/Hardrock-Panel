@@ -347,11 +347,17 @@ impl App {
     /// Keep the amplifier's band on the radio's, when asked to. The link holds
     /// each change until the amplifier shows no RF (interlock 3); this side
     /// also waits while the radio says it is transmitting.
-    fn follow_band(&mut self, amp: &AmpStatus, rig: Option<&RigStatus>) {
+    fn follow_band(&mut self, amp: &AmpStatus, rig: Option<&RigStatus>, xvtr_hz: i64) {
         let reconnected = amp.connected && !self.amp_was_connected;
         self.amp_was_connected = amp.connected;
         let (Some(link), Some(rig)) = (&self.link, rig) else { return };
         if !self.saved.rig.follow_band || !amp.connected || !rig.connected {
+            return;
+        }
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #3): with a transverter
+        // the radio's dial is an IF, not the band on the air, so the
+        // amplifier's band is left as the operator set it.
+        if xvtr_hz != 0 {
             return;
         }
         let Some(hz) = rig.freq_hz else { return };
@@ -432,7 +438,7 @@ impl eframe::App for App {
         let ctx = &ui.ctx().clone();
         let mut st = self.status();
         let rig = self.rig.as_ref().map(RigLink::status);
-        self.follow_band(&st, rig.as_ref());
+        self.follow_band(&st, rig.as_ref(), radio::xvtr_hz(ctx));
         // The amplifier as it reports itself, before the radio's readings
         // fill it in: what TUNE's interlocks (#6) judge by.
         let amp_raw = st.clone();
