@@ -45,6 +45,8 @@ enum Msg {
     TuneAlive,
     /// Unkey, and why.
     TuneStop(Option<String>),
+    /// Change settings: these frames in order, each read back after.
+    Set(Vec<Frame>),
 }
 
 /// A running link to the radio. Dropping it unkeys any TUNE and closes the
@@ -114,6 +116,16 @@ impl RigLink {
 
     pub fn tune_alive(&self) {
         self.send(Msg::TuneAlive);
+    }
+
+    /// Change the radio's settings (the dial, the mode, a menu): the frames
+    /// from [`crate::Protocol`]'s `set_*` methods, sent in order and each
+    /// read back. Refused while the radio transmits (interlock #5); the
+    /// reason is in [`RigStatus::set_note`].
+    pub fn set(&self, frames: Vec<Frame>) {
+        if !frames.is_empty() {
+            self.send(Msg::Set(frames));
+        }
     }
 
     /// Unkey the TUNE carrier. `why` is shown when it wasn't the operator.
@@ -378,6 +390,25 @@ fn worker(
     }
 }
 
+/// The READ that shows what a SET did: the same command letters, except
+/// that RIT's offset is read as `RV` and the clear and the CW keys have none.
+fn read_back(proto: &dyn Protocol, set: &Frame) -> Option<Frame> {
+    let text = String::from_utf8_lossy(&set.bytes);
+    let k = text.get(..2)?;
+    let cmd = match k {
+        "RC" | "RU" | "RD" => "RV;".to_string(),
+        "SW" | "CM" => return None,
+        _ => proto
+            .controls()
+            .iter()
+            .find(|c| c.cmd == k)
+            .map(|c| c.read.to_string())
+            .unwrap_or_else(|| format!("{k};")),
+    };
+    let f = Frame::read(cmd);
+    proto.allowed(&f).then_some(f)
+}
+
 /// The TUNE carrier, as the link keeps it.
 struct TuneState {
     tuning: Tuning,
@@ -500,6 +531,53 @@ fn run<P: Read + Write>(
             }
             // One at a time.
             Ok(Msg::TuneStart(..)) => {}
+            Ok(Msg::Set(frames)) => {
+                for f in frames {
+                    // SAFETY INTERLOCK (docs/safety-interlocks.md, #5): no
+                    // setting changes, and no stored CW message starts, while
+                    // the radio transmits or a TUNE of ours runs. Unkeying
+                    // frames are always let through.
+                    let busy = tune.is_some()
+                        || status.lock().unwrap_or_else(|e| e.into_inner()).transmitting();
+                    if busy && f.kind != FrameKind::Unkey {
+                        let what = String::from_utf8_lossy(&f.bytes).to_string();
+                        info!("rigcat: not sent while transmitting: {what}");
+                        set(status, |s| {
+                            s.set_note = Some("Not changed: the radio is transmitting.".into())
+                        });
+                        break;
+                    }
+                    if !matches!(
+                        f.kind,
+                        FrameKind::SetSetting | FrameKind::KeyCw | FrameKind::Unkey
+                    ) {
+                        warn!("rigcat: Set carries a {:?} frame; not sent", f.kind);
+                        continue;
+                    }
+                    match rig.send(&f) {
+                        Ok(()) => set(status, |s| s.set_note = None),
+                        Err(e) => {
+                            warn!("rigcat: set: {e:?}");
+                            set(status, |s| {
+                                s.set_note =
+                                    Some(format!("Not sent: {}", String::from_utf8_lossy(&f.bytes)))
+                            });
+                            continue;
+                        }
+                    }
+                    // Read it back: the radio doesn't acknowledge a set, so
+                    // the panel shows what the read says it took.
+                    if let Some(rb) = read_back(rig.proto.as_ref(), &f) {
+                        let res = rig.query(&rb);
+                        let strays = std::mem::take(&mut rig.strays);
+                        set(status, |s| {
+                            for r in strays.iter().chain(res.as_ref().ok()) {
+                                rig.proto.apply(s, r);
+                            }
+                        });
+                    }
+                }
+            }
             Ok(Msg::TuneAlive) => {
                 if let Some(t) = &mut tune {
                     t.alive = Instant::now();
@@ -632,6 +710,10 @@ mod tests {
         pending: String,
         /// Menu 32 is on the microphone.
         mic: bool,
+        /// `GI` says the radio is transmitting.
+        on_air: bool,
+        /// Receiving: no trusted forward power.
+        quiet: bool,
     }
 
     impl Write for FakeDuo {
@@ -641,6 +723,7 @@ mod tests {
                 let cmd: String = self.pending.drain(..=i).collect();
                 let reply = match cmd.as_str() {
                     "FA;" => Some("FA00014074000;"),
+                    "FP;" if self.quiet => Some("FP!000000;"),
                     "FP;" => Some("FP 006091;"),
                     "RP;" => Some("RP 000001;"),
                     "WR;" => Some("WR0 01.02;"),
@@ -648,6 +731,9 @@ mod tests {
                     "MD;" => Some("MD2;"),
                     "TI;" if self.mic => Some("TI0;"),
                     "TI;" => Some("TI1;"),
+                    "GI;" if self.on_air => Some("GI0000012000000;"),
+                    "GI;" => Some("GI0000002000000;"),
+                    c if c.starts_with("FA0") || c.starts_with("MD") && c.len() == 4 => None,
                     c if c.starts_with("TP") || ["TX2;", "TX;", "TI1;", "RX;"].contains(&c) => None,
                     _ => Some("?;"),
                 };
@@ -688,8 +774,14 @@ mod tests {
     #[test]
     fn a_frame_not_on_the_list_never_reaches_the_radio() {
         let mut r = rig();
-        for f in ["TX0;", "TX1;", "RC;", "AN2;", "TI0;"] {
+        for f in ["TX0;", "TX1;", "RC;", "AN2;", "TI0;", "DF15214;", "SE1;"] {
             assert!(matches!(r.send(&Frame::new(f, FrameKind::Key)), Err(Error::NotAllowed)));
+        }
+        for f in ["DF15214;", "SE1;", "UU1;", "BR0;", "TX0;"] {
+            assert!(matches!(
+                r.send(&Frame::new(f, FrameKind::SetSetting)),
+                Err(Error::NotAllowed)
+            ));
         }
         // An ordinary transmission is on the list, but not without its checks.
         let tx = Frame::new("TX;", FrameKind::KeyAudio);
@@ -835,5 +927,33 @@ mod tests {
         let sent = h.join().unwrap();
         assert!(!sent.iter().any(|c| c == "TX;"));
         assert!(sent.contains(&"TI1;".to_string()));
+    }
+
+    #[test]
+    fn a_setting_is_sent_and_read_back_between_transmissions_only() {
+        let d = FdmDuo::default();
+        let (tx, _st, h) = running_on(FakeDuo { quiet: true, ..Default::default() });
+        thread::sleep(Duration::from_millis(300));
+        tx.send(Msg::Set(vec![d.set_freq(crate::Vfo::A, 7_074_000).unwrap()])).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        drop(tx);
+        let sent = h.join().unwrap();
+        let i = sent.iter().position(|f| f == "FA00007074000;").expect("sent");
+        assert_eq!(sent[i + 1], "FA;", "read back straight after");
+
+        // SAFETY INTERLOCK #5: not while the radio says it transmits.
+        let (tx, st, h) = running_on(FakeDuo { on_air: true, quiet: true, ..Default::default() });
+        thread::sleep(Duration::from_millis(1300));
+        assert_eq!(st.lock().unwrap().tx_state, Some(1));
+        tx.send(Msg::Set(vec![
+            d.set_freq(crate::Vfo::A, 7_074_000).unwrap(),
+            d.cw_stop().unwrap(),
+        ]))
+        .unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert!(st.lock().unwrap().set_note.as_deref().unwrap_or("").contains("transmitting"));
+        drop(tx);
+        let sent = h.join().unwrap();
+        assert!(!sent.iter().any(|f| f.starts_with("FA0")), "{sent:?}");
     }
 }

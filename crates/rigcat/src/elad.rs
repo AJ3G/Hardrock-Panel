@@ -18,14 +18,19 @@ pub const DEFAULT_BAUD: u32 = 38_400;
 /// Read while transmitting and between: forward power, reflected power, SWR.
 pub const TELEMETRY: [&str; 3] = ["FP;", "RP;", "WR;"];
 
-/// Read once a second: the dial and the mode.
-pub const DIAL: [&str; 2] = ["FA;", "MD;"];
+/// Read once a second: the dial, VFO B, the mode, and `GI`, which carries
+/// receive or transmit, the VFO, split and RIT in one answer.
+pub const DIAL: [&str; 4] = ["FA;", "FB;", "MD;", "GI;"];
 
 /// Asked to see whether the radio is there at all.
 pub const PING: &str = "FA;";
 
+use std::sync::OnceLock;
+
 use crate::RigStatus;
-use crate::protocol::{Frame, FrameKind, Incoming, Item, PowerStep, Protocol, Reply};
+use crate::protocol::{
+    Control, Frame, FrameKind, Group, Incoming, Item, Kind, PowerStep, Protocol, Reply, Vfo,
+};
 
 const fn item(cmd: &'static str, menu: Option<u8>, name: &'static str) -> Item {
     Item { cmd, menu, name }
@@ -50,9 +55,527 @@ pub const SETTINGS: &[Item] = &[
     item("SM0;", None, "S-meter"),
 ];
 
+const fn ctl(
+    cmd: &'static str,
+    read: &'static str,
+    prefix: &'static str,
+    menu: Option<u8>,
+    name: &'static str,
+    what: &'static str,
+    group: Group,
+    kind: Kind,
+) -> Control {
+    Control { cmd, read, prefix, menu, name, what, group, kind }
+}
+
+const fn range(lo: i32, hi: i32, step: i32, width: usize, unit: &'static str) -> Kind {
+    Kind::Range { lo, hi, step, width, unit }
+}
+
+const OFF_ON: Kind = Kind::Toggle;
+const RO: Kind = Kind::ReadOnly;
+use Group::{Cw, Info, Menu, Radio, Receive, Tune, TxAudio};
+
+/// The power steps by code, for `TL` (menu 55) as well as `TP`.
+const POWER_CHOICES: &[(&str, &str)] = &[
+    ("0", "0.3 W"),
+    ("1", "0.5 W"),
+    ("2", "1 W"),
+    ("3", "1.2 W"),
+    ("4", "1.5 W"),
+    ("5", "2 W"),
+    ("6", "3 W"),
+    ("7", "4 W"),
+    ("8", "5 W"),
+    ("9", "MAX"),
+];
+
+/// Every setting of the FDM-DUO the panel shows, from the command table in
+/// §6 of ELAD's manual (v2.13 for the list and menu numbers, rev 2.3 for the
+/// value tables; see docs/design-decisions.md). Where the manual leaves the
+/// value's encoding unclear the control is read only until it is checked on
+/// a radio. Factory reset (`DF`), service mode (`SE`), firmware update
+/// (`UU`), a CAT baud change (`BR`) and IQ transmit (`IQ`) are not here and
+/// can't be sent (interlock #5). Kenwood's commands that the DUO accepts and
+/// ignores (`AG`, `RG`, `VX`, `PC`, `IS`, `SH`/`SL` and the rest) are left
+/// out, so no control looks as if it works when it doesn't.
+pub const CONTROLS: &[Control] = &[
+    // Radio face
+    ctl("AT", "AT;", "", Some(1), "RX ATT", "Receiver input attenuator", Radio, OFF_ON),
+    ctl("LP", "LP;", "", Some(2), "RX LP", "Receiver low-pass filter", Radio, OFF_ON),
+    ctl(
+        "AN",
+        "AN;",
+        "",
+        Some(31),
+        "ANTENNAS",
+        "One antenna on RTX, or receive on the RX socket too",
+        Radio,
+        Kind::Choice(&[("1", "1: RTX for both"), ("2", "2: RX socket for receive")]),
+    ),
+    ctl(
+        "TI",
+        "TI;",
+        "",
+        Some(32),
+        "TX IN",
+        "Where transmit audio comes from in SSB, AM and FM",
+        Radio,
+        Kind::Choice(&[("0", "Microphone"), ("1", "USB audio"), ("2", "Auto")]),
+    ),
+    ctl("RT", "RT;", "", None, "RIT", "Receiver offset on or off", Radio, OFF_ON),
+    ctl(
+        "SP",
+        "SP;",
+        "",
+        None,
+        "SPLIT",
+        "Transmit on VFO B",
+        Radio,
+        Kind::Choice(&[("0", "Off"), ("1", "On (remote)"), ("2", "On (stand-alone)")]),
+    ),
+    ctl(
+        "FR",
+        "FR;",
+        "",
+        None,
+        "VFO",
+        "Which VFO or memory the radio uses",
+        Radio,
+        Kind::Choice(&[("0", "A"), ("1", "B"), ("2", "Memory")]),
+    ),
+    // Receive: the radio's own audio
+    ctl(
+        "VM",
+        "VM;",
+        "",
+        None,
+        "VOLUME",
+        "The radio's main volume",
+        Receive,
+        range(0, 100, 1, 3, ""),
+    ),
+    ctl(
+        "VA",
+        "VA;",
+        "",
+        Some(6),
+        "AUX VOL",
+        "Auxiliary audio output volume",
+        Receive,
+        range(0, 100, 1, 3, ""),
+    ),
+    ctl(
+        "GC",
+        "GC;",
+        "",
+        None,
+        "AGC",
+        "AGC, or manual gain",
+        Receive,
+        Kind::Choice(&[("0", "AGC"), ("1", "Manual")]),
+    ),
+    ctl(
+        "GS",
+        "GS;",
+        "",
+        None,
+        "AGC SPEED / GAIN",
+        "AGC speed, or the manual gain level",
+        Receive,
+        RO,
+    ),
+    ctl("NB", "NB;", "", None, "NB", "Noise blanker", Receive, OFF_ON),
+    ctl(
+        "NK",
+        "NK;",
+        "0",
+        None,
+        "NB LEVEL",
+        "Noise blanker level, 0 off",
+        Receive,
+        range(0, 10, 1, 2, ""),
+    ),
+    ctl("NR", "NR;", "", None, "NR", "Noise reduction", Receive, OFF_ON),
+    ctl(
+        "NC",
+        "NC;",
+        "0",
+        None,
+        "NR LEVEL",
+        "Noise reduction level, 0 off",
+        Receive,
+        range(0, 10, 1, 2, ""),
+    ),
+    ctl("NO", "NO;", "0", None, "NOTCH", "Automatic notch, 0 off", Receive, range(0, 2, 1, 2, "")),
+    ctl("SQ", "SQ;", "0", None, "SQUELCH", "Squelch, 0 off", Receive, range(0, 10, 1, 2, "")),
+    ctl("RF", "RF;", "", None, "RX FILTER", "Receive filter, per mode", Receive, RO),
+    ctl(
+        "MT",
+        "MT;",
+        "",
+        Some(8),
+        "MUTE IN TX",
+        "Mute the receiver while sending CW (first) and SSB (second)",
+        Receive,
+        Kind::Choice(&[("00", "Neither"), ("10", "CW"), ("01", "SSB"), ("11", "CW and SSB")]),
+    ),
+    ctl(
+        "BP",
+        "BP;",
+        "",
+        Some(10),
+        "FILBYPASS",
+        "Bypass the receive pre-selection filters",
+        Receive,
+        OFF_ON,
+    ),
+    ctl(
+        "AX",
+        "AX;",
+        "",
+        Some(50),
+        "TX ATT",
+        "Keep the attenuator in during transmit",
+        Receive,
+        OFF_ON,
+    ),
+    // CW
+    ctl("CS", "CS;", "", Some(45), "CW SPEED", "Keyer and decoder speeds", Cw, RO),
+    ctl("PI", "PI;", "", None, "CW PITCH", "CW pitch", Cw, range(0, 1000, 10, 4, "Hz")),
+    ctl("VT", "VT;", "", Some(11), "TONE VOL", "CW sidetone volume", Cw, range(0, 100, 1, 3, "")),
+    ctl(
+        "IA",
+        "IA;",
+        "",
+        Some(41),
+        "IAMBIC",
+        "Iambic mode",
+        Cw,
+        Kind::Choice(&[("0", "A"), ("1", "B")]),
+    ),
+    ctl(
+        "KT",
+        "KT;",
+        "",
+        Some(39),
+        "PADDLE",
+        "Paddle wiring: key on tip or ring, tip dot or dash",
+        Cw,
+        RO,
+    ),
+    ctl(
+        "CI",
+        "CI;",
+        "",
+        Some(37),
+        "CW IN",
+        "Key, paddle, or either with DTR",
+        Cw,
+        Kind::Choice(&[("0", "Key"), ("1", "Paddle"), ("2", "Key + DTR"), ("3", "Paddle + DTR")]),
+    ),
+    ctl("CD", "CD;", "", Some(38), "CW DELAY", "Break-in delay", Cw, range(0, 1000, 10, 4, "ms")),
+    ctl(
+        "HT",
+        "HT;",
+        "",
+        Some(71),
+        "HOLD TIME",
+        "Key hold time",
+        Cw,
+        range(200, 2500, 100, 4, "ms"),
+    ),
+    ctl(
+        "ET",
+        "ET;",
+        "",
+        Some(72),
+        "REPEAT",
+        "Key auto-repeat interval",
+        Cw,
+        range(100, 1500, 100, 4, "ms"),
+    ),
+    ctl(
+        "CK",
+        "CK;",
+        "",
+        Some(59),
+        "AUTO CW",
+        "Switch to CW when the key is pressed",
+        Cw,
+        Kind::Choice(&[("0", "Off"), ("1", "On, then back"), ("2", "On, stay in CW")]),
+    ),
+    ctl("DE", "DE;", "", Some(44), "CW DECODER", "CW decoder", Cw, OFF_ON),
+    ctl("WT", "WT;", "", Some(43), "DECODE THR", "CW decoder threshold", Cw, RO),
+    // Transmit audio and the transmitter
+    ctl(
+        "TE",
+        "TE;",
+        "",
+        Some(30),
+        "TX ENABLE",
+        "Allow the radio to transmit at all",
+        TxAudio,
+        OFF_ON,
+    ),
+    ctl(
+        "TT",
+        "TT;",
+        "",
+        Some(33),
+        "TX OUT",
+        "Full power on the antenna, or 0 dBm on RF OUT",
+        TxAudio,
+        Kind::Choice(&[("0", "Antenna"), ("1", "0 dBm RF OUT")]),
+    ),
+    ctl(
+        "TB",
+        "TB;",
+        "0",
+        Some(35),
+        "TX BW",
+        "Transmit audio bandwidth",
+        TxAudio,
+        Kind::Choice(&[
+            ("00", "50-4000"),
+            ("01", "100-2700"),
+            ("02", "100-3000"),
+            ("03", "100-3500"),
+            ("04", "100-4000"),
+            ("05", "200-2700"),
+            ("06", "200-3000"),
+            ("07", "200-3500"),
+            ("08", "200-4000"),
+            ("09", "300-2700"),
+            ("10", "300-3000"),
+            ("11", "300-3500"),
+            ("12", "300-4000"),
+        ]),
+    ),
+    ctl(
+        "MG",
+        "MG;",
+        "",
+        Some(36),
+        "MIC GAIN",
+        "Microphone gain: 50 is 0 dB, half a dB a step",
+        TxAudio,
+        range(26, 74, 1, 3, ""),
+    ),
+    ctl(
+        "NT",
+        "NT;",
+        "0",
+        Some(51),
+        "NOISE GATE",
+        "Transmit noise gate, 0 off",
+        TxAudio,
+        range(0, 10, 1, 2, ""),
+    ),
+    ctl(
+        "CG",
+        "CG;",
+        "0",
+        Some(52),
+        "COMP",
+        "Speech compression, 0 off",
+        TxAudio,
+        range(0, 10, 1, 3, ""),
+    ),
+    ctl(
+        "FD",
+        "FD;",
+        "0",
+        Some(53),
+        "FM DEV",
+        "FM transmit deviation",
+        TxAudio,
+        Kind::Choice(&[("0", "2.5 kHz"), ("1", "5 kHz")]),
+    ),
+    // TUNE and PTT
+    ctl(
+        "TL",
+        "TL;",
+        "",
+        Some(55),
+        "TUNE POWER",
+        "Power of the radio's TUNE carrier",
+        Tune,
+        Kind::Choice(POWER_CHOICES),
+    ),
+    ctl("TU", "TU;", "", Some(49), "TUNE TIME", "How long the radio's TUNE lasts", Tune, RO),
+    ctl(
+        "PT",
+        "PT;",
+        "",
+        Some(56),
+        "TUNE PTT",
+        "Key PTT OUT, and so the amplifier, during the radio's TUNE",
+        Tune,
+        OFF_ON,
+    ),
+    ctl(
+        "PD",
+        "PD;",
+        "",
+        Some(57),
+        "PTT DELAY",
+        "PTT OUT before RF in SSB, AM and FM, for the amplifier's relay",
+        Tune,
+        range(0, 1000, 10, 4, "ms"),
+    ),
+    ctl(
+        "TC",
+        "TC;",
+        "",
+        Some(58),
+        "PTT ON CW",
+        "What the microphone's PTT does in CW",
+        Tune,
+        Kind::Choice(&[("0", "Prepare a CW message"), ("1", "Key PTT OUT")]),
+    ),
+    ctl("TR", "TR;", "", Some(54), "RTS", "Key PTT from the CAT port's RTS", Tune, RO),
+    // Everything else in MENU
+    ctl("SA", "SA;", "", Some(3), "SNAP", "Round the dial to the tuning step", Menu, RO),
+    ctl("TH", "TH;", "", Some(4), "AGC TH", "AGC threshold", Menu, RO),
+    ctl("QS", "QS;", "", Some(7), "QUICKSTEP", "Tuning step for QuickStep", Menu, RO),
+    ctl("FM", "FM;", "", Some(14), "FM MODE", "Offer FM in the mode cycle", Menu, OFF_ON),
+    ctl("RN", "RN;", "", Some(15), "RIT STEP", "RIT tuning step", Menu, RO),
+    ctl("TM", "TM;", "", Some(16), "VFO TRACK", "VFO tracking", Menu, RO),
+    ctl(
+        "TV",
+        "TV;",
+        "",
+        Some(47),
+        "TX VIEW",
+        "What the display shows while transmitting",
+        Menu,
+        RO,
+    ),
+    ctl("UD", "UD;", "", Some(48), "UP/DN ACC", "Microphone UP/DOWN acceleration", Menu, RO),
+    ctl(
+        "OS",
+        "OS;",
+        "",
+        Some(60),
+        "OFFSET",
+        "Show the dial with a transverter offset",
+        Menu,
+        OFF_ON,
+    ),
+    ctl("OV", "OV;", "", Some(61), "OFFSET VALUE", "The transverter offset", Menu, RO),
+    ctl("FF", "FF;", "", Some(62), "F4 / F5", "What the F4 and F5 keys do", Menu, RO),
+    ctl(
+        "BH",
+        "BH;",
+        "",
+        Some(73),
+        "TX BACKLIGHT",
+        "Change the backlight colour in transmit",
+        Menu,
+        OFF_ON,
+    ),
+    ctl("LB", "LB;", "", None, "BACKLIGHT RGB", "The backlight colour for each state", Menu, RO),
+    // Read only
+    ctl("DT", "DT;", "", None, "MODEL", "Radio type", Info, RO),
+    ctl("VS", "VS;", "", Some(84), "FIRMWARE", "Firmware versions", Info, RO),
+    ctl("SN", "SN;", "", Some(83), "SERIAL", "Serial number", Info, RO),
+    ctl(
+        "BR",
+        "BR;",
+        "",
+        Some(70),
+        "CAT BAUD",
+        "CAT baud rate; changing it here would cut the link",
+        Info,
+        Kind::Choice(&[("0", "9600"), ("1", "38400"), ("2", "57600"), ("3", "115200")]),
+    ),
+    ctl("TP", "TP;", "", Some(34), "TX POWER", "Transmit power (the 1W/3W/5W/MAX keys)", Tune, RO),
+];
+
+/// Controls that can't be sent whatever their kind says: `BR` would cut the
+/// link the panel talks over.
+const NEVER_SET: &[&str] = &["BR"];
+
+pub fn control(cmd: &str) -> Option<&'static Control> {
+    CONTROLS.iter().find(|c| c.cmd == cmd)
+}
+
+/// Everything read every few seconds: the settings above plus the RIT offset,
+/// filters and memories' channel.
+fn all_settings() -> &'static [Item] {
+    static ALL: OnceLock<Vec<Item>> = OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut v: Vec<Item> = SETTINGS.to_vec();
+        for c in CONTROLS {
+            if !v.iter().any(|i| i.cmd == c.read) {
+                v.push(Item { cmd: c.read, menu: c.menu, name: c.name });
+            }
+        }
+        v.push(item("RV;", None, "RIT offset"));
+        v.push(item("MC;", None, "Memory channel"));
+        v.push(item("RI;", None, "RSSI"));
+        v
+    })
+}
+
+/// SAFETY INTERLOCK (docs/safety-interlocks.md, #5): the SET frames the link
+/// may send beyond those in [`allowed`]'s first list: the dial (`FA`/`FB`,
+/// eleven digits, inside the radio's 9 kHz to 54 MHz), the mode, split, the
+/// VFO, RIT, a receive filter from the radio's tables, a memory recall, a
+/// stored CW message's text, start (`KeyCw`) and stop, and the controls in
+/// [`CONTROLS`] with a value their kind allows. The link sends none of them
+/// while the radio transmits.
+pub fn allowed_set(frame: &str) -> bool {
+    let Some(body) = frame.strip_suffix(';') else { return false };
+    if body.len() < 2 || !body.is_char_boundary(2) {
+        return false;
+    }
+    let (k, v) = body.split_at(2);
+    match k {
+        "FA" | "FB" => parse_freq(v).is_some_and(|hz| (9_000..=54_000_000).contains(&hz)),
+        "MD" => matches!(v, "1" | "2" | "3" | "4" | "5" | "7"),
+        "RC" => v.is_empty(),
+        "RU" | "RD" => v.len() == 5 && v.parse::<u32>().is_ok_and(|n| n <= 50_000),
+        "RF" => {
+            let mut c = v.chars();
+            let m = c.next();
+            let idx: Option<u32> = c.as_str().parse().ok().filter(|_| c.as_str().len() == 2);
+            match (m, idx) {
+                (Some('1' | '2'), Some(i)) => i <= 21,
+                (Some('3' | '7'), Some(i)) => (7..=16).contains(&i),
+                (Some('5'), Some(i)) => i <= 7,
+                (Some('4'), Some(i)) => i <= 2,
+                _ => false,
+            }
+        }
+        "MC" => v.len() == 3 && v.parse::<u16>().is_ok_and(|n| n < 200),
+        "CM" => {
+            v.len() == 33
+                && v.as_bytes()[0].is_ascii_digit()
+                && v[1..].chars().all(crate::protocol::cw_char)
+        }
+        "SW" => is_cw_send(frame) || frame == CW_STOP,
+        _ => !NEVER_SET.contains(&k) && control(k).is_some_and(|c| c.accepts(v)),
+    }
+}
+
+/// Stop a stored CW message.
+pub const CW_STOP: &str = "SW0000;";
+
+/// `SW0nn1;`: send stored CW message nn (1 to 10).
+pub fn is_cw_send(frame: &str) -> bool {
+    frame.len() == 7
+        && frame.starts_with("SW0")
+        && frame.ends_with("1;")
+        && frame[3..5].parse::<u8>().is_ok_and(|n| (1..=10).contains(&n))
+}
+
 /// Whether `frame` is one of the READ frames above.
 pub fn is_read(frame: &str) -> bool {
-    TELEMETRY.contains(&frame) || DIAL.contains(&frame) || SETTINGS.iter().any(|i| i.cmd == frame)
+    TELEMETRY.contains(&frame)
+        || DIAL.contains(&frame)
+        || all_settings().iter().any(|i| i.cmd == frame)
 }
 
 /// The radio's own TUNE carrier: `TX2;`.
@@ -64,7 +587,7 @@ pub const UNKEY: &str = "RX;";
 /// Menu 32 `TX IN` to the USB audio input.
 pub const USB_AUDIO: &str = "TI1;";
 
-/// Whether `frame` may be sent at all.
+/// Whether `frame` may be sent at all, as `kind`.
 ///
 /// SAFETY INTERLOCK (docs/safety-interlocks.md, #5): the link sends only the
 /// READ frames above, menu 34's power steps (`TP00;` to `TP09;`), the TUNE
@@ -73,13 +596,17 @@ pub const USB_AUDIO: &str = "TI1;";
 /// `RC;` clears the RIT offset with no parameter at all, so "a bare command
 /// is a read" is not safe. When the carrier may be keyed is interlock #6;
 /// `TX;` also needs interlock #7, in the link.
-pub fn allowed(frame: &str) -> bool {
-    is_read(frame)
-        || frame == TUNE
-        || frame == KEY_AUDIO
-        || frame == UNKEY
-        || frame == USB_AUDIO
-        || (0..=TX_POWER_MAX).any(|c| frame == format!("TP{c:02};"))
+pub fn allowed(frame: &str, kind: FrameKind) -> bool {
+    match kind {
+        FrameKind::Read => is_read(frame),
+        FrameKind::SetPower => (0..=TX_POWER_MAX).any(|c| frame == format!("TP{c:02};")),
+        FrameKind::Key => frame == TUNE,
+        FrameKind::KeyAudio => frame == KEY_AUDIO,
+        FrameKind::SetInput => frame == USB_AUDIO,
+        FrameKind::Unkey => frame == UNKEY || frame == CW_STOP,
+        FrameKind::SetSetting => allowed_set(frame) && !frame.starts_with("SW"),
+        FrameKind::KeyCw => is_cw_send(frame),
+    }
 }
 
 /// The share of full transmit audio, as a power fraction, that Drive 100%
@@ -292,7 +819,7 @@ pub fn describe(prefix: &str, body: &str) -> Option<String> {
         }),
         // Shown as the radio gives them.
         "DT" | "VS" => Some(body.trim().to_string()),
-        _ => None,
+        k => control(k).map(|c| c.label(c.value_of(body))),
     }
 }
 
@@ -316,7 +843,7 @@ impl Protocol for FdmDuo {
     }
 
     fn settings(&self) -> &'static [Item] {
-        SETTINGS
+        all_settings()
     }
 
     fn read(&self, item: &Item) -> Frame {
@@ -354,8 +881,24 @@ impl Protocol for FdmDuo {
             "MD" => s.mode = b.chars().next().and_then(mode_name),
             "TP" => s.power_code = b.trim().parse().ok().filter(|c| *c <= TX_POWER_MAX),
             "TI" => s.tx_input = describe("TI", b),
+            "FB" => s.freq_b_hz = parse_freq(b).or(s.freq_b_hz),
+            "SP" => s.split = b.trim().parse::<u8>().ok().map(|v| v != 0),
+            "FR" => s.vfo = b.trim().parse().ok(),
+            "RT" => s.rit_on = b.trim().parse::<u8>().ok().map(|v| v != 0),
+            "GI" => {
+                // P1 RIT, P2, P3 memory (3), P4 RX/TX/TUNE, P5 mode, P6 VFO,
+                // P7 split, P8 (4).
+                let c: Vec<char> = b.chars().collect();
+                if c.len() >= 9 {
+                    s.rit_on = c[0].to_digit(10).map(|v| v != 0);
+                    s.tx_state = c[5].to_digit(10).map(|v| v as u8);
+                    s.vfo = c[7].to_digit(10).map(|v| v as u8);
+                    s.split = c[8].to_digit(10).map(|v| v != 0);
+                }
+            }
             _ => {}
         }
+        s.values.insert(r.key.clone(), b.to_string());
     }
 
     fn describe(&self, r: &Reply) -> Option<String> {
@@ -367,7 +910,7 @@ impl Protocol for FdmDuo {
     }
 
     fn allowed(&self, frame: &Frame) -> bool {
-        std::str::from_utf8(&frame.bytes).is_ok_and(allowed)
+        std::str::from_utf8(&frame.bytes).is_ok_and(|f| allowed(f, frame.kind))
     }
 
     fn power_steps(&self) -> &'static [PowerStep] {
@@ -426,6 +969,116 @@ impl Protocol for FdmDuo {
     fn audio_ceiling(&self) -> f32 {
         AUDIO_CEILING
     }
+
+    fn controls(&self) -> &'static [Control] {
+        CONTROLS
+    }
+
+    fn set_control(&self, c: &Control, value: &str, last: Option<&str>) -> Result<Frame, String> {
+        if NEVER_SET.contains(&c.cmd) {
+            return Err(format!("{} isn't changed from the panel", c.name));
+        }
+        let last = last.map(|l| c.value_of(l));
+        Ok(Frame::new(format!("{}{};", c.cmd, c.encode(value, last)?), FrameKind::SetSetting))
+    }
+
+    fn set_freq(&self, vfo: Vfo, hz: u64) -> Option<Frame> {
+        let k = if vfo == Vfo::A { "FA" } else { "FB" };
+        (9_000..=54_000_000)
+            .contains(&hz)
+            .then(|| Frame::new(format!("{k}{hz:011};"), FrameKind::SetSetting))
+    }
+
+    fn set_mode(&self, mode: &str) -> Option<Frame> {
+        let d = match mode {
+            "LSB" => '1',
+            "USB" => '2',
+            "CW" => '3',
+            "FM" => '4',
+            "AM" => '5',
+            "CW-R" | "CWR" => '7',
+            _ => return None,
+        };
+        Some(Frame::new(format!("MD{d};"), FrameKind::SetSetting))
+    }
+
+    fn modes(&self) -> &'static [&'static str] {
+        &["LSB", "USB", "CW", "CW-R", "AM", "FM"]
+    }
+
+    fn select_vfo(&self, vfo: Vfo) -> Option<Frame> {
+        Some(Frame::new(if vfo == Vfo::A { "FR0;" } else { "FR1;" }, FrameKind::SetSetting))
+    }
+
+    /// `SP1;` (split, remote) on, and `SP0;`, the only way off: `FR0;`
+    /// doesn't cancel it.
+    fn set_split(&self, on: bool) -> Option<Frame> {
+        Some(Frame::new(if on { "SP1;" } else { "SP0;" }, FrameKind::SetSetting))
+    }
+
+    fn set_rit(&self, hz: i32) -> Vec<Frame> {
+        let n = hz.unsigned_abs().min(50_000);
+        if n == 0 {
+            return vec![Frame::new("RC;", FrameKind::SetSetting)];
+        }
+        let k = if hz > 0 { "RU" } else { "RD" };
+        vec![
+            Frame::new("RC;", FrameKind::SetSetting),
+            Frame::new(format!("{k}{n:05};"), FrameKind::SetSetting),
+        ]
+    }
+
+    fn set_rit_on(&self, on: bool) -> Option<Frame> {
+        Some(Frame::new(if on { "RT1;" } else { "RT0;" }, FrameKind::SetSetting))
+    }
+
+    fn filters(&self, mode: &str) -> Vec<u32> {
+        filter_table(mode).into_iter().map(|(_, w)| w).collect()
+    }
+
+    fn set_filter(&self, mode: &str, hz: u32) -> Option<Frame> {
+        let d = self.set_mode(mode)?.bytes[2] as char;
+        let (idx, _) = filter_table(mode).into_iter().min_by_key(|(_, w)| w.abs_diff(hz))?;
+        Some(Frame::new(format!("RF{d}{idx:02};"), FrameKind::SetSetting))
+    }
+
+    fn recall_memory(&self, n: u16) -> Option<Frame> {
+        (n < 200).then(|| Frame::new(format!("MC{n:03};"), FrameKind::SetSetting))
+    }
+
+    fn cw_send(&self, n: u8) -> Option<Frame> {
+        (1..=10).contains(&n).then(|| Frame::new(format!("SW0{n:02}1;"), FrameKind::KeyCw))
+    }
+
+    fn cw_stop(&self) -> Option<Frame> {
+        Some(Frame::new(CW_STOP, FrameKind::Unkey))
+    }
+
+    fn cw_store(&self, n: u8, text: &str) -> Option<Frame> {
+        let t = text.to_ascii_uppercase();
+        ((1..=10).contains(&n)
+            && t.chars().count() <= 32
+            && t.chars().all(crate::protocol::cw_char))
+        .then(|| Frame::new(format!("CM{}{t:<32};", n - 1), FrameKind::SetSetting))
+    }
+}
+
+/// `RF`'s index and width in Hz for a mode, narrowest first. FM's three
+/// positions aren't widths, so FM has none here.
+fn filter_table(mode: &str) -> Vec<(u32, u32)> {
+    let mut v: Vec<(u32, u32)> = match mode {
+        "LSB" | "USB" => RF_SSB_HZ
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (i as u32, *w))
+            .chain(RF_SSB_DATA_HZ.iter().copied())
+            .collect(),
+        "CW" | "CW-R" | "CWR" => RF_CW.to_vec(),
+        "AM" => RF_AM_HZ.iter().enumerate().map(|(i, w)| (i as u32, *w)).collect(),
+        _ => Vec::new(),
+    };
+    v.sort_by_key(|(_, w)| *w);
+    v
 }
 
 #[cfg(test)]
@@ -435,13 +1088,23 @@ mod tests {
 
     #[test]
     fn only_reads_menu_34_menu_32_to_usb_and_keying_can_be_sent() {
-        // The microphone as input, a cleared RIT, or any other setting: never.
+        use FrameKind::*;
+        // Keying only as what it is; settings only as settings.
         for f in ["TX0;", "TX1;", "RC;", "AN1;", "TI0;", "TI2;", "FA00014074000;", "TP10;", "TP9;"]
         {
-            assert!(!allowed(f), "{f} must be refused");
+            for k in [Key, KeyAudio, SetPower, SetInput, Unkey, KeyCw, Read] {
+                assert!(!allowed(f, k), "{f} must be refused as {k:?}");
+            }
         }
-        for f in ["TX2;", "TX;", "TI1;", "RX;", "TP00;", "TP08;", "TP09;"] {
-            assert!(allowed(f), "{f}");
+        for (f, k) in [
+            ("TX2;", Key),
+            ("TX;", KeyAudio),
+            ("TI1;", SetInput),
+            ("RX;", Unkey),
+            ("TP00;", SetPower),
+            ("TP09;", SetPower),
+        ] {
+            assert!(allowed(f, k), "{f}");
             assert!(!is_read(f));
         }
         let d = FdmDuo::default();
@@ -527,5 +1190,142 @@ mod tests {
         assert!(d.audio_ready(&s).unwrap_err().contains("CW"));
         d.apply(&mut s, &r("MD", "1"));
         assert_eq!(d.audio_ready(&s), Ok(()));
+    }
+
+    #[test]
+    fn settings_go_only_as_settings_and_only_with_values_their_controls_take() {
+        use FrameKind::*;
+        for f in [
+            "FA00014074000;",
+            "FB00007074000;",
+            "MD2;",
+            "MD7;",
+            "SP0;",
+            "SP1;",
+            "FR1;",
+            "RC;",
+            "RU00500;",
+            "RD12000;",
+            "RF213;",
+            "RF313;",
+            "RF507;",
+            "MC042;",
+            "AT1;",
+            "AN2;",
+            "TI0;",
+            "VM050;",
+            "NK005;",
+            "MG050;",
+            "PD0030;",
+            "TL9;",
+            "PT0;",
+            "TB005;",
+            "CG0003;",
+            "HT1200;",
+            "MT11;",
+        ] {
+            assert!(allowed(f, SetSetting), "{f}");
+            assert!(!allowed(f, Key) && !allowed(f, KeyAudio), "{f}");
+        }
+        for f in [
+            // Factory reset, service mode, firmware update, IQ transmit, baud.
+            "DF15214;",
+            "SE1;",
+            "UU1;",
+            "IQ1;",
+            "BR3;",
+            // Kenwood look-alikes the DUO ignores.
+            "AG0100;",
+            "RG100;",
+            "VX1;",
+            "PC050;",
+            // Off the dial, the wrong width, values the control doesn't take.
+            "FA00000001000;",
+            "FA00060000000;",
+            "FA14074000;",
+            "MD6;",
+            "MD0;",
+            "RF222;",
+            "MC200;",
+            "RU60000;",
+            "MG080;",
+            "PD2000;",
+            "HT1250;",
+            "AT2;",
+            "TB013;",
+            // Read-only controls.
+            "TU030;",
+            "QS05;",
+            "GS02;",
+        ] {
+            assert!(!allowed(f, SetSetting), "{f} must be refused");
+        }
+        // A stored CW message transmits: only as KeyCw, and stop as Unkey.
+        assert!(allowed("SW0031;", KeyCw) && !allowed("SW0031;", SetSetting));
+        assert!(!allowed("SW0111;", KeyCw) && !allowed("SW0001;", KeyCw));
+        assert!(allowed(CW_STOP, Unkey) && !allowed(CW_STOP, SetSetting));
+    }
+
+    #[test]
+    fn the_set_frames_are_the_ones_the_table_allows() {
+        let d = FdmDuo::default();
+        let ok = |f: Option<Frame>| {
+            let f = f.unwrap();
+            assert!(d.allowed(&f), "{:?}", String::from_utf8_lossy(&f.bytes));
+            String::from_utf8(f.bytes).unwrap()
+        };
+        assert_eq!(ok(d.set_freq(Vfo::A, 14_074_000)), "FA00014074000;");
+        assert_eq!(ok(d.set_freq(Vfo::B, 7_038_600)), "FB00007038600;");
+        assert!(d.set_freq(Vfo::A, 60_000_000).is_none());
+        assert_eq!(ok(d.set_mode("CW-R")), "MD7;");
+        assert_eq!(ok(d.set_split(false)), "SP0;");
+        assert_eq!(ok(d.set_filter("USB", 2450)), "RF208;");
+        assert_eq!(ok(d.set_filter("USB", 290)), "RF219;");
+        assert_eq!(ok(d.set_filter("CW", 480)), "RF313;");
+        assert_eq!(ok(d.recall_memory(7)), "MC007;");
+        assert_eq!(ok(d.cw_send(3)), "SW0031;");
+        assert_eq!(ok(d.cw_stop()), "SW0000;");
+        assert_eq!(ok(d.cw_store(1, "cq de aj3g")), format!("CM0{:<32};", "CQ DE AJ3G"));
+        let rit: Vec<String> = d
+            .set_rit(-1200)
+            .into_iter()
+            .map(|f| {
+                assert!(d.allowed(&f));
+                String::from_utf8(f.bytes).unwrap()
+            })
+            .collect();
+        assert_eq!(rit, ["RC;", "RD01200;"]);
+        // A number is padded to the width the radio answered with.
+        let pd = control("PD").unwrap();
+        assert_eq!(
+            String::from_utf8(d.set_control(pd, "30", Some("0000")).unwrap().bytes).unwrap(),
+            "PD0030;"
+        );
+        let cg = control("CG").unwrap();
+        assert_eq!(
+            String::from_utf8(d.set_control(cg, "3", Some("0000")).unwrap().bytes).unwrap(),
+            "CG0003;"
+        );
+        assert!(d.set_control(control("BR").unwrap(), "3", None).is_err());
+        assert!(d.set_control(control("TU").unwrap(), "30", None).is_err());
+        for c in CONTROLS {
+            assert!(is_read(c.read), "{} must be readable", c.cmd);
+        }
+    }
+
+    #[test]
+    fn gi_carries_transmit_vfo_split_and_rit() {
+        let d = FdmDuo::default();
+        let mut s = RigStatus::default();
+        d.apply(&mut s, &Reply { key: "GI".into(), body: "1000012110000".into() });
+        assert_eq!(
+            (s.rit_on, s.tx_state, s.vfo, s.split),
+            (Some(true), Some(1), Some(1), Some(true))
+        );
+        assert!(s.transmitting());
+        d.apply(&mut s, &Reply { key: "GI".into(), body: "0000002000000".into() });
+        assert_eq!(s.tx_state, Some(0));
+        assert!(!s.transmitting());
+        assert_eq!(s.value("GI"), Some("0000002000000"));
     }
 }

@@ -12,7 +12,7 @@ mod link;
 pub mod protocol;
 
 pub use link::RigLink;
-pub use protocol::{Frame, FrameKind, Item, PowerStep, Protocol, Reply};
+pub use protocol::{Control, Frame, FrameKind, Group, Item, Kind, PowerStep, Protocol, Reply, Vfo};
 
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -154,6 +154,19 @@ pub struct RigStatus {
     pub tune_note: Option<String>,
     pub settings: Vec<SettingRow>,
     pub settings_read: Option<Instant>,
+    /// VFO B, where the panel's receiver sits for transmit (see
+    /// docs/design-decisions.md).
+    pub freq_b_hz: Option<u64>,
+    pub split: Option<bool>,
+    /// The receive VFO: 0 A, 1 B, 2 memory.
+    pub vfo: Option<u8>,
+    pub rit_on: Option<bool>,
+    /// What the radio says it is doing: 0 receive, 1 transmit, 2 TUNE.
+    pub tx_state: Option<u8>,
+    /// The last answer to every command, by its letters, without them.
+    pub values: std::collections::BTreeMap<String, String>,
+    /// Why the last change asked for wasn't made.
+    pub set_note: Option<String>,
 }
 
 impl RigStatus {
@@ -163,6 +176,18 @@ impl RigStatus {
     /// amplifier's DRV.
     pub fn keyed(&self) -> bool {
         self.fwd.is_some_and(|p| p.valid && p.w > 0.0)
+    }
+
+    /// Whether the radio may be transmitting: it says so, it reports power,
+    /// or a TUNE of ours is running. Settings are not changed then
+    /// (interlock #5).
+    pub fn transmitting(&self) -> bool {
+        self.tuning.is_some() || self.keyed() || self.tx_state.is_some_and(|t| t != 0)
+    }
+
+    /// The radio's last answer for `cmd`, without the letters.
+    pub fn value(&self, cmd: &str) -> Option<&str> {
+        self.values.get(cmd).map(|s| s.as_str())
     }
 
     /// Forward watts, where the radio trusts them.
