@@ -45,6 +45,7 @@ pub mod palette;
 mod persistence;
 pub mod pointer;
 mod rows;
+pub mod scf;
 pub mod settings;
 pub mod view;
 
