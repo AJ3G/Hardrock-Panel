@@ -20,6 +20,8 @@ links.workspace = true
 decoders.workspace = true
 datalink.workspace = true
 crossbeam-channel.workspace = true
+# The CPU end of the scope's I/Q ring to the GPU.
+rtrb.workspace = true
 half = "2.7.1"
 bytemuck = "1.25.2"
 serialport = { version = "4.10", default-features = false }
@@ -39,3 +41,6 @@ eframe = { version = "0.36.1", default-features = false, features = [
 [dev-dependencies]
 # Parses and validates the scope's WGSL in the tests, with no GPU.
 naga = { version = "30.0.1", features = ["wgsl-in"] }
+# The GPU spectrum's tests: a headless device, and the FFT to check it by.
+pollster = "1.0.1"
+rustfft.workspace = true

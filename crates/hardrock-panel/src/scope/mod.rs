@@ -38,6 +38,9 @@
 pub mod bandplan;
 mod controls;
 pub mod gpu;
+pub mod gpu_fft;
+pub mod gpu_iq;
+pub mod gpu_spec;
 pub mod levels;
 mod markers;
 mod paint;
