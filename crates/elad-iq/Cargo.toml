@@ -1,0 +1,18 @@
+[package]
+name = "elad-iq"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure-Rust ELAD FDM-DUO / FDM-S1 / FDM-S2 USB I/Q driver, ported from SDRoxide"
+
+# Native-only ELAD support over USB through `nusb`: no libusb, no gr-elad, no C.
+[dependencies]
+crossbeam-channel.workspace = true
+num-complex.workspace = true
+rtrb.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+nusb.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

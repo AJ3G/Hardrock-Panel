@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/hardrock", "crates/rigcat", "crates/hardrock-panel"]
+members = [
+    "crates/hardrock",
+    "crates/rigcat",
+    "crates/hardrock-panel",
+    "crates/elad-iq",
+    "crates/sdr",
+]
 default-members = ["crates/hardrock-panel"]
 
 [workspace.package]
@@ -19,6 +25,15 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 crossbeam-channel = "0.5"
+elad-iq = { path = "crates/elad-iq" }
+sdr = { path = "crates/sdr" }
+# The panadapter's USB driver and DSP, both ported from SDRoxide.
+nusb = "0.2.7"
+rtrb = "0.4.0"
+thiserror = "2"
+num-complex = "0.4.6"
+rustfft = "6.4.1"
+cpal = "0.18.2"
 
 [profile.release]
 lto = "thin"
