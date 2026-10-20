@@ -73,6 +73,117 @@ pub(crate) struct RxSettings {
     /// The receiver's mode, as `sdr::Mode::label` names it, and passband.
     pub mode: String,
     pub passband: (f32, f32),
+    /// How the receiver decimates, filters and levels (decisions 38, 39).
+    pub dsp: DspSettings,
+}
+
+/// The receiver's DSP choices (decision 38), as SETTINGS → Receiver keeps
+/// them: the decimator, the passband's shape, the listening AGC and the
+/// decoders' AGC target.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DspSettings {
+    pub decimator: Decimator,
+    pub shape: Shape,
+    pub agc_attack_ms: f32,
+    pub agc_decay_ms: f32,
+    pub agc_hang_ms: f32,
+    pub agc_target_dbfs: f32,
+    pub decoder_target_dbfs: f32,
+}
+
+impl Default for DspSettings {
+    fn default() -> Self {
+        let l = sdr::AgcParams::listening(sdr::AgcMode::Med);
+        DspSettings {
+            decimator: Decimator::CicFir,
+            shape: Shape::Sharp,
+            agc_attack_ms: l.attack_ms,
+            agc_decay_ms: l.decay_ms,
+            agc_hang_ms: l.hang_ms,
+            agc_target_dbfs: l.target_dbfs,
+            decoder_target_dbfs: sdr::AgcParams::DECODER.target_dbfs,
+        }
+    }
+}
+
+/// [`sdr::DecimatorKind`], as kept between runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Decimator {
+    HalfBand,
+    #[default]
+    #[serde(other)]
+    CicFir,
+}
+
+/// [`sdr::FilterShape`], as kept between runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Shape {
+    Soft,
+    BrickWall,
+    #[default]
+    #[serde(other)]
+    Sharp,
+}
+
+impl Decimator {
+    pub(crate) const ALL: [Decimator; 2] = [Decimator::CicFir, Decimator::HalfBand];
+
+    pub(crate) fn kind(self) -> sdr::DecimatorKind {
+        match self {
+            Decimator::HalfBand => sdr::DecimatorKind::HalfBand,
+            Decimator::CicFir => sdr::DecimatorKind::CicFir,
+        }
+    }
+}
+
+impl Shape {
+    pub(crate) const ALL: [Shape; 3] = [Shape::Soft, Shape::Sharp, Shape::BrickWall];
+
+    pub(crate) fn kind(self) -> sdr::FilterShape {
+        match self {
+            Shape::Soft => sdr::FilterShape::Soft,
+            Shape::Sharp => sdr::FilterShape::Sharp,
+            Shape::BrickWall => sdr::FilterShape::BrickWall,
+        }
+    }
+
+    /// The audio delay the shape costs, ms, as measured (decision 38).
+    pub(crate) fn delay_ms(self) -> u32 {
+        match self {
+            Shape::Soft => 9,
+            Shape::Sharp => 24,
+            Shape::BrickWall => 64,
+        }
+    }
+}
+
+impl DspSettings {
+    /// The listening AGC's parameters.
+    pub(crate) fn agc(&self) -> sdr::AgcParams {
+        sdr::AgcParams {
+            attack_ms: self.agc_attack_ms,
+            decay_ms: self.agc_decay_ms,
+            hang_ms: self.agc_hang_ms,
+            target_dbfs: self.agc_target_dbfs,
+            ..sdr::AgcParams::listening(sdr::AgcMode::Med)
+        }
+    }
+
+    /// The decoders' AGC: its slow preset, at the chosen target.
+    pub(crate) fn decoder_agc(&self) -> sdr::AgcParams {
+        sdr::AgcParams { target_dbfs: self.decoder_target_dbfs, ..sdr::AgcParams::DECODER }
+    }
+
+    /// The commands that put these on a running pipeline.
+    pub(crate) fn commands(&self) -> [Command; 4] {
+        [
+            Command::SetDecimator(self.decimator.kind()),
+            Command::SetFilterShape(self.shape.kind()),
+            Command::SetAgcParams(self.agc()),
+            Command::SetDecoderAgc(self.decoder_agc()),
+        ]
+    }
 }
 
 impl Default for RxSettings {
@@ -88,6 +199,7 @@ impl Default for RxSettings {
             centre_hz: 14_200_000.0,
             mode: "USB".into(),
             passband: Mode::Usb.default_passband(),
+            dsp: DspSettings::default(),
         }
     }
 }
@@ -249,6 +361,8 @@ pub(crate) struct Rx {
     duo_sent: Option<(Mode, u32)>,
     /// Restart at the scope's new SPAN.
     pub restart: bool,
+    /// The DSP choices the pipeline was started with or last sent.
+    dsp: DspSettings,
 }
 
 impl Default for Rx {
@@ -277,6 +391,7 @@ impl Default for Rx {
             split: SplitState::default(),
             duo_sent: None,
             restart: false,
+            dsp: s.dsp,
         }
     }
 }
@@ -291,6 +406,7 @@ impl Rx {
             mode: mode_of(&s.mode),
             passband: s.passband,
             centre: s.centre_hz,
+            dsp: s.dsp,
             ..Rx::default()
         }
     }
@@ -387,6 +503,10 @@ impl Rx {
             mode: self.mode,
             passband: Some(self.passband),
             history: scope::PIPELINE_HISTORY,
+            agc_params: Some(self.dsp.agc()),
+            decoder_agc: self.dsp.decoder_agc(),
+            decimator: self.dsp.decimator.kind(),
+            filter_shape: self.dsp.shape.kind(),
             ..Default::default()
         };
         let p = Pipeline::spawn(src, cfg);
@@ -512,6 +632,20 @@ impl Rx {
             let (u, d) = a.stats();
             (a.device().to_string(), u, d)
         })
+    }
+
+    /// Put SETTINGS → Receiver's DSP choices on the receiver, at once if it
+    /// runs and at its next start either way.
+    pub(crate) fn set_dsp(&mut self, d: DspSettings) {
+        if d == self.dsp {
+            return;
+        }
+        self.dsp = d;
+        if let Some(p) = &self.pipeline {
+            for c in d.commands() {
+                p.send(c);
+            }
+        }
     }
 
     /// Tune the receiver. Not while transmitting: the radio follows it in
@@ -789,5 +923,24 @@ mod tests {
         // LSB reads the same from below.
         assert_eq!(duo_filter(&f, Mode::Lsb, (-3000.0, -200.0)), Some(ft8));
         assert_eq!(duo_filter(&f, Mode::Cw, (350.0, 850.0)), None);
+    }
+
+    #[test]
+    fn the_dsp_choices_default_to_decision_38s_and_are_kept() {
+        let d = DspSettings::default();
+        assert_eq!(d.decimator.kind(), sdr::DecimatorKind::CicFir);
+        assert_eq!(d.shape.kind(), sdr::FilterShape::Sharp);
+        assert_eq!(d.decoder_agc(), sdr::AgcParams::DECODER);
+        assert_eq!(d.agc(), sdr::AgcParams::listening(sdr::AgcMode::Med));
+        assert_eq!(Shape::ALL.map(Shape::delay_ms), [9, 24, 64]);
+        let changed = DspSettings { shape: Shape::BrickWall, agc_hang_ms: 900.0, ..d };
+        let back: DspSettings =
+            serde_json::from_str(&serde_json::to_string(&changed).unwrap()).unwrap();
+        assert_eq!(back, changed);
+        // Older settings files, and a shape this build never heard of.
+        let old: RxSettings = serde_json::from_str("{\"rate\": 192000}").unwrap();
+        assert_eq!(old.dsp, d);
+        let odd: DspSettings = serde_json::from_str("{\"shape\": \"Gaussian\"}").unwrap();
+        assert_eq!(odd.shape, Shape::Sharp);
     }
 }

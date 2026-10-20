@@ -824,6 +824,8 @@ impl App {
                     ) {
                         self.elad_devices = elad_iq::list();
                     }
+                    settings::settings_dsp(ui, &mut self.saved.rx.dsp);
+                    self.rx.set_dsp(self.saved.rx.dsp);
                     ui.add_space(10.0);
                     ui.separator();
                     ui.add_space(6.0);

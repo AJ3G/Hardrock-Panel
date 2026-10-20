@@ -339,7 +339,7 @@ pub(crate) fn settings_receiver_tab(
     }
     let (text, col) = match (&rx.error, rx.active()) {
         (Some(e), _) => (e.clone(), theme::ALERT()),
-        (None, true) if rx.opening() => ("Opening…".to_string(), theme::YELLOW()),
+        (None, true) if rx.opening() => ("Opening…".to_string(), theme::CYAN()),
         (None, true) => (rx.label.clone(), theme::GREEN()),
         (None, false) => ("Off".to_string(), theme::TEXT()),
     };
@@ -348,4 +348,82 @@ pub(crate) fn settings_receiver_tab(
         ui.label(RichText::new(text).color(col));
     });
     look
+}
+
+/// SETTINGS → Receiver's DSP (decisions 38, 39): the decimator, the passband's
+/// shape with the delay each costs, the listening AGC and the decoders' AGC
+/// target. Taken at once, and kept.
+pub(crate) fn settings_dsp(ui: &mut egui::Ui, d: &mut crate::rx::DspSettings) {
+    use crate::rx::{Decimator, DspSettings, Shape};
+    let caption = |ui: &mut egui::Ui, t: &str| {
+        ui.label(RichText::new(t.to_uppercase()).size(10.5).color(theme::CYAN_DIM()).strong())
+    };
+    ui.add_space(6.0);
+    ui.label(RichText::new("Receiver DSP").size(13.0).strong().color(theme::CYAN()));
+    ui.horizontal_wrapped(|ui| {
+        caption(ui, "Decimator");
+        for k in Decimator::ALL {
+            let hover = match k {
+                Decimator::CicFir => {
+                    "CIC, compensating FIR and a Kaiser FIR: what folds in from far away is \
+                     11 to 15 dB further down. The default."
+                }
+                Decimator::HalfBand => "A ladder of half-band filters and a Kaiser FIR",
+            };
+            if chrome::chip(ui, d.decimator == k, k.kind().label()).on_hover_text(hover).clicked() {
+                d.decimator = k;
+            }
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        caption(ui, "Passband");
+        for k in Shape::ALL {
+            let text = format!("{} · {} ms", k.kind().label(), k.delay_ms());
+            let hover = format!(
+                "95 dB down {:.0} Hz outside the passband; {} ms of audio delay",
+                k.kind().transition_hz(),
+                k.delay_ms()
+            );
+            if chrome::chip(ui, d.shape == k, text).on_hover_text(hover).clicked() {
+                d.shape = k;
+            }
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        caption(ui, "AGC");
+        let field = |ui: &mut egui::Ui, v: &mut f32, r: std::ops::RangeInclusive<f32>, unit| {
+            chrome::field(ui, egui::DragValue::new(v).range(r).speed(1.0).suffix(unit))
+        };
+        ui.label("attack");
+        field(ui, &mut d.agc_attack_ms, 0.1..=500.0, " ms").on_hover_text(
+            "Lookahead, and how long the gain takes to come down before a loud signal arrives",
+        );
+        ui.label("decay");
+        field(ui, &mut d.agc_decay_ms, 1.0..=60_000.0, " ms")
+            .on_hover_text("How fast the gain comes back up after the hang");
+        ui.label("hang");
+        field(ui, &mut d.agc_hang_ms, 0.0..=60_000.0, " ms")
+            .on_hover_text("How long the gain is held after it last fell");
+        ui.label("target");
+        field(ui, &mut d.agc_target_dbfs, -60.0..=0.0, " dBFS")
+            .on_hover_text("The peak level the receiver's audio is brought to");
+    });
+    ui.horizontal_wrapped(|ui| {
+        caption(ui, "Decoder AGC");
+        ui.label("target");
+        chrome::field(
+            ui,
+            egui::DragValue::new(&mut d.decoder_target_dbfs)
+                .range(-60.0..=0.0)
+                .speed(0.5)
+                .suffix(" dBFS"),
+        )
+        .on_hover_text(
+            "The decoders' own feed, whatever the volume and the AGC above: slow (5 ms attack, \
+             2 s hang and decay) so a strong station does not make the weak ones pump.",
+        );
+        if chrome::chip(ui, false, "DEFAULTS").on_hover_text("Decision 38's settings").clicked() {
+            *d = DspSettings::default();
+        }
+    });
 }
