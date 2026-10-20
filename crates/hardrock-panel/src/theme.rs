@@ -831,8 +831,51 @@ const MODERN_MINIMALIST: Palette = Palette {
     hazard_dark: c(0x161204),
 };
 
+/// ELAD's look (decision 39): the anodised graphite of the FDM-DUO's and the
+/// DUO-ART 120's cases and key caps, their pale silk-screen lettering, the
+/// TFT's black for every well and instrument, and the DUO-ART screen's status
+/// blue as the one accent. The same values as `radio/rigtheme.rs` and
+/// `panel/amptheme.rs`, so the panel's own chrome, the radio's face and the
+/// amplifier's screen read as one maker's station. Yellow and red stay for
+/// warnings only; green is ELAD's diagnostic "ready".
+const ELAD: Palette = Palette {
+    light: false,
+    no_dim: false,
+    bg_deep: c(0x15171a),     // the bench the units sit on
+    panel: c(0x1d1f22),       // the case
+    input_bg: c(0x05080d),    // the TFT's black
+    fill: c(0x2f3338),        // a key cap, between its top and bottom
+    fill_hover: c(0x3a3e44),  // the cap's lit top
+    fill_active: c(0x1b2a3d), // the TFT's grid blue
+    line: c(0x33373c),        // the case's edge line
+    line_lit: c(0x4a5058),
+    text: c(0xc3c9d1),        // silk screen
+    text_strong: c(0xe9eef4), // TFT ink
+    cyan: c(0x4aa8ff),        // the DUO-ART's status blue, the DUO's lit key
+    cyan_dim: c(0x8796a8),    // TFT secondary ink, for captions
+    pink: c(0x4b5159),        // the case's edge, lit: window borders
+    yellow: c(0xffc23d),
+    green: c(0x41d17a),
+    ink_on_cyan: c(0x15171a),
+    ink_on_bright: Color32::BLACK,
+    red_deep: c(0x5a1a17),
+    cq_bg: c(0x0f2238),
+    tome_bg: c(0x2c2406),
+    done_bg: c(0x0b2a17),
+    row_bg: c(0x17191c),
+    row_hover: c(0x24272b),
+    scroll_track: c(0x111316),
+    scroll_handle: c(0x3d6fa6),
+    scroll_handle_hover: c(0x4aa8ff),
+    scroll_handle_drag: c(0x8cc6ff),
+    faint_bg: c(0x191b1e),
+    alert: c(0xff4b3e),
+    hazard: c(0xffc23d),
+    hazard_dark: c(0x161204),
+};
+
 /// Indexed by [`theme_index`].
-static PALETTES: [Palette; 17] = [
+static PALETTES: [Palette; 18] = [
     DEFAULT,           // 0  Default
     GREEN_PHOSPHOR,    // 1  Green phosphor
     AMBER_PHOSPHOR,    // 2  Amber phosphor
@@ -850,6 +893,7 @@ static PALETTES: [Palette; 17] = [
     MODERN_MINIMALIST, // 14 Modern minimalist
     LIGHT,             // 15 Light
     HIGH_CONTRAST,     // 16 High contrast
+    ELAD,              // 17 ELAD
 ];
 
 /// The S-meter instrument's colours: the face wash, the backlight bloom, the
@@ -1158,7 +1202,7 @@ const fn meter_paper(p: &Palette) -> MeterPalette {
 /// Indexed by [`theme_index`], like [`PALETTES`]. Rainbow keeps the historic
 /// navy instrument: its grounds are the default's, and the meter already
 /// reads in the accents the ramps give it.
-static METER_PALETTES: [MeterPalette; 17] = [
+static METER_PALETTES: [MeterPalette; 18] = [
     METER_DEFAULT,                   // 0  Default
     METER_GREEN,                     // 1  Green phosphor
     METER_AMBER,                     // 2  Amber phosphor
@@ -1176,6 +1220,7 @@ static METER_PALETTES: [MeterPalette; 17] = [
     meter_paper(&MODERN_MINIMALIST), // 14 Modern minimalist
     METER_LIGHT,                     // 15 Light
     METER_HIGH_CONTRAST,             // 16 High contrast
+    meter_from(&ELAD),               // 17 ELAD
 ];
 
 /// The current theme's S-meter instrument colours.
@@ -1279,7 +1324,7 @@ const fn scope_light_from(p: &Palette) -> ScopePalette {
 /// Indexed by [`theme_index`], like [`PALETTES`]. High contrast lends the
 /// instruments its own roles like any other dark theme — its accents were
 /// already picked to sit on black, which is what the glass is.
-static SCOPE_PALETTES: [ScopePalette; 17] = [
+static SCOPE_PALETTES: [ScopePalette; 18] = [
     scope_from(&DEFAULT),                 // 0  Default
     scope_from(&GREEN_PHOSPHOR),          // 1  Green phosphor
     scope_from(&AMBER_PHOSPHOR),          // 2  Amber phosphor
@@ -1297,6 +1342,7 @@ static SCOPE_PALETTES: [ScopePalette; 17] = [
     scope_light_from(&MODERN_MINIMALIST), // 14 Modern minimalist
     SCOPE_LIGHT,                          // 15 Light
     scope_from(&HIGH_CONTRAST),           // 16 High contrast
+    scope_from(&ELAD),                    // 17 ELAD
 ];
 
 /// The current theme's instrument inks — see [`ScopePalette`].
@@ -1463,7 +1509,7 @@ const fn map_light_from(p: &Palette) -> MapPalette {
 }
 
 /// Indexed by [`theme_index`], like [`PALETTES`].
-static MAP_PALETTES: [MapPalette; 17] = [
+static MAP_PALETTES: [MapPalette; 18] = [
     map_from(&DEFAULT),                 // 0  Default
     map_from(&GREEN_PHOSPHOR),          // 1  Green phosphor
     map_from(&AMBER_PHOSPHOR),          // 2  Amber phosphor
@@ -1481,6 +1527,7 @@ static MAP_PALETTES: [MapPalette; 17] = [
     map_light_from(&MODERN_MINIMALIST), // 14 Modern minimalist
     SCOPE_MAP_LIGHT,                    // 15 Light
     MAP_HIGH_CONTRAST,                  // 16 High contrast
+    map_from(&ELAD),                    // 17 ELAD
 ];
 
 /// The current theme's world-map inks — see [`MapPalette`].
@@ -1490,13 +1537,14 @@ pub fn map() -> &'static MapPalette {
 }
 
 /// Indexed by [`style_index`].
-const STYLE_ORDER: [ChromeStyle; 6] = [
+const STYLE_ORDER: [ChromeStyle; 7] = [
     ChromeStyle::Angled,
     ChromeStyle::Rectangular,
     ChromeStyle::Rounded,
     ChromeStyle::Gradient,
     ChromeStyle::Bevel,
     ChromeStyle::Terminal,
+    ChromeStyle::Keycap,
 ];
 
 const fn theme_index(t: UiTheme) -> u8 {
@@ -1518,6 +1566,7 @@ const fn theme_index(t: UiTheme) -> u8 {
         UiTheme::ModernMinimalist => 14,
         UiTheme::Light => 15,
         UiTheme::HighContrast => 16,
+        UiTheme::Elad => 17,
     }
 }
 
@@ -1529,6 +1578,7 @@ const fn style_index(s: ChromeStyle) -> u8 {
         ChromeStyle::Gradient => 3,
         ChromeStyle::Bevel => 4,
         ChromeStyle::Terminal => 5,
+        ChromeStyle::Keycap => 6,
     }
 }
 
@@ -1544,6 +1594,65 @@ pub fn set_look(theme: UiTheme, buttons: ChromeStyle, windows: ChromeStyle) {
     THEME.store(theme_index(theme), Ordering::Relaxed);
     BUTTON_STYLE.store(style_index(buttons), Ordering::Relaxed);
     WINDOW_STYLE.store(style_index(windows), Ordering::Relaxed);
+}
+
+/// The panel's two whole looks (decision 39): SDRoxide's own, or ELAD's
+/// while the FDM-DUO is the chosen radio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StationLook {
+    /// SDRoxide's navy, cyan and cut corners.
+    Panel,
+    /// ELAD's graphite cases, key caps and status blue.
+    Elad,
+}
+
+impl StationLook {
+    /// The look for the radio chosen under SETTINGS. `forced` is the command
+    /// line's `--theme`, which wins.
+    pub fn for_radio(rig: &rigcat::RigConfig, forced: Option<StationLook>) -> StationLook {
+        forced.unwrap_or(if rig.enabled && rig.model == rigcat::RigModel::FdmDuo {
+            StationLook::Elad
+        } else {
+            StationLook::Panel
+        })
+    }
+
+    /// `--theme elad` or `--theme sdroxide` (also `panel`).
+    pub fn parse(s: &str) -> Option<StationLook> {
+        match s.to_ascii_lowercase().as_str() {
+            "elad" | "duo" => Some(StationLook::Elad),
+            "sdroxide" | "panel" | "default" => Some(StationLook::Panel),
+            _ => None,
+        }
+    }
+}
+
+/// Switch the whole panel to `look`, and rewrite egui's visuals to match.
+/// Returns whether anything changed. Call it at the top of a frame only (see
+/// [`apply_visuals`]).
+pub fn set_station_look(ctx: &egui::Context, look: StationLook) -> bool {
+    let (t, b, w) = match look {
+        StationLook::Panel => (UiTheme::Default, ChromeStyle::Angled, ChromeStyle::Angled),
+        StationLook::Elad => (UiTheme::Elad, ChromeStyle::Keycap, ChromeStyle::Keycap),
+    };
+    if station_look() == look
+        && BUTTON_STYLE.load(Ordering::Relaxed) == style_index(b)
+        && WINDOW_STYLE.load(Ordering::Relaxed) == style_index(w)
+    {
+        return false;
+    }
+    set_look(t, b, w);
+    apply_visuals(ctx);
+    true
+}
+
+/// The whole look the panel is wearing now.
+pub fn station_look() -> StationLook {
+    if THEME.load(Ordering::Relaxed) == theme_index(UiTheme::Elad) {
+        StationLook::Elad
+    } else {
+        StationLook::Panel
+    }
 }
 
 /// The current theme's palette.
@@ -1959,11 +2068,12 @@ pub fn apply_visuals(ctx: &egui::Context) {
     // can: the Rounded styles round them, every other style keeps them sharp
     // (the cut corners of the Angled style are painted by `chrome`, not egui).
     let window_corner = match window_style() {
-        ChromeStyle::Rounded => CornerRadius::same(6),
+        ChromeStyle::Rounded | ChromeStyle::Keycap => CornerRadius::same(6),
         _ => CornerRadius::ZERO,
     };
     let button_corner = match button_style() {
         ChromeStyle::Rounded => CornerRadius::same(5),
+        ChromeStyle::Keycap => CornerRadius::same(4),
         _ => CornerRadius::ZERO,
     };
 

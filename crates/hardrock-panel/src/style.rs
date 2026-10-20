@@ -233,6 +233,13 @@ pub enum UiTheme {
     /// faint. For low vision, for glare, and for a display that has lost its
     /// contrast.
     HighContrast,
+    /// ELAD's own: the graphite of the FDM-DUO's and the DUO-ART's anodised
+    /// cases, their key caps and silk-screen lettering, with the status blue
+    /// of the DUO-ART's screen as the accent. The whole panel wears it while
+    /// the FDM-DUO is the chosen radio (decision 39), so the top bar, the
+    /// scope and every window match the radio's face and the amplifier's
+    /// screen.
+    Elad,
     /// The classic navy/cyan/pink look. Declared last because serde demands
     /// the catch-all be the final variant: it also swallows an unrecognised
     /// value in a hand-edited config, so a typo degrades to the default theme
@@ -243,8 +250,9 @@ pub enum UiTheme {
 }
 
 impl UiTheme {
-    pub const ALL: [UiTheme; 17] = [
+    pub const ALL: [UiTheme; 18] = [
         UiTheme::Default,
+        UiTheme::Elad,
         UiTheme::Light,
         UiTheme::HighContrast,
         UiTheme::GreenPhosphor,
@@ -282,6 +290,7 @@ impl UiTheme {
             UiTheme::CatppuccinMocha => "Catppuccin mocha",
             UiTheme::CatppuccinLatte => "Catppuccin latte",
             UiTheme::ModernMinimalist => "Modern minimalist",
+            UiTheme::Elad => "ELAD",
         }
     }
 }
@@ -298,6 +307,10 @@ pub enum ChromeStyle {
     /// `+`, `-` and `|`, buttons wearing `[` and `]`, tick boxes reading
     /// `[X]`, and everything set in the monospace face.
     Terminal,
+    /// Rounded key caps lit from above with a dark edge, as on the FDM-DUO's
+    /// and the DUO-ART's fronts; windows as their anodised cases. What the
+    /// ELAD look wears (decision 39).
+    Keycap,
     /// The classic cut-corner look. Last for the same reason as
     /// [`UiTheme::Default`]: the serde catch-all must be the final variant.
     #[default]
@@ -306,13 +319,14 @@ pub enum ChromeStyle {
 }
 
 impl ChromeStyle {
-    pub const ALL: [ChromeStyle; 6] = [
+    pub const ALL: [ChromeStyle; 7] = [
         ChromeStyle::Angled,
         ChromeStyle::Rectangular,
         ChromeStyle::Rounded,
         ChromeStyle::Gradient,
         ChromeStyle::Bevel,
         ChromeStyle::Terminal,
+        ChromeStyle::Keycap,
     ];
 
     pub fn label(self) -> &'static str {
@@ -323,6 +337,7 @@ impl ChromeStyle {
             ChromeStyle::Gradient => "Gradient",
             ChromeStyle::Bevel => "3D bevel",
             ChromeStyle::Terminal => "Terminal",
+            ChromeStyle::Keycap => "Key caps",
         }
     }
 }

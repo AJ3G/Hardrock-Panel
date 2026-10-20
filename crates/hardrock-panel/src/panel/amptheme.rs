@@ -13,7 +13,8 @@
 //! the panel's theme.
 
 use eframe::egui::Color32;
-use rigcat::{RigConfig, RigModel};
+
+use crate::theme::StationLook;
 
 /// A radio maker's look for the AMP window.
 #[derive(Debug)]
@@ -80,27 +81,30 @@ pub(crate) static ELAD: AmpTheme = AmpTheme {
     key_edge: Color32::from_rgb(0x11, 0x11, 0x11),
 };
 
-/// The look for the radio chosen under SETTINGS: ELAD's beside the FDM-DUO,
-/// the panel's own (`None`) with no radio.
-pub(crate) fn amp_theme(rig: &RigConfig) -> Option<&'static AmpTheme> {
-    if !rig.enabled {
-        return None;
-    }
-    match rig.model {
-        RigModel::FdmDuo => Some(&ELAD),
+/// The look for the panel's whole look (see [`StationLook::for_radio`]):
+/// ELAD's beside the FDM-DUO, the panel's own (`None`) otherwise.
+pub(crate) fn amp_theme(look: StationLook) -> Option<&'static AmpTheme> {
+    match look {
+        StationLook::Elad => Some(&ELAD),
+        StationLook::Panel => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rigcat::{RigConfig, RigModel};
 
     #[test]
     fn the_duo_gets_elads_look_and_no_radio_keeps_the_panels_own() {
         let mut rig = RigConfig::default();
-        assert!(amp_theme(&rig).is_none());
+        assert!(amp_theme(StationLook::for_radio(&rig, None)).is_none());
         rig.enabled = true;
         rig.model = RigModel::FdmDuo;
-        assert!(std::ptr::eq(amp_theme(&rig).unwrap(), &ELAD));
+        assert!(std::ptr::eq(amp_theme(StationLook::for_radio(&rig, None)).unwrap(), &ELAD));
+        // The command line's --theme wins either way.
+        assert!(amp_theme(StationLook::for_radio(&rig, Some(StationLook::Panel))).is_none());
+        let none = RigConfig::default();
+        assert!(amp_theme(StationLook::for_radio(&none, Some(StationLook::Elad))).is_some());
     }
 }

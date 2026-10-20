@@ -165,6 +165,9 @@ struct App {
     /// The transverter offset last seen, to keep the radio window's and the
     /// scope's the same.
     xvtr_seen: Option<i64>,
+    /// The look the command line asks for (`--theme`, or `--demo`'s ELAD
+    /// look), over the one the chosen radio gives (decision 39).
+    forced_look: Option<theme::StationLook>,
 }
 
 /// How long the radio is given to show a TUNE keyed before its tone is
@@ -220,6 +223,7 @@ impl App {
             elad_devices: Vec::new(),
             rx_restart: Some(Instant::now()),
             xvtr_seen: None,
+            forced_look: view_args.look(),
             draft: saved.amp.clone(),
             draft_rig: saved.rig.clone(),
             saved,
@@ -700,6 +704,10 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
+        // The whole panel wears the chosen radio's look (decision 39). Only
+        // here, before anything is painted.
+        let look = theme::StationLook::for_radio(&self.saved.rig, self.forced_look);
+        theme::set_station_look(ctx, look);
         let mut st = self.status();
         let rig = self.rig.as_ref().map(|l| l.status());
         let xvtr = radio::xvtr_hz(ctx);
@@ -722,7 +730,7 @@ impl eframe::App for App {
             self.view.set_rig(fill);
         }
         self.view.set_swr_warn(self.saved.swr_warn);
-        self.view.set_radio(&self.saved.rig);
+        self.view.set_radio(&self.saved.rig, look);
 
         egui::Panel::top("bar")
             .frame(
@@ -959,8 +967,8 @@ fn apply_args(cfg: &mut AmpConfig, rig: &mut RigConfig, mut args: impl Iterator<
 const CAT_WAIT: Duration = Duration::from_secs(10);
 
 /// What the command line asks of the windows: `--demo` (the scope on the
-/// demo band), `--elad` (the scope on the ELAD's I/Q), `--scope`, `--decode`,
-/// and `--size 1200x900`.
+/// demo band, in the ELAD look), `--elad` (the scope on the ELAD's I/Q),
+/// `--scope`, `--decode`, `--theme elad|sdroxide`, and `--size 1200x900`.
 #[derive(Debug, Default, PartialEq)]
 struct ViewArgs {
     demo: bool,
@@ -968,6 +976,7 @@ struct ViewArgs {
     scope: bool,
     decode: bool,
     size: Option<[f32; 2]>,
+    theme: Option<theme::StationLook>,
 }
 
 impl ViewArgs {
@@ -979,6 +988,7 @@ impl ViewArgs {
                 "--elad" => v.elad = true,
                 "--scope" => v.scope = true,
                 "--decode" => v.decode = true,
+                "--theme" => v.theme = args.next().and_then(|t| theme::StationLook::parse(&t)),
                 "--size" => {
                     v.size = args.next().and_then(|s| {
                         let (w, h) = s.split_once('x')?;
@@ -989,6 +999,12 @@ impl ViewArgs {
             }
         }
         v
+    }
+
+    /// The look asked for: `--theme`, or with `--demo` ELAD's, which is what
+    /// the panel wears beside the FDM-DUO; otherwise the chosen radio's.
+    fn look(&self) -> Option<theme::StationLook> {
+        self.theme.or(self.demo.then_some(theme::StationLook::Elad))
     }
 }
 
@@ -1218,6 +1234,11 @@ mod tests {
         let v = ViewArgs::parse(args.into_iter());
         assert!(v.demo && v.decode && !v.scope);
         assert_eq!(v.size, Some([1200.0, 900.0]));
+        // The demo wears the ELAD look unless told otherwise.
+        assert_eq!(v.look(), Some(theme::StationLook::Elad));
+        let args = ["--demo", "--theme", "sdroxide"].map(String::from);
+        assert_eq!(ViewArgs::parse(args.into_iter()).look(), Some(theme::StationLook::Panel));
+        assert_eq!(ViewArgs::parse(std::iter::empty()).look(), None);
     }
 
     #[test]

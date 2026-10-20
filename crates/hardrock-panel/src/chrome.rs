@@ -45,8 +45,8 @@ pub fn angled_frame<R>(ui: &mut Ui, accent: Color32, add: impl FnOnce(&mut Ui) -
     // is only known after the content ran — so reserve a slot in the paint
     // list now, leave the frame's own fill transparent, and set the gradient
     // into the slot afterwards, where it renders *under* the content.
-    let grad_slot =
-        (theme::window_style() == ChromeStyle::Gradient).then(|| ui.painter().add(Shape::Noop));
+    let grad_slot = matches!(theme::window_style(), ChromeStyle::Gradient | ChromeStyle::Keycap)
+        .then(|| ui.painter().add(Shape::Noop));
     let inner = egui::Frame::new()
         .fill(if grad_slot.is_some() { Color32::TRANSPARENT } else { theme::PANEL() })
         .corner_radius(window_corner_radius())
@@ -71,6 +71,15 @@ pub fn angled_frame<R>(ui: &mut Ui, accent: Color32, add: impl FnOnce(&mut Ui) -
 /// at the top and falling off dark at the bottom.
 fn panel_gradient(rect: Rect) -> Shape {
     let panel = theme::PANEL();
+    if theme::window_style() == ChromeStyle::Keycap {
+        // An anodised case: its highlight along the top, falling to the
+        // case colour a third of the way down.
+        return grad_round_rect(
+            rect,
+            ROUND_WINDOW_R as f32,
+            &[(0.0, lerp(panel, Color32::WHITE, 0.07)), (0.35, panel), (1.0, panel)],
+        );
+    }
     // The light falls from above either way. On a dark panel the fall-off has
     // most of the range to work in; on a white one the same 45% would take the
     // bottom of every panel down to mid-grey, so it is a tenth of that.
@@ -92,7 +101,7 @@ fn panel_gradient(rect: Rect) -> Shape {
 pub fn window_body_bg(ui: &mut Ui) {
     let r = ui.max_rect().expand(11.0);
     match theme::window_style() {
-        ChromeStyle::Gradient => {
+        ChromeStyle::Gradient | ChromeStyle::Keycap => {
             ui.painter().add(panel_gradient(r));
         }
         ChromeStyle::Bevel => {
@@ -155,9 +164,92 @@ fn grad_rect(rect: Rect, top: Color32, bottom: Color32) -> Shape {
     Shape::mesh(mesh)
 }
 
+/// A rounded rect filled with a vertical gradient through `stops`, each a
+/// share of the height (0 at the top) and its colour: the Key caps style's
+/// keys and cases. A fan of triangles from the centre over the rounded
+/// outline, each vertex coloured for its height.
+fn grad_round_rect(rect: Rect, radius: f32, stops: &[(f32, Color32)]) -> Shape {
+    let at = |y: f32| -> Color32 {
+        let t = ((y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0);
+        let mut prev = stops.first().copied().unwrap_or((0.0, Color32::TRANSPARENT));
+        for &(s, c) in stops {
+            if t <= s {
+                let span = (s - prev.0).max(1e-6);
+                return lerp(prev.1, c, (t - prev.0) / span);
+            }
+            prev = (s, c);
+        }
+        prev.1
+    };
+    let mut mesh = Mesh::default();
+    mesh.colored_vertex(rect.center(), at(rect.center().y));
+    for p in round_outline(rect, radius) {
+        mesh.colored_vertex(p, at(p.y));
+    }
+    let n = mesh.vertices.len() as u32 - 1;
+    for i in 0..n {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+    }
+    Shape::mesh(mesh)
+}
+
+/// The outline of `rect` with its corners rounded by `radius`, clockwise from
+/// the top left.
+fn round_outline(rect: Rect, radius: f32) -> Vec<Pos2> {
+    let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0).max(0.0);
+    let corners = [
+        (pos2(rect.left() + r, rect.top() + r), std::f32::consts::PI),
+        (pos2(rect.right() - r, rect.top() + r), 1.5 * std::f32::consts::PI),
+        (pos2(rect.right() - r, rect.bottom() - r), 0.0),
+        (pos2(rect.left() + r, rect.bottom() - r), 0.5 * std::f32::consts::PI),
+    ];
+    const STEPS: usize = 5;
+    let mut out = Vec::with_capacity(4 * (STEPS + 1));
+    for (c, a0) in corners {
+        for k in 0..=STEPS {
+            let a = a0 + 0.5 * std::f32::consts::PI * k as f32 / STEPS as f32;
+            out.push(c + vec2(a.cos() * r, a.sin() * r));
+        }
+    }
+    out
+}
+
+/// A key cap in the Key caps style: lit from above, a highlight along its top
+/// edge and a near-black edge all round, as the FDM-DUO's and the DUO-ART's
+/// keys are drawn (`radio/face.rs`). `fill` is the cap's middle; a lit (on)
+/// key is drawn flat in its light with a soft glow, the way the DUO's are.
+fn keycap(p: &Painter, rect: Rect, fill: Color32, lit: bool, radius: f32) {
+    let cr = CornerRadius::same(radius.round() as u8);
+    if lit {
+        p.rect_filled(
+            rect.expand(2.0),
+            CornerRadius::same(radius as u8 + 2),
+            fill.gamma_multiply(0.22),
+        );
+        p.rect_filled(rect, cr, fill);
+    } else {
+        p.add(grad_round_rect(
+            rect,
+            radius,
+            &[(0.0, lerp(fill, Color32::WHITE, 0.13)), (1.0, lerp(fill, Color32::BLACK, 0.22))],
+        ));
+        p.hline(
+            rect.x_range().shrink(radius.max(2.0)),
+            rect.top() + 1.0,
+            Stroke::new(1.0, lerp(fill, Color32::WHITE, 0.22)),
+        );
+    }
+    p.rect_stroke(rect, cr, Stroke::new(1.0, KEY_EDGE), StrokeKind::Inside);
+}
+
+/// The near-black edge round every key cap, as on the radio's face.
+const KEY_EDGE: Color32 = Color32::from_rgb(0x11, 0x11, 0x11);
+
 /// The corner radius a Rounded-style window wears. Matches what
 /// [`crate::theme::apply_visuals`] gives egui's own windows and menus.
 const ROUND_WINDOW_R: u8 = 6;
+/// The corner radius of a key in the Key caps style.
+const KEY_R: f32 = 4.0;
 /// The corner radius a Rounded-style chip wears.
 const ROUND_CHIP_R: f32 = 5.0;
 
@@ -166,7 +258,7 @@ const ROUND_CHIP_R: f32 = 5.0;
 /// top).
 fn window_corner_radius() -> CornerRadius {
     match theme::window_style() {
-        ChromeStyle::Rounded => CornerRadius::same(ROUND_WINDOW_R),
+        ChromeStyle::Rounded | ChromeStyle::Keycap => CornerRadius::same(ROUND_WINDOW_R),
         _ => CornerRadius::ZERO,
     }
 }
@@ -254,6 +346,22 @@ pub fn paint_cut_border(p: &Painter, rect: Rect, color: Color32, mask: Color32) 
                 rect,
                 CornerRadius::same(ROUND_WINDOW_R),
                 Stroke::new(1.2, color),
+                StrokeKind::Inside,
+            );
+        }
+        ChromeStyle::Keycap => {
+            // A case's edge: the line itself, and a dark rim just outside it
+            // so the unit stands off the bench.
+            p.rect_stroke(
+                rect,
+                CornerRadius::same(ROUND_WINDOW_R),
+                Stroke::new(1.0, Color32::from_black_alpha(160)),
+                StrokeKind::Outside,
+            );
+            p.rect_stroke(
+                rect,
+                CornerRadius::same(ROUND_WINDOW_R),
+                Stroke::new(1.0, color),
                 StrokeKind::Inside,
             );
         }
@@ -1072,6 +1180,37 @@ fn styled_surface(ui: &Ui, r: &egui::epaint::RectShape, style: ChromeStyle, dept
             }
             Shape::Vec(out)
         }
+        ChromeStyle::Keycap => {
+            let radius = KEY_R.min(rect.height() * 0.4);
+            let cr = CornerRadius::same(radius as u8);
+            match depth {
+                // A well in the case: the TFT's black, sunk, with its edge.
+                Depth::Recessed => {
+                    Shape::Rect(egui::epaint::RectShape { corner_radius: cr, ..r.clone() })
+                }
+                _ => {
+                    let mut out = Vec::new();
+                    if fill.a() > 0 {
+                        out.push(grad_round_rect(
+                            rect,
+                            radius,
+                            &[
+                                (0.0, lerp(fill, Color32::WHITE, 0.13)),
+                                (1.0, lerp(fill, Color32::BLACK, 0.22)),
+                            ],
+                        ));
+                    }
+                    let edge = if stroke.width > 0.0 { stroke } else { Stroke::new(1.0, KEY_EDGE) };
+                    out.push(Shape::Rect(egui::epaint::RectShape::stroke(
+                        rect,
+                        cr,
+                        edge,
+                        StrokeKind::Inside,
+                    )));
+                    Shape::Vec(out)
+                }
+            }
+        }
         ChromeStyle::Bevel => {
             let mut out = vec![Shape::Rect(egui::epaint::RectShape {
                 corner_radius: CornerRadius::ZERO,
@@ -1163,7 +1302,7 @@ fn styled_knob(ui: &Ui, c: &egui::epaint::CircleShape, style: ChromeStyle) -> Sh
         }
         // A fader cap, square so it suits a vertical rail as well as a
         // horizontal one — the disc carries no orientation for us to keep.
-        ChromeStyle::Gradient | ChromeStyle::Bevel => {
+        ChromeStyle::Gradient | ChromeStyle::Bevel | ChromeStyle::Keycap => {
             let cap = Rect::from_center_size(centre, egui::Vec2::splat(rad * 1.7));
             styled_surface(
                 ui,
@@ -1855,6 +1994,9 @@ fn chip_impl(
                     lerp(fill, Color32::BLACK, 0.30),
                 ));
                 p.rect_stroke(rect, CornerRadius::ZERO, stroke, StrokeKind::Inside);
+            }
+            ChromeStyle::Keycap => {
+                keycap(p, rect, fill, selected || lit, KEY_R.min(size.y * 0.35));
             }
             ChromeStyle::Bevel => {
                 p.rect(rect, CornerRadius::ZERO, fill, stroke, StrokeKind::Inside);

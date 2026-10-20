@@ -297,8 +297,8 @@ impl AmpMeters {
 
     /// The radio chosen under SETTINGS: it picks the window's look (see
     /// [`amp_theme`]) and names where the band comes from.
-    pub(crate) fn set_radio(&mut self, rig: &rigcat::RigConfig) {
-        self.look = amp_theme(rig);
+    pub(crate) fn set_radio(&mut self, rig: &rigcat::RigConfig, look: crate::theme::StationLook) {
+        self.look = amp_theme(look);
         self.radio = rig.enabled.then(|| (rig.model.label(), rig.follow_band));
     }
 
