@@ -219,9 +219,13 @@ fn storage_ty(read_only: bool) -> wgpu::BindingType {
 }
 
 fn tex_ty() -> wgpu::BindingType {
+    tex_dim(wgpu::TextureViewDimension::D2)
+}
+
+fn tex_dim(view_dimension: wgpu::TextureViewDimension) -> wgpu::BindingType {
     wgpu::BindingType::Texture {
         sample_type: wgpu::TextureSampleType::Float { filterable: false },
-        view_dimension: wgpu::TextureViewDimension::D2,
+        view_dimension,
         multisampled: false,
     }
 }
@@ -334,7 +338,7 @@ impl Lit {
             "scope-s3-field",
             &[
                 entry(0, c, uniform_ty()),
-                entry(1, c, tex_ty()),
+                entry(1, c, tex_dim(wgpu::TextureViewDimension::D2Array)),
                 entry(2, c, tex_ty()),
                 entry(3, c, tex_ty()),
                 entry(4, c, storage_ty(false)),
@@ -348,14 +352,14 @@ impl Lit {
             "scope-s3-mip",
             &[
                 entry(0, c, uniform_ty()),
-                entry(1, c, tex_ty()),
+                entry(1, c, tex_dim(wgpu::TextureViewDimension::D2Array)),
                 entry(
                     2,
                     c,
                     wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
                         format: wgpu::TextureFormat::R32Float,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
                     },
                 ),
             ],
@@ -570,7 +574,8 @@ struct Resources {
     wf_uni: wgpu::Buffer,
     s3_uni: wgpu::Buffer,
     wf_bg: wgpu::BindGroup,
-    s3_bg: wgpu::BindGroup,
+    /// The flat-coloured surface's (without compute only).
+    s3_bg: Option<wgpu::BindGroup>,
     applied: u64,
     palette: Option<Palette>,
     lit: Option<LitRes>,
@@ -612,21 +617,23 @@ fn texture(
     h: u32,
     format: wgpu::TextureFormat,
 ) -> wgpu::Texture {
-    texture_ex(device, label, w, h, format, 1, wgpu::TextureUsages::empty())
+    texture_ex(device, label, w, h, 1, format, 1, wgpu::TextureUsages::empty())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn texture_ex(
     device: &wgpu::Device,
     label: &str,
     w: u32,
     h: u32,
+    layers: u32,
     format: wgpu::TextureFormat,
     mips: u32,
     extra: wgpu::TextureUsages,
 ) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: layers },
         mip_level_count: mips,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -636,8 +643,10 @@ fn texture_ex(
     })
 }
 
+/// One mip level of the lit rows, every layer.
 fn level_view(t: &wgpu::Texture, level: u32) -> wgpu::TextureView {
     t.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
         base_mip_level: level,
         mip_level_count: Some(1),
         ..Default::default()
@@ -678,11 +687,14 @@ impl Resources {
         let wf_rows = texture(device, "scope-wf-rows", tex_w, WF_ROWS, F::R16Float);
         let wf_geom = texture(device, "scope-wf-geom", WF_ROWS, 1, F::Rg32Float);
         let lods = lods(tex_w);
+        // Lit, the rows are layers one texel high, so their mip chains halve
+        // only across frequency.
         let s3_rows = match shared.lit {
             Some(_) => texture_ex(
                 device,
                 "scope-s3-rows",
                 tex_w,
+                1,
                 SURFACE_ROWS,
                 F::R32Float,
                 lods,
@@ -696,7 +708,10 @@ impl Resources {
         let s3_uni = uniform_buf(device, "scope-s3-uniforms", (S3_UNIFORMS * 4) as u64);
         let lut_view = lut.create_view(&Default::default());
         let geom_s3 = s3_geom.create_view(&Default::default());
-        let rows_s3 = s3_rows.create_view(&Default::default());
+        let rows_s3 = s3_rows.create_view(&wgpu::TextureViewDescriptor {
+            dimension: shared.lit.as_ref().map(|_| wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
         let bg = |uni: &wgpu::Buffer, rv: &wgpu::TextureView, gv: &wgpu::TextureView| {
             bind_group(
                 device,
@@ -714,11 +729,10 @@ impl Resources {
             &wf_rows.create_view(&Default::default()),
             &wf_geom.create_view(&Default::default()),
         );
-        // The legacy surface reads level 0 only (an R16 texture has no other).
-        let s3_bg = bg(&s3_uni, &level_view(&s3_rows, 0), &geom_s3);
+        let s3_bg = shared.lit.is_none().then(|| bg(&s3_uni, &rows_s3, &geom_s3));
         let lit = shared.lit.as_ref().map(|l| {
             let prev =
-                texture_ex(device, "scope-s3-prev", tex_w, 1, F::R32Float, lods, TU::empty());
+                texture_ex(device, "scope-s3-prev", tex_w, 1, 1, F::R32Float, lods, TU::empty());
             let staging = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("scope-s3-staging"),
                 size: SURFACE_ROWS as u64 * tex_w as u64 * 4,
@@ -841,7 +855,7 @@ impl Resources {
                             wgpu::TexelCopyTextureInfo {
                                 texture: &self.s3_rows,
                                 mip_level: lv,
-                                origin: wgpu::Origin3d { x: 0, y: p, z: 0 },
+                                origin: wgpu::Origin3d { x: 0, y: 0, z: p },
                                 aspect: wgpu::TextureAspect::All,
                             },
                             wgpu::TexelCopyTextureInfo {
@@ -875,7 +889,7 @@ impl Resources {
                         wgpu::TexelCopyTextureInfo {
                             texture: &self.s3_rows,
                             mip_level: 0,
-                            origin: wgpu::Origin3d { x: 0, y: r.slot, z: 0 },
+                            origin: wgpu::Origin3d { x: 0, y: 0, z: r.slot },
                             aspect: wgpu::TextureAspect::All,
                         },
                         wgpu::Extent3d { width: w, height: 1, depth_or_array_layers: 1 },
@@ -1356,7 +1370,8 @@ impl CallbackTrait for SurfacePaint {
         if p.count == 0 || p.cols < 2 {
             return;
         }
-        pass.set_bind_group(0, &r.s3_bg, &[]);
+        let Some(bg) = &r.s3_bg else { return };
+        pass.set_bind_group(0, bg, &[]);
         draw_rows(pass, p, p.cols, &reg.shared.fill, &reg.shared.line);
     }
 }

@@ -4,7 +4,8 @@
 // smoothly from the previous spectrum to the newest, then each point's
 // normal for the lighting. The vertex shader only reads the result.
 
-@group(0) @binding(1) var rows_tex: texture_2d<f32>;
+// The rows, one layer each (one texel high), and the previous live row.
+@group(0) @binding(1) var rows_tex: texture_2d_array<f32>;
 @group(0) @binding(2) var geom_tex: texture_2d<f32>;
 @group(0) @binding(3) var prev_tex: texture_2d<f32>;
 @group(0) @binding(4) var<storage, read_write> lv: array<f32>;
@@ -12,10 +13,19 @@
 
 const EMPTY: f32 = -1.0e9;
 
-// Row `r` of `t` (the band lo..hi, Hz) over [f - half, f + half]: at a
-// level of the max-mip chain where that span is one to two texels, the
-// strongest texel it touches; narrower than a texel, interpolated.
-fn sample(t: texture_2d<f32>, r: i32, lo: f32, hi: f32, f: f32, half: f32) -> f32 {
+// Texel `x` at mip level `l` of row `r`, or of the previous live row.
+fn ld(prev: bool, r: i32, x: i32, l: i32) -> f32 {
+    if (prev) {
+        return textureLoad(prev_tex, vec2<i32>(x, 0), l).r;
+    }
+    return textureLoad(rows_tex, vec2<i32>(x, 0), r, l).r;
+}
+
+// Row `r` (or the previous live row) over the band lo..hi, Hz, sampled over
+// [f - half, f + half]: at a level of the max-mip chain where that span is
+// one to two texels, the strongest texel it touches; narrower than a
+// texel, interpolated.
+fn sample(prev: bool, r: i32, lo: f32, hi: f32, f: f32, half: f32) -> f32 {
     let span = hi - lo;
     if (span <= 0.0) {
         return EMPTY;
@@ -41,11 +51,11 @@ fn sample(t: texture_2d<f32>, r: i32, lo: f32, hi: f32, f: f32, half: f32) -> f3
             let stride = max(1, (b - a + 96) / 96);
             var m = EMPTY;
             for (var i = a; i <= b; i = i + stride) {
-                m = max(m, textureLoad(t, vec2<i32>(i, r), 0).r);
+                m = max(m, ld(prev, r, i, 0));
             }
             return m;
         }
-        return mix(textureLoad(t, vec2<i32>(i0, r), 0).r, textureLoad(t, vec2<i32>(i1, r), 0).r, fr);
+        return mix(ld(prev, r, i0, 0), ld(prev, r, i1, 0), fr);
     }
     let l = clamp(i32(ceil(log2(w))) - 1, 0, lods - 1);
     let s = exp2(f32(l));
@@ -54,7 +64,7 @@ fn sample(t: texture_2d<f32>, r: i32, lo: f32, hi: f32, f: f32, half: f32) -> f3
     let b = clamp(i32(floor((uc + 0.5 * w) / s)), 0, wl - 1);
     var m = EMPTY;
     for (var i = a; i <= b; i = i + 1) {
-        m = max(m, textureLoad(t, vec2<i32>(i, r), l).r);
+        m = max(m, ld(prev, r, i, l));
     }
     return m;
 }
@@ -80,9 +90,9 @@ fn levels(@builtin(global_invocation_id) g: vec3<u32>) {
     let half = w / max(u.cols - 1.0, 1.0) * 0.5;
     let slot = slot_of(k);
     let gb = textureLoad(geom_tex, vec2<i32>(i32(slot), 0), 0).xy;
-    var lvl = to_level(sample(rows_tex, i32(slot), gb.x, gb.y, f, half));
+    var lvl = to_level(sample(false, i32(slot), gb.x, gb.y, f, half));
     if (k == 0u && u.has_prev > 0.5) {
-        let was = to_level(sample(prev_tex, 0, u.prev_lo, u.prev_hi, f, half));
+        let was = to_level(sample(true, 0, u.prev_lo, u.prev_hi, f, half));
         lvl = mix(was, lvl, clamp(u.live_t, 0.0, 1.0));
     }
     lv[k * cols + c] = lvl;

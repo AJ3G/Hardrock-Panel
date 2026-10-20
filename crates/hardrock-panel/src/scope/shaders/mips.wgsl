@@ -1,6 +1,8 @@
 // The 3D rows' max-mip chain: each texel of a level is the stronger of the
-// two under it, so a one-bin carrier survives to the coarsest level. Only
-// the rows written this frame (`slots`) are rebuilt.
+// two under it, so a one-bin carrier survives to the coarsest level. The
+// rows are the layers of an array texture one texel high, so a level
+// halves only across frequency. Only the rows written this frame (`slots`)
+// are rebuilt.
 
 struct Rows {
     n: u32,
@@ -11,8 +13,8 @@ struct Rows {
 };
 
 @group(0) @binding(0) var<uniform> rows: Rows;
-@group(0) @binding(1) var src_lvl: texture_2d<f32>;
-@group(0) @binding(2) var dst_lvl: texture_storage_2d<r32float, write>;
+@group(0) @binding(1) var src_lvl: texture_2d_array<f32>;
+@group(0) @binding(2) var dst_lvl: texture_storage_2d_array<r32float, write>;
 
 @compute @workgroup_size(64)
 fn mip(@builtin(global_invocation_id) g: vec3<u32>) {
@@ -22,7 +24,7 @@ fn mip(@builtin(global_invocation_id) g: vec3<u32>) {
         return;
     }
     let r = i32(rows.slots[i / 4u][i % 4u]);
-    let a = textureLoad(src_lvl, vec2<i32>(2 * i32(x), r), 0).r;
-    let b = textureLoad(src_lvl, vec2<i32>(2 * i32(x) + 1, r), 0).r;
-    textureStore(dst_lvl, vec2<i32>(i32(x), r), vec4<f32>(max(a, b), 0.0, 0.0, 1.0));
+    let a = textureLoad(src_lvl, vec2<i32>(2 * i32(x), 0), r, 0).r;
+    let b = textureLoad(src_lvl, vec2<i32>(2 * i32(x) + 1, 0), r, 0).r;
+    textureStore(dst_lvl, vec2<i32>(i32(x), 0), r, vec4<f32>(max(a, b), 0.0, 0.0, 1.0));
 }

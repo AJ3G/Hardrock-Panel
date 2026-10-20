@@ -117,6 +117,7 @@ pub struct Readout {
 pub struct Targets<'a> {
     pub wf: &'a wgpu::Texture,
     pub wf_w: u32,
+    /// The 3D rows: an array texture, a layer a row.
     pub s3: &'a wgpu::Texture,
     pub s3_w: u32,
 }
@@ -766,9 +767,9 @@ impl Engine {
                 continue;
             }
             match cmds[i] {
-                Cmd::Wf { slot } => copy_row(enc, &self.bits, 0, t.wf, slot, t.wf_w, 2),
+                Cmd::Wf { slot } => copy_row(enc, &self.bits, 0, t.wf, slot, t.wf_w, 2, false),
                 Cmd::S3 { slot } => {
-                    copy_row(enc, &self.outb, S3_OFF as u64 * 4, t.s3, slot, t.s3_w, 4)
+                    copy_row(enc, &self.outb, S3_OFF as u64 * 4, t.s3, slot, t.s3_w, 4, true)
                 }
                 Cmd::Read { idx } => {
                     let s = &self.staging[idx];
@@ -889,7 +890,8 @@ impl Engine {
 }
 
 /// Copy one row of `w` texels (`bpt` bytes each) from `buf` at `off` into
-/// row `slot` of `tex`.
+/// row `slot` of `tex` (its layer `slot`, when `layered`).
+#[allow(clippy::too_many_arguments)]
 fn copy_row(
     enc: &mut wgpu::CommandEncoder,
     buf: &wgpu::Buffer,
@@ -898,7 +900,13 @@ fn copy_row(
     slot: u32,
     w: u32,
     bpt: u32,
+    layered: bool,
 ) {
+    let origin = if layered {
+        wgpu::Origin3d { x: 0, y: 0, z: slot }
+    } else {
+        wgpu::Origin3d { x: 0, y: slot, z: 0 }
+    };
     enc.copy_buffer_to_texture(
         wgpu::TexelCopyBufferInfo {
             buffer: buf,
@@ -911,7 +919,7 @@ fn copy_row(
         wgpu::TexelCopyTextureInfo {
             texture: tex,
             mip_level: 0,
-            origin: wgpu::Origin3d { x: 0, y: slot, z: 0 },
+            origin,
             aspect: wgpu::TextureAspect::All,
         },
         wgpu::Extent3d { width: w, height: 1, depth_or_array_layers: 1 },
@@ -1214,9 +1222,9 @@ pub(crate) mod tests {
         let db = r.state(Inst::Main, 3);
         let pk = r.state(Inst::Main, 2);
         let mut worst = 0.0f32;
-        for d in 0..n as usize {
-            if f.db[d] > -140.0 {
-                worst = worst.max((db[d] - f.db[d]).abs());
+        for (g, c) in db.iter().zip(&f.db).take(n as usize) {
+            if *c > -140.0 {
+                worst = worst.max((g - c).abs());
             }
         }
         assert!(worst < 0.02, "dB frames differ by up to {worst} dB");

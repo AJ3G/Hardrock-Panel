@@ -80,6 +80,9 @@ use pointer::{Drag, Wheel};
 use rows::{Rows, Upload};
 use view::{FreqMap, Span, View};
 
+/// The GPU's I/Q tap: `sink(iq, centre Hz, rate)`, interleaved f32.
+pub type IqSink = Box<dyn Fn(&[f32], f64, f64) + Send + Sync>;
+
 /// What the scope needs to know about the radio each frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScopeRig {
@@ -259,7 +262,7 @@ impl Scope {
     /// taps (it is called on the pipeline's thread and never waits): `None`
     /// without a GPU that can compute the spectrum. Take it once; each call
     /// starts the GPU's stream afresh.
-    pub fn gpu_iq_sink(&self) -> Option<Box<dyn Fn(&[f32], f64, f64) + Send + Sync>> {
+    pub fn gpu_iq_sink(&self) -> Option<IqSink> {
         let run = self.gpu_run.as_ref()?;
         Some(Box::new(run.iq.sink()))
     }
