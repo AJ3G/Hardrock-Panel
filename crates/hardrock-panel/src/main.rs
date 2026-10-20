@@ -569,6 +569,19 @@ impl eframe::App for App {
             if let Some(r) = &rig {
                 self.do_tune(o.tune, &amp_raw, r);
             }
+            if let Some(link) = &self.rig {
+                // Read back after each; refused while transmitting (#5).
+                link.set(o.frames);
+                // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): a stored
+                // CW message transmits through the amplifier at the full
+                // power setting, so only when RIG TUNE could be keyed.
+                if let (Some(f), Some(r)) = (o.cw_send, &rig)
+                    && tune::tune_blocked(&amp_raw, r, tune::planned_watts(r, Keying::Carrier, 1.0))
+                        .is_none()
+                {
+                    link.set(vec![f]);
+                }
+            }
             self.show_radio = open;
         }
 

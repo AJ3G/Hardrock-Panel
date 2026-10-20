@@ -77,7 +77,38 @@ amplifier's DRV, which over-reads into a mismatch. In PTT the amplifier's own
 readings are used, and DRV, input power, efficiency and gain are always the
 amplifier's.
 
-![The radio window, popped out, reading a simulated FDM-DUO](images/radio.png)
+![The radio window, reading a simulated FDM-DUO, with MODE open](images/radio.png)
+
+**The radio window.** **RADIO** along the top opens the radio's own face: its
+LCD, with the dial, the annunciators (LP, ATT, ANT, IN, CAT, SPLIT, RIT, the
+VFO, XVTR, RX and TX), the S-meter (forward power while transmitting) and the
+power setting, RIT offset and level or SWR. Click the top half of a digit to
+step it up and the bottom half to step it down, or scroll over it; carries
+roll into the next digit, and the dial stays inside the radio's 9 kHz to
+54 MHz. With the pointer on the dial the arrow keys pick and step a digit, and
+typing a number opens **F INPUT**: MHz below 100 (14.074), kHz from 100 up
+(7074), or with a unit. LP, ATT, ANT and IN on the LCD are keys too; IN asks
+before it changes where the radio takes transmit audio from.
+
+Under the LCD, **MODE** sets the mode, or a data mode (FT8, FT4, WSPR, RTTY,
+PSK31, JS8): USB, its frequency on the band, a filter for its passband and, if
+you say yes when asked, TX IN on USB audio. **BAND** goes back to the last
+frequency and mode used on each band. **RX**, **CW**, **TX AUDIO** and **MEM**
+open the radio's receiver and audio, the keyer with its ten stored messages,
+the transmit audio, and memory recall. **MENU** lists every setting the radio
+has a CAT command for, grouped, with the ones that can't be changed shown as
+read only, and the panel's own display settings: the LCD backlight in receive
+and in transmit, and a transverter offset.
+
+Everything shows what the radio reads back, not what was asked for, and greys
+while the radio transmits. A stored CW message is sent only when RIG TUNE
+could be keyed.
+
+**Transverter.** Set the converter's local oscillator under MENU, Panel
+display (116 MHz for a 2 m converter on 28 MHz, negative for one whose LO is
+above). The LCD then shows the RF frequency with XVTR lit, F INPUT takes the
+RF frequency and sends the radio the IF, and BAND offers the bands the
+converter reaches. The radio is never told.
 
 **TUNE.** With the radio connected, a strip under the top line has two ways to
 key the radio, its power buttons, the **Tune** slider, and how long TUNE may

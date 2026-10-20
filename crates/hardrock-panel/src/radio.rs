@@ -1,20 +1,166 @@
-//! The radio's window: what the radio itself reports over its CAT port,
-//! TUNE, its power buttons and the Tune slider, and every setting the radio answers a READ
-//! for, with its menu number where it is one of the radio's menus. It sits
-//! over the panel, or pops out into a window of its own.
+//! The radio's window, drawn as the radio's own front panel: an LCD with the
+//! dial as clickable seven-segment digits, its annunciators and meter; the
+//! MODE, BAND and F INPUT keys and the RX, CW, TX audio and MEM pop-outs;
+//! TUNE, the power buttons and the Tune slider; the live FWD, RFL and SWR;
+//! and MENU, every setting the radio has a CAT command for. It sits over the
+//! panel, or pops out into a window of its own.
+//!
+//! Every control comes from the radio's [`Protocol`] and its [`Control`]
+//! table, so another radio gets the same window with its own settings, and a
+//! look of its own from [`rigtheme`]. The window sends nothing itself: it
+//! hands the frames to send back in [`RadioOut`], and shows only what the
+//! radio reads back. Everything greys while the radio transmits; the link
+//! refuses changes then anyway (safety interlock #5).
+//!
+//! [`Control`]: rigcat::Control
+
+mod controls;
+mod face;
+mod logic;
+mod rigtheme;
+
+use std::collections::HashMap;
+use std::time::Instant;
 
 use eframe::egui::{self, RichText};
-use rigcat::RigStatus;
+use rigcat::{Frame, Protocol, RigStatus};
 
 use crate::tune::{TuneArgs, TuneOut, tune_strip};
 use crate::{chrome, theme};
+use logic::RadioPrefs;
+use rigtheme::{RigTheme, rig_theme};
 
+/// What the operator asked of the radio this frame.
 #[derive(Default)]
 pub(crate) struct RadioOut {
     pub refresh: bool,
     /// Pop out (`true`) or dock (`false`).
     pub pop: Option<bool>,
     pub tune: TuneOut,
+    /// Settings to change, in order: for `RigLink::set`, which sends each
+    /// and reads it back, and refuses them while the radio transmits
+    /// (interlock #5).
+    pub frames: Vec<Frame>,
+    /// A stored CW message to start, which transmits. Only offered when RIG
+    /// TUNE could be keyed (interlock #6); check that again before
+    /// `RigLink::set`.
+    pub cw_send: Option<Frame>,
+}
+
+/// Which pop-out is open under the face. One at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pop {
+    Mode,
+    Band,
+    Freq,
+    Rx,
+    Cw,
+    Tx,
+    Mem,
+}
+
+/// What MENU lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MenuFilter {
+    #[default]
+    All,
+    Settable,
+    Transmit,
+}
+
+impl MenuFilter {
+    const ALL: [MenuFilter; 3] = [MenuFilter::All, MenuFilter::Settable, MenuFilter::Transmit];
+
+    fn label(self) -> &'static str {
+        match self {
+            MenuFilter::All => "All menus",
+            MenuFilter::Settable => "Changeable here",
+            MenuFilter::Transmit => "Transmit and PTT",
+        }
+    }
+}
+
+/// A question waiting for an answer before anything is sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Confirm {
+    /// A data mode, while TX IN isn't on USB audio.
+    Digi(&'static str),
+    /// Where TX IN goes, from its annunciator.
+    Input,
+}
+
+/// The window's state from frame to frame, not kept between runs.
+#[derive(Clone, Default)]
+pub(crate) struct RadioUi {
+    pub pop: Option<Pop>,
+    /// The dial digit last stepped, for the arrow keys and the knob.
+    pub sel: Option<usize>,
+    pub entry: String,
+    pub entry_msg: Option<String>,
+    pub focus_entry: bool,
+    /// The frequency last asked for and when, until the radio reads it back.
+    pub pending: Option<(u64, Instant)>,
+    pub menu: bool,
+    pub menu_filter: MenuFilter,
+    pub mem: u16,
+    /// The data mode last chosen, while the radio stays in USB.
+    pub digi: Option<&'static str>,
+    pub digi_note: Option<String>,
+    pub confirm: Option<Confirm>,
+    /// Sliders being dragged: the value under the pointer, sent on release.
+    pub drags: HashMap<&'static str, f64>,
+    pub texts: HashMap<&'static str, String>,
+    /// Why the last thing asked here couldn't be sent.
+    pub note: Option<String>,
+}
+
+impl RadioUi {
+    fn toggle(&mut self, p: Pop) {
+        self.pop = if self.pop == Some(p) { None } else { Some(p) };
+        if self.pop == Some(Pop::Freq) {
+            self.entry.clear();
+            self.entry_msg = None;
+            self.focus_entry = true;
+        }
+    }
+}
+
+/// Everything a part of the window needs to draw itself and say what it
+/// wants sent.
+pub(crate) struct Face<'a> {
+    pub p: &'a dyn Protocol,
+    pub s: &'a RigStatus,
+    pub th: &'static RigTheme,
+    /// Why nothing may be changed now ([`logic::locked`]).
+    pub lock: Option<&'static str>,
+    /// Why RIG TUNE couldn't be keyed now, for the CW messages.
+    pub carrier_blocked: Option<String>,
+    pub xvtr: i64,
+    pub st: &'a mut RadioUi,
+    pub out: &'a mut RadioOut,
+}
+
+impl Face<'_> {
+    fn push(&mut self, f: Option<Frame>) {
+        if let Some(f) = f {
+            self.out.frames.push(f);
+        }
+    }
+
+    fn send_control(&mut self, c: &rigcat::Control, value: &str) {
+        match logic::control_frame(self.p, c, value, self.s) {
+            Ok(f) => self.out.frames.push(f),
+            Err(e) => self.st.note = Some(e),
+        }
+    }
+}
+
+fn prefs_id() -> egui::Id {
+    egui::Id::new("radio-window-prefs")
+}
+
+fn ui_id() -> egui::Id {
+    egui::Id::new("radio-window-ui")
 }
 
 /// Draw the radio's window, docked over the panel or popped out into its own.
@@ -27,21 +173,26 @@ pub(crate) fn radio_window(
     mut tune: TuneArgs<'_>,
 ) -> RadioOut {
     let mut out = RadioOut::default();
+    // Kept between runs with the window's other state (egui's memory, which
+    // eframe saves): band memories, backlights, the transverter offset.
+    let mut prefs: RadioPrefs = ctx.data_mut(|d| d.get_persisted(prefs_id())).unwrap_or_default();
+    let mut rui: RadioUi = ctx.data_mut(|d| d.get_temp(ui_id())).unwrap_or_default();
     let title = st.map_or("Radio", |s| s.model.label());
     if popped {
         let closed = ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("radio-window"),
             egui::ViewportBuilder::default()
                 .with_title(title)
-                .with_inner_size([560.0, 760.0])
-                .with_min_inner_size([420.0, 360.0]),
+                .with_inner_size([600.0, 820.0])
+                .with_min_inner_size([480.0, 420.0]),
             |ui, _class| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
                     .show(ui, |ui| {
                         chrome::window_body_bg(ui);
                         egui::ScrollArea::vertical().show(ui, |ui| {
-                            radio_body(ui, true, st, &mut tune, &mut out);
+                            let w = ui.available_width().clamp(460.0, 760.0);
+                            radio_body(ui, w, true, st, &mut tune, &mut out, &mut prefs, &mut rui);
                         });
                     });
                 ui.ctx().input(|i| i.viewport().close_requested())
@@ -61,170 +212,123 @@ pub(crate) fn radio_window(
             .show(ctx, |ui| {
                 chrome::window_body_bg(ui);
                 let room = (ctx.content_rect().height() - 120.0).max(240.0);
-                egui::ScrollArea::vertical().max_height(room).show(ui, |ui| {
-                    radio_body(ui, false, st, &mut tune, &mut out);
-                });
+                egui::ScrollArea::vertical().max_height(room).min_scrolled_height(room).show(
+                    ui,
+                    |ui| {
+                        radio_body(ui, 560.0, false, st, &mut tune, &mut out, &mut prefs, &mut rui);
+                    },
+                );
             });
     }
+    ctx.data_mut(|d| {
+        d.insert_persisted(prefs_id(), prefs);
+        d.insert_temp(ui_id(), rui);
+    });
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn radio_body(
     ui: &mut egui::Ui,
+    width: f32,
     popped: bool,
     st: Option<&RigStatus>,
     tune: &mut TuneArgs<'_>,
     out: &mut RadioOut,
+    prefs: &mut RadioPrefs,
+    rui: &mut RadioUi,
 ) {
     let Some(s) = st else {
         ui.label("No radio is set up. Choose its CAT port under SETTINGS, in the Radio section.");
         return;
     };
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(s.model.label()).size(14.0).strong().color(theme::CYAN()));
-        let (text, hover) = if popped {
-            ("DOCK", "Put this window back over the panel")
-        } else {
-            ("POP OUT", "Open this in a window of its own")
-        };
-        if chrome::chip(ui, false, text).on_hover_text(hover).clicked() {
-            out.pop = Some(!popped);
+    let th = rig_theme(s.model);
+    let proto = s.model.protocol();
+    let lock = logic::locked(s);
+
+    // The band memories follow where the radio really is: its read-back.
+    if s.connected
+        && !s.transmitting()
+        && let (Some(hz), Some(m)) = (logic::dial_hz(s), s.mode)
+    {
+        prefs.remember(logic::shown(hz, prefs.xvtr_hz), m);
+        if rui.pending.is_some_and(|(p, t)| p == hz || t.elapsed().as_secs() >= 2) {
+            rui.pending = None;
         }
-    });
-    if !s.connected {
-        ui.label(
-            RichText::new(s.error.clone().unwrap_or_else(|| "Connecting…".into()))
-                .color(theme::ALERT()),
-        );
     }
-    // The dial, as on the radio's own screen.
-    if let Some(hz) = s.freq_hz {
-        let khz = hz / 1000;
-        let text = format!("{}.{:03}.{:03}", khz / 1000, khz % 1000, hz % 1000);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(text).monospace().size(30.0).color(theme::TEXT_STRONG()));
-            ui.label(RichText::new(s.mode.unwrap_or("")).size(16.0).color(theme::CYAN()));
-        });
+    if s.mode.is_some_and(|m| m != "USB") {
+        rui.digi = None;
+        rui.digi_note = None;
     }
-    ui.add_space(6.0);
 
-    // Live: raw, never held.
-    let w = |p: Option<rigcat::Watts>| match p {
-        Some(p) if p.valid => format!("{:.2} W", p.w),
-        Some(_) => "—  (flagged)".into(),
-        None => "—".into(),
+    let mut f = Face {
+        p: &*proto,
+        s,
+        th,
+        lock,
+        carrier_blocked: tune.carrier_blocked.clone(),
+        xvtr: prefs.xvtr_hz,
+        st: rui,
+        out,
     };
-    let swr = match s.swr {
-        Some(x) if x.valid => format!("{:.2}:1", x.ratio),
-        Some(_) => "—  (flagged)".into(),
-        None => "—".into(),
-    };
-    let tripped = s.swr.is_some_and(|x| x.tripped);
-    egui::Grid::new("radio-live").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
-        ui.label("Transmitting");
-        ui.label(if s.keyed() { "Yes" } else { "No" });
-        ui.end_row();
-        ui.label("FWD (FP)");
-        ui.label(RichText::new(w(s.fwd)).monospace());
-        ui.end_row();
-        ui.label("RFL (RP)");
-        ui.label(RichText::new(w(s.rfl)).monospace());
-        ui.end_row();
-        ui.label("SWR (WR)");
-        ui.label(RichText::new(swr).monospace());
-        ui.end_row();
-        if tripped {
-            ui.label("");
-            ui.label(
-                RichText::new("The radio dropped to receive on a high SWR").color(theme::ALERT()),
-            );
-            ui.end_row();
-        }
-        ui.label(s.power_name);
-        ui.label(s.power().map_or("—", |p| p.label));
-        ui.end_row();
-        ui.label("TX IN (menu 32)");
-        ui.label(s.tx_input.as_deref().unwrap_or("—"));
-        ui.end_row();
-        ui.label("Dial");
-        let dial = match (s.freq_hz, s.mode) {
-            (Some(hz), m) => {
-                format!("{:.6} MHz {}", hz as f64 / 1e6, m.unwrap_or(""))
-            }
-            _ => "—".into(),
-        };
-        ui.label(RichText::new(dial).monospace());
-        ui.end_row();
-    });
-    ui.label(
-        RichText::new(
-            "The radio flags its power and SWR below 0.5 W and in receive. In OFF \
-             (bypass) these fill the amplifier's FWD, RFL and SWR.",
-        )
-        .weak()
-        .size(11.0),
-    );
 
-    ui.add_space(8.0);
-    out.tune = tune_strip(ui, s, tune);
-
-    ui.add_space(8.0);
-    ui.separator();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Settings").strong());
-        if chrome::chip(ui, false, "READ AGAIN")
-            .on_hover_text("Ask the radio for every setting now. Between transmissions they are read every 10 s by themselves.")
-            .clicked()
-        {
-            out.refresh = true;
-        }
-        if let Some(t) = s.settings_read {
-            ui.label(
-                RichText::new(format!("read {} s ago", t.elapsed().as_secs()))
-                    .weak()
-                    .size(11.0),
-            );
-        }
-    });
-    ui.add_space(4.0);
-    egui::Grid::new("radio-settings").num_columns(4).spacing([14.0, 3.0]).striped(true).show(
-        ui,
-        |ui| {
-            for h in ["Menu", "Setting", "Value", "Answer"] {
-                ui.label(RichText::new(h).weak());
-            }
-            ui.end_row();
-            if s.connected || !s.settings.is_empty() {
-                ui.label("70");
-                ui.label("CAT BAUD");
-                ui.label(format!("{} (the port is open at it)", s.baud));
-                ui.label("");
-                ui.end_row();
-            }
-            for row in &s.settings {
-                ui.label(row.item.menu.map(|m| m.to_string()).unwrap_or_default());
-                ui.label(row.item.name);
-                let (v, col) = match (&row.value, row.raw.as_deref()) {
-                    (Some(v), _) => (v.clone(), theme::TEXT()),
-                    (None, Some("?")) => {
-                        ("Not answered: the radio refused it".into(), theme::TEXT())
+    egui::Frame::new()
+        .fill(th.case)
+        .stroke(egui::Stroke::new(1.0, th.case_line))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(width);
+            ui.spacing_mut().item_spacing.y = 8.0;
+            // Silk screen.
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(th.brand).font(face::label_font(17.0)).color(th.label));
+                let line = format!("{} · CAT {} 8N1", th.model, s.baud);
+                ui.label(RichText::new(line).font(face::label_font(12.0)).color(th.dim));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (text, hover) = if popped {
+                        ("DOCK", "Put this window back over the panel")
+                    } else {
+                        ("POP OUT", "Open this in a window of its own")
+                    };
+                    if chrome::chip(ui, false, text).on_hover_text(hover).clicked() {
+                        f.out.pop = Some(!popped);
                     }
-                    (None, Some(_)) => ("Answer not understood".into(), theme::YELLOW()),
-                    (None, None) => ("No answer".into(), theme::TEXT()),
-                };
-                ui.label(RichText::new(v).color(col));
-                ui.label(RichText::new(row.raw.clone().unwrap_or_default()).monospace().weak());
-                ui.end_row();
+                });
+            });
+            if !s.connected {
+                ui.label(
+                    RichText::new(s.error.clone().unwrap_or_else(|| "Connecting…".into()))
+                        .color(theme::ALERT()),
+                );
             }
-        },
-    );
-    ui.add_space(4.0);
-    ui.label(
-        RichText::new(
-            "Only these settings have a CAT command. The other menus, such as 37 CW IN \
-             and 45 keyer speed, can only be read on the radio.",
-        )
-        .weak()
-        .size(11.0),
-    );
+
+            // The face: LCD and knobs.
+            ui.horizontal(|ui| {
+                let lcd_w = ui.available_width() - 104.0 - 14.0;
+                face::lcd(ui, &mut f, prefs, lcd_w);
+                ui.add_space(6.0);
+                face::knobs(ui, &mut f, prefs);
+            });
+
+            ui.separator();
+            controls::keys(ui, &mut f);
+            controls::popout(ui, &mut f, prefs);
+            controls::vfo_row(ui, &mut f);
+            ui.add_space(2.0);
+            f.out.tune = tune_strip(ui, s, tune);
+            controls::readouts(ui, &f);
+            for n in [f.st.digi_note.clone(), f.st.note.clone(), s.set_note.clone()]
+                .into_iter()
+                .flatten()
+            {
+                ui.label(RichText::new(n).size(11.5).color(th.dim));
+            }
+        });
+
+    let ctx = ui.ctx().clone();
+    if f.st.menu {
+        controls::menu_window(&ctx, &mut f, prefs);
+    }
+    controls::confirm(&ctx, &mut f);
 }
