@@ -363,6 +363,14 @@ pub(crate) struct Rx {
     pub restart: bool,
     /// The DSP choices the pipeline was started with or last sent.
     dsp: DspSettings,
+    /// The samples the pipeline had read, and when that last changed; when
+    /// the radio last transmitted; and when the stream watchdog last
+    /// reopened the ELAD.
+    heard: (u64, Instant),
+    tx_at: Option<Instant>,
+    reopened_at: Option<Instant>,
+    /// What the stream watchdog did, for the scope window.
+    pub watchdog: Option<String>,
 }
 
 impl Default for Rx {
@@ -392,6 +400,10 @@ impl Default for Rx {
             duo_sent: None,
             restart: false,
             dsp: s.dsp,
+            heard: (0, Instant::now()),
+            tx_at: None,
+            reopened_at: None,
+            watchdog: None,
         }
     }
 }
@@ -519,6 +531,7 @@ impl Rx {
         self.audio = None;
         self.audio_dev = None;
         self.pipeline = Some(p);
+        self.heard = (0, Instant::now());
     }
 
     /// Once a frame: finish opening the ELAD, keep the sound output, the
@@ -554,10 +567,20 @@ impl Rx {
         {
             self.start(s, scope, now);
         }
+        if now.transmitting {
+            self.tx_at = Some(Instant::now());
+        }
+        self.watch_stream(s, scope, now);
         self.keep_audio(s);
         let Some(p) = &self.pipeline else { return };
         let snap_centre = p.lock().center_hz;
-        if snap_centre > 0.0 && snap_centre != self.centre {
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #9): while the radio
+        // transmits, and for a moment after, the dial it reads back is not
+        // where it listens (in split it can be VFO B, the transmit
+        // frequency): the receiver, and so VFO B with it, is not moved by it. Whatever it says once the over is done
+        // is taken as a turn of the knob would be.
+        let dial_settled = self.tx_at.is_none_or(|t| t.elapsed() >= DIAL_SETTLE);
+        if snap_centre > 0.0 && snap_centre != self.centre && dial_settled {
             let asked = self.asked_centre.is_some_and(|(c, _)| (c - snap_centre).abs() < 1.0);
             if !asked {
                 // The dial was turned on the radio: the receiver moves with it.
@@ -596,6 +619,38 @@ impl Rx {
             let frames = self.split.frames(&*proto, r, self.rx_hz, s.tx_follows_rx);
             // Read back after each; refused while transmitting (#5).
             link.set(frames);
+        }
+    }
+
+    /// The stream watchdog: an ELAD stream that has delivered nothing for
+    /// [`STREAM_SILENT`] while the radio was not transmitting (or whose
+    /// thread has ended) is opened again, as TRY AGAIN would, at most once
+    /// in [`REOPEN_EVERY`]. Not while transmitting: opening it tunes the
+    /// DUO over USB (interlock #10, checked again in `start`).
+    fn watch_stream(&mut self, s: &RxSettings, scope: &Scope, now: RadioNow<'_>) {
+        let Some(p) = &self.pipeline else { return };
+        let (samples, alive) = {
+            let g = p.lock();
+            (g.samples, g.alive)
+        };
+        if samples != self.heard.0 {
+            self.heard = (samples, Instant::now());
+        }
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #10): reopening tunes
+        // the DUO over USB, so never while it transmits (and `start` checks
+        // again); the silence is counted from the end of the over.
+        if self.running != IqChoice::Elad || now.transmitting {
+            return;
+        }
+        let quiet = self.heard.1.elapsed().min(self.tx_at.map_or(Duration::MAX, |t| t.elapsed()));
+        let due = self.reopened_at.is_none_or(|t| t.elapsed() >= REOPEN_EVERY);
+        if (!alive || quiet >= STREAM_SILENT) && due {
+            let why = if alive { "stopped sending I/Q" } else { "stream ended" };
+            let msg = format!("The ELAD {why}; opened it again at {}.", clock_now());
+            self.start(s, scope, now);
+            self.reopened_at = Some(Instant::now());
+            self.heard = (0, Instant::now());
+            self.watchdog = Some(msg);
         }
     }
 
@@ -776,6 +831,24 @@ pub(crate) fn duo_filter(filters: &[u32], m: Mode, pb: (f32, f32)) -> Option<u32
 /// How long the receiver must stay put before VFO B is moved to it, so a
 /// drag doesn't send a frame a frame.
 const SPLIT_SETTLE: Duration = Duration::from_millis(300);
+
+/// How long after a transmission the radio's dial read-back is believed
+/// again: four of the ELAD driver's reads.
+const DIAL_SETTLE: Duration = Duration::from_millis(1000);
+
+/// An ELAD stream silent this long, with the radio not transmitting, is
+/// opened again. The DUO streams all the time it is on, at every rate.
+const STREAM_SILENT: Duration = Duration::from_secs(3);
+
+/// The watchdog reopens no more often than this.
+const REOPEN_EVERY: Duration = Duration::from_secs(20);
+
+/// UTC now as `HH:MM:SS`.
+fn clock_now() -> String {
+    let t = utc_now() as u64 % 86_400;
+    format!("{:02}:{:02}:{:02} UTC", t / 3600, t / 60 % 60, t % 60)
+}
+
 /// How long before the same change is asked for again, if the radio's
 /// read-back hasn't shown it.
 const SPLIT_RETRY: Duration = Duration::from_millis(1500);
@@ -942,5 +1015,80 @@ mod tests {
         assert_eq!(old.dsp, d);
         let odd: DspSettings = serde_json::from_str("{\"shape\": \"Gaussian\"}").unwrap();
         assert_eq!(odd.shape, Shape::Sharp);
+    }
+
+    fn now(transmitting: bool) -> RadioNow<'static> {
+        RadioNow { link: None, rig: None, transmitting }
+    }
+
+    fn wait(mut what: impl FnMut() -> bool) {
+        let t = Instant::now();
+        while !what() {
+            assert!(t.elapsed() < Duration::from_secs(10), "timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The dial read back while the radio transmits (VFO B in split, or
+    /// nonsense) does not move the receiver; a real move of the dial is
+    /// taken once the over is done and the read-back has settled.
+    #[test]
+    fn the_receiver_is_not_moved_by_the_dial_during_an_over() {
+        let scope = Scope::new(None, crate::scope::ScopeSettings::default());
+        let mut s = RxSettings::default();
+        let mut rx = Rx::new(&s);
+        rx.centre = 14.2e6;
+        rx.rx_hz = 14.21e6;
+        let src = sdr::SyntheticSource::new(192_000.0, 14.2e6, -80.0, vec![]).paced();
+        rx.spawn(Box::new(src), &scope);
+        rx.frame(&mut s, &scope, now(false));
+        // Keyed, and the I/Q's centre moves.
+        rx.frame(&mut s, &scope, now(true));
+        rx.pipeline.as_ref().unwrap().send(Command::SetCenter(14.25e6));
+        wait(|| rx.snapshot().center_hz == 14.25e6);
+        rx.frame(&mut s, &scope, now(true));
+        assert_eq!((rx.rx_hz, rx.centre), (14.21e6, 14.2e6), "moved during the over");
+        // Just unkeyed: the read-back is not trusted yet.
+        rx.frame(&mut s, &scope, now(false));
+        assert_eq!(rx.rx_hz, 14.21e6);
+        std::thread::sleep(DIAL_SETTLE);
+        rx.frame(&mut s, &scope, now(false));
+        assert_eq!((rx.rx_hz, rx.centre), (14.26e6, 14.25e6), "the knob was turned");
+    }
+
+    /// An ELAD stream that goes quiet is opened again once the radio has
+    /// stopped transmitting, and not during the over or just after it.
+    #[test]
+    fn a_stream_that_stays_silent_after_an_over_is_opened_again() {
+        let scope = Scope::new(None, crate::scope::ScopeSettings::default());
+        // The reopen starts the demo, standing in for the ELAD.
+        let mut s = RxSettings { source: IqChoice::Demo, ..RxSettings::default() };
+        let mut rx = Rx::new(&s);
+        let src = sdr::SyntheticSource::new(192_000.0, 14.2e6, -80.0, vec![]).paced();
+        // Silent from 0.2 s on, as a DUO's I/Q might stop for an over and
+        // not come back.
+        let fx = sdr::TxEffects { gap: true, ..Default::default() };
+        rx.spawn(Box::new(sdr::TxSim::new(src, 0.2, 1e9, fx)), &scope);
+        rx.running = IqChoice::Elad;
+        let t = Instant::now();
+        while t.elapsed() < STREAM_SILENT + Duration::from_millis(500) {
+            rx.frame(&mut s, &scope, now(true));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(rx.watchdog.is_none(), "reopened while transmitting");
+        // Unkeyed: given STREAM_SILENT from the end of the over.
+        rx.frame(&mut s, &scope, now(false));
+        std::thread::sleep(STREAM_SILENT / 2);
+        rx.frame(&mut s, &scope, now(false));
+        assert!(rx.watchdog.is_none(), "reopened too soon after the over");
+        std::thread::sleep(STREAM_SILENT / 2 + Duration::from_millis(100));
+        rx.frame(&mut s, &scope, now(false));
+        assert!(rx.watchdog.as_deref().is_some_and(|w| w.contains("stopped sending")));
+        assert_eq!(rx.source(), IqChoice::Demo);
+        let before = rx.snapshot().samples;
+        wait(|| {
+            rx.frame(&mut s, &scope, now(false));
+            rx.snapshot().samples > before + 1000
+        });
     }
 }

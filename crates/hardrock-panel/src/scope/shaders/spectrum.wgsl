@@ -258,6 +258,12 @@ fn accumulate(@builtin(global_invocation_id) g: vec3<u32>) {
     st[d] = st[d] + s;
 }
 
+// Whether `x` is a number and finite, from its bits (a compiler may take
+// `x == x` to be always true).
+fn finite(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7f800000u) != 0x7f800000u;
+}
+
 // A frame: the Welch mean (or, with F_LATEST, the one transform in pw),
 // averaged into the running average (α, or taken as it is until F_PRIMED),
 // in dBm (+cal), the peak hold falling `fall` dB, and the histogram.
@@ -276,7 +282,9 @@ fn frame(@builtin(global_invocation_id) g: vec3<u32>) {
     }
     let ai = p.n + d;
     var avg = pwr;
-    if ((p.flags & F_PRIMED) != 0u) {
+    // Not primed, or holding something that is not a number: start from
+    // this frame (one NaN in the average would otherwise stay for good).
+    if ((p.flags & F_PRIMED) != 0u && finite(st[ai])) {
         avg = st[ai] + p.alpha * (pwr - st[ai]);
     }
     st[ai] = avg;
@@ -287,7 +295,7 @@ fn frame(@builtin(global_invocation_id) g: vec3<u32>) {
     if ((p.flags & F_PEAK) != 0u) {
         let pi = 2u * p.n + d;
         var pk = db;
-        if ((p.flags & F_PEAK_RESET) == 0u) {
+        if ((p.flags & F_PEAK_RESET) == 0u && finite(st[pi])) {
             pk = max(st[pi] - p.fall, db);
         }
         st[pi] = pk;

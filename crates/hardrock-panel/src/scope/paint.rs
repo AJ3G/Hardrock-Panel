@@ -1152,9 +1152,12 @@ fn top_bar(sc: &Scope, ui: &egui::Ui, r: Rect, cx: &Ctx, snap: &sdr::Snapshot) {
     p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, edge()));
     let state = if sc.paused {
         "PAUSED"
+    } else if sc.held {
+        // Decision 40: what was shown before the over, until it is done.
+        "HELD · TX"
     } else if !snap.alive {
         "NO STREAM"
-    } else if snap.latest.is_none() {
+    } else if sc.shown().is_none() {
         "WAITING"
     } else {
         "STREAMING"
@@ -1255,8 +1258,13 @@ fn status_bars(sc: &Scope, ui: &egui::Ui, a: Rect, b: Rect, cx: &Ctx, snap: &sdr
         accent(),
     );
 
+    let notice = sc.notice.as_ref().filter(|(_, until)| cx.now < *until).map(|(n, _)| n);
     let diag = if sc.paused {
         "Display paused · stream still running".to_string()
+    } else if sc.held {
+        "Held while the radio transmits · starts afresh after the over".to_string()
+    } else if let Some(n) = notice {
+        n.clone()
     } else if !snap.alive {
         "IQ stream stopped".to_string()
     } else {

@@ -14,6 +14,12 @@
 //! for the radio: a tune moves the pipeline's receiver, a recentre moves the
 //! synthetic source's centre (its stations move with it, unlike a real band),
 //! and the SPAN key restarts the pipeline at the new rate.
+//!
+//! `--tx gap,strong,zeros,nan,centre=HZ` simulates a transmission from
+//! `--key S` to `--unkey S` seconds (default 3 to 8; `--every S` repeats it):
+//! the stream stopping, strong clipped leakage, zeros, garbage, or the centre
+//! reported elsewhere, with the scope told it is transmitting meanwhile.
+//! `--shot-at S` takes the screenshot at S seconds rather than 6.
 
 #![allow(dead_code, unused_imports)]
 
@@ -53,6 +59,17 @@ struct Demo {
     asked: bool,
     gpu_sink: Option<Sink>,
     bench: Option<(Instant, u32)>,
+    tx: Option<TxArgs>,
+    keyed: Option<Arc<std::sync::atomic::AtomicBool>>,
+    shot_at: f32,
+}
+
+#[derive(Clone, Copy)]
+struct TxArgs {
+    effects: sdr::TxEffects,
+    key: f64,
+    unkey: f64,
+    every: Option<f64>,
 }
 
 type Sink = Arc<dyn Fn(&[f32], f64, f64) + Send + Sync>;
@@ -65,7 +82,15 @@ fn tap(p: &Pipeline, sink: &Option<Sink>) {
     }
 }
 
-fn start(scope: &Scope, rate: f64, center_hz: f64, rx_hz: f64, mode: Mode) -> Pipeline {
+fn start(
+    scope: &Scope,
+    rate: f64,
+    center_hz: f64,
+    rx_hz: f64,
+    mode: Mode,
+    tx: Option<TxArgs>,
+    keyed: &mut Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> Pipeline {
     let cfg = PipelineConfig {
         spectrum: scope.spectrum_config(0.0),
         offset_hz: rx_hz - center_hz,
@@ -73,19 +98,27 @@ fn start(scope: &Scope, rate: f64, center_hz: f64, rx_hz: f64, mode: Mode) -> Pi
         history: 16,
         ..Default::default()
     };
-    Pipeline::spawn(Box::new(SyntheticSource::demo(rate, center_hz)), cfg)
+    let src = SyntheticSource::demo(rate, center_hz);
+    let Some(t) = tx else { return Pipeline::spawn(Box::new(src), cfg) };
+    let mut sim = sdr::TxSim::new(src, t.key, t.unkey, t.effects);
+    if let Some(e) = t.every {
+        sim = sim.repeat(e);
+    }
+    *keyed = Some(sim.keyed());
+    Pipeline::spawn(Box::new(sim), cfg)
 }
 
 impl Demo {
     fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Demo {
         theme::apply(&cc.egui_ctx);
-        let Args { rate, screenshot, settings, bench } = args;
+        let Args { rate, screenshot, settings, bench, tx, shot_at } = args;
         // The SCF view starts on the CW station, 300 Hz into its lane.
         let scf = settings.top == scope::settings::TopView::Scf;
         let scope = Scope::new(cc.wgpu_render_state.as_ref(), settings);
         let rx_hz = CENTER_HZ + if scf { -27_100.0 } else { 12_500.0 };
         let mode = Mode::Usb;
-        let pipeline = start(&scope, rate, CENTER_HZ, rx_hz, mode);
+        let mut keyed = None;
+        let pipeline = start(&scope, rate, CENTER_HZ, rx_hz, mode, tx, &mut keyed);
         let gpu_sink: Option<Sink> = scope.gpu_iq_sink().map(Arc::from);
         tap(&pipeline, &gpu_sink);
         Demo {
@@ -102,12 +135,15 @@ impl Demo {
             asked: false,
             gpu_sink,
             bench: bench.then(|| (Instant::now(), 0)),
+            tx,
+            keyed,
+            shot_at,
         }
     }
 
     fn take_screenshot(&mut self, ui: &egui::Ui) {
         let Some(path) = self.screenshot.clone() else { return };
-        if !self.asked && self.started.elapsed().as_secs_f32() > 6.0 {
+        if !self.asked && self.started.elapsed().as_secs_f32() > self.shot_at {
             self.asked = true;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
         }
@@ -135,6 +171,9 @@ impl Demo {
 impl eframe::App for Demo {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let snap = self.pipeline.snapshot();
+        if let Some(k) = &self.keyed {
+            self.transmitting = k.load(std::sync::atomic::Ordering::Relaxed);
+        }
         let rig = ScopeRig {
             rx_hz: self.rx_hz,
             mode: self.mode,
@@ -188,7 +227,15 @@ impl eframe::App for Demo {
         self.pipeline.set_offset_hz(self.rx_hz - self.center_hz);
         if let Some(rate) = out.sample_rate {
             self.rate = rate as f64;
-            self.pipeline = start(&self.scope, self.rate, self.center_hz, self.rx_hz, self.mode);
+            self.pipeline = start(
+                &self.scope,
+                self.rate,
+                self.center_hz,
+                self.rx_hz,
+                self.mode,
+                self.tx,
+                &mut self.keyed,
+            );
             tap(&self.pipeline, &self.gpu_sink);
         }
         if let Some((t, n)) = self.bench.as_mut() {
@@ -216,6 +263,8 @@ struct Args {
     screenshot: Option<String>,
     settings: ScopeSettings,
     bench: bool,
+    tx: Option<TxArgs>,
+    shot_at: f32,
 }
 
 fn main() -> eframe::Result {
@@ -224,7 +273,12 @@ fn main() -> eframe::Result {
         screenshot: None,
         settings: ScopeSettings::default(),
         bench: false,
+        tx: None,
+        shot_at: 6.0,
     };
+    let mut tx = TxArgs { effects: sdr::TxEffects::default(), key: 3.0, unkey: 8.0, every: None };
+    let mut want_tx = false;
+    let num = |a: Option<String>| a.and_then(|r| r.parse::<f64>().ok());
     let mut height = 860.0;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -244,8 +298,32 @@ fn main() -> eframe::Result {
             "--screenshot" => a.screenshot = args.next(),
             "--cpu" => a.settings.fft_gpu = false,
             "--bench" => a.bench = true,
+            "--tx" => {
+                want_tx = true;
+                for e in args.next().unwrap_or_default().split(',') {
+                    match e.split_once('=') {
+                        Some(("centre", hz)) => tx.effects.centre_hz = hz.parse().ok(),
+                        Some(("strong", db)) => tx.effects.strong_dbfs = db.parse().ok(),
+                        _ => match e {
+                            "gap" => tx.effects.gap = true,
+                            "strong" => tx.effects.strong_dbfs = Some(-1.0),
+                            "zeros" => tx.effects.zeros = true,
+                            "nan" => tx.effects.nan = true,
+                            "" => {}
+                            _ => eprintln!("unknown TX effect {e}"),
+                        },
+                    }
+                }
+            }
+            "--key" => tx.key = num(args.next()).unwrap_or(tx.key),
+            "--unkey" => tx.unkey = num(args.next()).unwrap_or(tx.unkey),
+            "--every" => tx.every = num(args.next()),
+            "--shot-at" => a.shot_at = num(args.next()).unwrap_or(6.0) as f32,
             _ => eprintln!("unknown argument {arg}"),
         }
+    }
+    if want_tx {
+        a.tx = Some(tx);
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

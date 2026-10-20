@@ -95,6 +95,7 @@ Before removing or loosening any of these, read why it is there.
 - **Why:** the scope's outputs move the radio. Moving VFO A or the receiver while keyed changes the transmit frequency under load, and in split it moves `FB` (decision 22), possibly out of the amplifier's band or the band plan.
 - **What the operator sees:** over the spectrum the pointer becomes a not-allowed cursor and the top bar reads "tuning locked while transmitting"; the data-mode keys are greyed, with the reason on hover.
 - **Also (decision 39):** the band-plan strip's mode markers, dragging the passband or its edges in the waterfall, and DECODE's snap to a mode (`App::snap_to()` in `main.rs`, which refuses while transmitting and says so, naming #5 and #9).
+- **Also (decision 40):** while transmitting and for a second after, the radio's dial as read back over USB does not move the panel's receiver (`Rx::frame()`, `DIAL_SETTLE`): in split the read-back can be VFO B, and moving the receiver would move VFO B with it once the over ends. Tested by `the_receiver_is_not_moved_by_the_dial_during_an_over`.
 - **Added:** AJ3G, 20 Oct 2026, with the scope. Tested by `a_press_drags_what_it_grabbed_unless_transmitting` and `the_centre_follows_the_receiver_but_not_while_transmitting`. Also `dragging_the_passband_tunes_by_the_pointers_travel`.
 
 ## 10. The ELAD's I/Q is opened and moved over USB only between transmissions
@@ -103,6 +104,7 @@ Before removing or loosening any of these, read why it is there.
 - **Blocks:** opening the ELAD's I/Q device, and moving its centre over USB, while transmitting. A source that waited opens by itself once the transmission ends.
 - **Why:** the elad-iq driver tunes the FDM-DUO when it opens the device (its receive window is VFO A), and moving the centre retunes it, both through the DUO's USB gateway (`CF`). That path is not the CAT link, so interlock #5's refusal in TX does not cover it. Retuning VFO A while keyed moves the transmit frequency under load, possibly off the amplifier's band. With a CAT link the panel moves VFO A over CAT instead (`FA`, guarded by #5), and the I/Q follows the radio's dial as read back over USB.
 - **Also:** to open the I/Q where the radio already is, the panel waits up to 10 s for the CAT link to read VFO A and opens the device there; with no CAT link it opens at the centre it last used.
+- **Also (decision 40):** the stream watchdog (`Rx::watch_stream()`), which opens an ELAD stream again when it has been silent for 3 s on receive, goes through `Rx::start()` and is not run at all while transmitting, nor for 3 s after. Tested by `a_stream_that_stays_silent_after_an_over_is_opened_again`.
 - **What the operator sees:** the scope's I/Q line says it is waiting for the radio to stop transmitting.
 - **Added:** with the panel's own receiver (decision 32).
 

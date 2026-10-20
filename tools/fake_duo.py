@@ -7,6 +7,8 @@ panel's RADIO link without a radio. Linux and macOS only.
     python3 tools/fake_duo.py --freq 7074000
     python3 tools/fake_duo.py --mic        # menu 32 TX IN on the microphone
     python3 tools/fake_duo.py --mode 3     # in CW
+    python3 tools/fake_duo.py --key-at 10 --unkey-at 15
+                                           # keyed from its own panel 10 to 15 s in
 
 It answers the READ commands the panel sends with fixed readings, takes
 menu 34 (`TPnn;`) and menu 32 to USB audio (`TI1;`), keys its TUNE carrier
@@ -20,6 +22,7 @@ something, and flags any it should never be sent.
 import os
 import select
 import sys
+import time
 import tty
 
 state = {
@@ -57,9 +60,27 @@ READS = {
     "WR": lambda: "WR0 01.32" if state["keyed"] else "WR0!00.00",
 }
 
+
+def arg(name):
+    return float(sys.argv[sys.argv.index(name) + 1]) if name in sys.argv else None
+
+
+key_at, unkey_at = arg("--key-at"), arg("--unkey-at")
+started = time.monotonic()
 buf = ""
 while True:
-    select.select([master], [], [])
+    ready, _, _ = select.select([master], [], [], 0.05)
+    t = time.monotonic() - started
+    if key_at is not None and t >= key_at:
+        key_at = None
+        state["keyed"] = True
+        print("keyed from the front panel", file=sys.stderr, flush=True)
+    if unkey_at is not None and key_at is None and t >= unkey_at:
+        unkey_at = None
+        state["keyed"] = False
+        print("unkeyed from the front panel", file=sys.stderr, flush=True)
+    if not ready:
+        continue
     buf += os.read(master, 256).decode(errors="replace")
     while ";" in buf:
         cmd, buf = buf.split(";", 1)

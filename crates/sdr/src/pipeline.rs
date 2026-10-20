@@ -89,6 +89,12 @@ pub enum Command {
     /// scope computes its spectrum on the GPU from the I/Q tap, so the I/Q
     /// is not also queued for a spectrum nobody reads.
     SetSpectrumOn(bool),
+    /// Start the CPU spectrum (and its zoom) afresh: the averages, the held
+    /// peaks and the history are forgotten, and nothing already queued for
+    /// it is used. The scope sends this when a transmission ends, so what
+    /// the receiver heard during the over does not linger in the averages.
+    /// [`Snapshot::spectrum_resets`] counts the ones done.
+    ResetSpectrum,
     /// Stop reading the source (true) or start again.
     Pause(bool),
     Stop,
@@ -175,6 +181,11 @@ pub struct Snapshot {
     pub spectrum_drops: u64,
     /// Complex samples processed since start.
     pub samples: u64,
+    /// Samples that came from the source as something other than a number
+    /// (NaN or infinite), replaced with zero before anything used them.
+    pub nonfinite: u64,
+    /// [`Command::ResetSpectrum`]s the spectrum thread has carried out.
+    pub spectrum_resets: u64,
 }
 
 /// A running pipeline. Dropping it stops the threads.
@@ -268,6 +279,9 @@ struct IqBlock {
     iq: Vec<f32>,
     center: f64,
     rate: f64,
+    /// The spectrum resets asked for before it was read: a block from
+    /// before the newest reset is not used.
+    resets: u64,
 }
 
 /// What the spectrum thread is told besides I/Q.
@@ -275,6 +289,24 @@ enum SpecMsg {
     Config(SpectrumConfig),
     History(usize),
     Zoom(Option<ZoomRequest>),
+    /// Start again; blocks from before reset number `.0` are dropped.
+    Reset(u64),
+}
+
+/// Replace anything in `iq` that is not a number with zero, and say how
+/// many there were. One NaN in an exponential average stays there for good
+/// (`a + α(x − a)` is NaN once `a` is), which would blank the spectrum and
+/// silence the receiver until a restart.
+pub(crate) fn sanitise(iq: &mut [f32]) -> usize {
+    if iq.iter().all(|x| x.is_finite()) {
+        return 0;
+    }
+    let mut bad = 0;
+    for x in iq.iter_mut().filter(|x| !x.is_finite()) {
+        *x = 0.0;
+        bad += 1;
+    }
+    bad
 }
 
 fn run(
@@ -315,7 +347,9 @@ fn run(
         .spawn(move || run_spectrum(spectrum_cfg, history, rate, block_rx, msg_rx, spec_shared))
         .expect("spawn the spectrum thread");
     let mut drops = 0u64;
-    let mut pending = IqBlock { iq: Vec::new(), center: 0.0, rate };
+    let mut resets = 0u64;
+    let mut nonfinite = 0u64;
+    let mut pending = IqBlock { iq: Vec::new(), center: 0.0, rate, resets };
 
     let mut buf = vec![0.0f32; BLOCK];
     let mut audio = Vec::with_capacity(4096);
@@ -367,6 +401,11 @@ fn run(
                                 pending.iq.clear();
                             }
                         }
+                        Command::ResetSpectrum => {
+                            resets += 1;
+                            pending.iq.clear();
+                            let _ = msg_tx.send(SpecMsg::Reset(resets));
+                        }
                         Command::Pause(p) => paused = p,
                         Command::Stop => unreachable!(),
                     }
@@ -388,6 +427,7 @@ fn run(
         }
 
         let n = source.read(&mut buf);
+        nonfinite += sanitise(&mut buf[..n]) as u64;
         if n == 0 {
             if !source.is_alive() {
                 publish(&shared, |s| s.alive = false);
@@ -418,6 +458,7 @@ fn run(
                 iq: full,
                 center: pending.center,
                 rate: pending.rate,
+                resets,
             }) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => drops += 1,
@@ -431,7 +472,7 @@ fn run(
         }
         if pending.iq.len() >= MIN_SPECTRUM_BLOCK * 2 {
             let full = std::mem::replace(&mut pending.iq, Vec::with_capacity(BLOCK));
-            match block_tx.try_send(IqBlock { iq: full, center, rate }) {
+            match block_tx.try_send(IqBlock { iq: full, center, rate, resets }) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => drops += 1,
                 Err(TrySendError::Disconnected(_)) => break 'outer,
@@ -479,6 +520,7 @@ fn run(
             s.load = load;
             s.samples = samples;
             s.spectrum_drops = drops;
+            s.nonfinite = nonfinite;
         });
     }
     drop(block_tx);
@@ -501,6 +543,7 @@ fn run_spectrum(
     let mut zoom: Option<ZoomSpectrum> = None;
     let mut frames = Vec::new();
     let mut zframes = Vec::new();
+    let mut resets = 0u64;
     let (mut busy, mut window_start, mut window_samples) = (Duration::ZERO, Instant::now(), 0u64);
     let mut load = 0.0f32;
     loop {
@@ -515,6 +558,18 @@ fn run_spectrum(
                 }
                 SpecMsg::History(n) => history_len = n,
                 SpecMsg::Zoom(z) => zoom_req = z,
+                SpecMsg::Reset(n) => {
+                    resets = n;
+                    spectrum.reset();
+                    zoom = None;
+                    publish(&shared, |s| {
+                        s.latest = None;
+                        s.history.clear();
+                        s.zoom_latest = None;
+                        s.zoom_history.clear();
+                        s.spectrum_resets = n;
+                    });
+                }
             }
         }
         let block = match blocks.recv_timeout(Duration::from_millis(50)) {
@@ -522,6 +577,10 @@ fn run_spectrum(
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
         };
+        if block.resets < resets {
+            // Heard before the reset (during the over): not wanted.
+            continue;
+        }
         let t = Instant::now();
         if block.rate != rate {
             rate = block.rate;
@@ -697,5 +756,54 @@ mod tests {
         while audio_rx.pop().is_ok() {}
         let src = p.stop().expect("the source comes back");
         assert_eq!(src.center_hz(), 7.1e6);
+    }
+
+    /// A transmission whose I/Q is not numbers (the worst a converter could
+    /// hand on), then a reset as the scope sends at the end of an over: the
+    /// receiver and the spectrum carry on, and nothing from before the reset
+    /// is shown after it.
+    #[test]
+    fn garbage_during_an_over_does_not_outlast_it() {
+        use crate::source::{TxEffects, TxSim};
+        let rate = 192_000.0;
+        let src = SyntheticSource::new(rate, 7.1e6, -80.0, vec![SynthSignal::carrier(10e3, -40.0)])
+            .paced();
+        let fx = TxEffects { nan: true, ..Default::default() };
+        let sim = TxSim::new(src, 0.3, 0.8, fx);
+        let keyed = sim.keyed();
+        let cfg = PipelineConfig {
+            spectrum: SpectrumConfig {
+                fft_size: 4096,
+                fps: 30.0,
+                averaging: crate::Averaging::X8,
+                peak_hold: true,
+                ..Default::default()
+            },
+            offset_hz: 10e3,
+            history: 4,
+            ..Default::default()
+        };
+        let p = Pipeline::spawn(Box::new(sim), cfg);
+        wait_for(&p, |_| keyed.load(std::sync::atomic::Ordering::Relaxed));
+        let s =
+            wait_for(&p, |s| s.nonfinite > 0 && !keyed.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(s.level_dbm.is_finite(), "the meter is a number: {}", s.level_dbm);
+        p.send(Command::ResetSpectrum);
+        let s = wait_for(&p, |s| s.spectrum_resets == 1 && s.latest.is_some());
+        let f = s.latest.unwrap();
+        assert!(f.db.iter().all(|d| d.is_finite()));
+        let k = f.bin_of(7.11e6).unwrap();
+        assert!((f.db[k] - -40.0).abs() < 2.0, "the carrier is back: {} dBFS", f.db[k]);
+        assert!(f.noise_dbm < -90.0, "and the noise: {}", f.noise_dbm);
+        let pk = f.peak.as_ref().unwrap();
+        assert!(pk.iter().all(|d| d.is_finite() && *d < -30.0), "no peak held from the over");
+    }
+
+    #[test]
+    fn samples_that_are_not_numbers_become_zero() {
+        let mut v = [1.0, f32::NAN, -0.5, f32::INFINITY, f32::NEG_INFINITY, 0.25];
+        assert_eq!(sanitise(&mut v), 3);
+        assert_eq!(v, [1.0, 0.0, -0.5, 0.0, 0.0, 0.25]);
+        assert_eq!(sanitise(&mut v), 0);
     }
 }

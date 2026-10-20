@@ -149,6 +149,50 @@ struct Sent {
 /// gigabyte of old spectra.
 pub const PIPELINE_HISTORY: usize = 16;
 
+/// How long after the radio says it has stopped transmitting the display
+/// stays held: its receiver's front end and AGC settle, and the read-back of
+/// the dial comes home, in about that.
+pub const TX_GUARD_SECS: f64 = 0.5;
+/// The longest the CPU spectrum is waited for after asking it to start
+/// again (decision 40).
+const RESET_WAIT_SECS: f64 = 2.0;
+
+/// SDR Console's way with a transmission (decision 40): the display holds
+/// what it showed while the radio transmits and for [`TX_GUARD_SECS`]
+/// after, and then starts again from the newest samples with the averages
+/// and peaks forgotten, so whatever the radio's I/Q did meanwhile (stopped,
+/// flooded with the transmitter's own signal, moved with the dial) is never
+/// drawn and never lingers.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct TxHold {
+    keyed: bool,
+    /// Held until then, after the end of an over.
+    until: Option<f64>,
+}
+
+impl TxHold {
+    /// This frame: whether the display is held, and whether it starts
+    /// again now.
+    pub(crate) fn step(&mut self, transmitting: bool, now: f64) -> (bool, bool) {
+        if transmitting {
+            self.keyed = true;
+            self.until = None;
+            return (true, false);
+        }
+        if std::mem::take(&mut self.keyed) {
+            self.until = Some(now + TX_GUARD_SECS);
+        }
+        match self.until {
+            Some(t) if now < t => (true, false),
+            Some(_) => {
+                self.until = None;
+                (false, true)
+            }
+            None => (false, false),
+        }
+    }
+}
+
 /// The scope. One per window that shows it.
 pub struct Scope {
     settings: ScopeSettings,
@@ -211,6 +255,21 @@ pub struct Scope {
     /// The 3D surface's floor and ceiling, easing to the scale's.
     s3_levels: Option<(f32, f32)>,
     s3_levels_at: f64,
+    /// Held over a transmission (decision 40), and held on after it until
+    /// the CPU spectrum has started again (its count of resets to reach,
+    /// and since when).
+    tx_hold: TxHold,
+    held: bool,
+    /// The span last drawn before a hold, and kept through it.
+    held_span: Option<Span>,
+    reset_wait: Option<(u64, f64)>,
+    reset_ask: bool,
+    /// The samples the pipeline had read: fewer means a new pipeline.
+    samples_seen: u64,
+    /// The GPU watchdog's resyncs already told, and a note for the status
+    /// line until a time.
+    resyncs_told: u32,
+    notice: Option<(String, f64)>,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -271,6 +330,14 @@ impl Scope {
             cal_db: 0.0,
             s3_levels: None,
             s3_levels_at: 0.0,
+            tx_hold: TxHold::default(),
+            held: false,
+            held_span: None,
+            reset_wait: None,
+            reset_ask: false,
+            samples_seen: 0,
+            resyncs_told: 0,
+            notice: None,
         }
     }
 
@@ -387,7 +454,8 @@ impl Scope {
         let now = ui.input(|i| i.time);
         let before = self.settings.clone();
 
-        let span = span_of(snap);
+        self.hold_over_tx(snap, rig.transmitting, now);
+        let span = self.span(snap);
         let cur_view = view::view(span, self.want_view);
         let scf_on = self.settings.top == settings::TopView::Scf;
         let upload = if scf_on { None } else { self.take_frames(snap, span, cur_view, now) };
@@ -395,7 +463,7 @@ impl Scope {
         // The receiver past 0.45 of the span: ask for a new centre, once a
         // second at most while it is on its way.
         self.follow(span, &rig, now, &mut out);
-        let span = span_of(snap);
+        let span = self.span(snap);
         let v = view::view(span, self.want_view);
 
         let cx = paint::Ctx { span, view: v, map: self.map(), rig, now };
@@ -425,8 +493,54 @@ impl Scope {
         out
     }
 
+    /// The span drawn: the snapshot's, or while held over a transmission
+    /// the one drawn before the hold began, so a centre the radio reports
+    /// during the over (even one that comes before the radio says it is
+    /// transmitting) does not move what is held.
+    fn span(&mut self, snap: &sdr::Snapshot) -> Span {
+        if !self.held {
+            let s = span_of(snap);
+            self.held_span = Some(s);
+            return s;
+        }
+        *self.held_span.get_or_insert_with(|| span_of(snap))
+    }
+
+    /// Whether the display is held for a transmission (decision 40), and
+    /// what starting again after one takes: the GPU spectrum from the
+    /// newest samples, or the pipeline's spectrum reset (and waited for).
+    fn hold_over_tx(&mut self, snap: &sdr::Snapshot, transmitting: bool, now: f64) {
+        if snap.samples < self.samples_seen {
+            // A new pipeline: it has none of what was sent to the old one.
+            self.sent = None;
+            self.history_sent = false;
+            self.zoom_sent = None;
+            self.spectrum_on_sent = None;
+            self.reset_wait = None;
+        }
+        self.samples_seen = snap.samples;
+        let (hold, resume) = self.tx_hold.step(transmitting, now);
+        if resume {
+            if self.gpu_fft() {
+                if let Some(r) = self.gpu_run.as_mut() {
+                    r.resync(false);
+                }
+            } else {
+                self.reset_ask = true;
+                self.reset_wait = Some((snap.spectrum_resets + 1, now));
+            }
+        }
+        if let Some((want, at)) = self.reset_wait
+            && (snap.spectrum_resets >= want || now - at > RESET_WAIT_SECS || self.gpu_fft())
+        {
+            self.reset_wait = None;
+        }
+        self.held = hold || self.reset_wait.is_some();
+    }
+
     /// Take the frames that came since last time: the trace, and rows for
-    /// the waterfall and the surface. Nothing is taken while paused.
+    /// the waterfall and the surface. Nothing is taken while paused, or
+    /// while held over a transmission.
     fn take_frames(
         &mut self,
         snap: &sdr::Snapshot,
@@ -440,7 +554,7 @@ impl Scope {
         let mut up = Upload::default();
         let new_main = fresh(&snap.history, snap.generation, &mut self.last_gen);
         let new_zoom = fresh(&snap.zoom_history, snap.zoom_generation, &mut self.last_zgen);
-        if self.paused {
+        if self.paused || self.held {
             return None;
         }
         if snap.latest.is_some() {
@@ -493,6 +607,13 @@ impl Scope {
     /// this repaint, and take what came back.
     fn take_gpu(&mut self, v: View, now: f64) -> Option<Arc<Upload>> {
         let run = self.gpu_run.as_mut()?;
+        if run.resyncs != self.resyncs_told {
+            self.resyncs_told = run.resyncs;
+            self.notice = Some((
+                "FFT resynchronised: no frames came from a running stream".into(),
+                now + 8.0,
+            ));
+        }
         if let Some(r) = run.take_readout() {
             self.cols.clone_from(&r.frame.db);
             self.peak_cols = r.frame.peak.clone().unwrap_or_default();
@@ -513,7 +634,7 @@ impl Scope {
             cal_db: self.cal_db,
             view: v,
             zoom: self.gpu_zoom,
-            paused: self.paused,
+            paused: self.paused || self.held,
             trace_cols: self.trace_px,
             queries,
             now,
@@ -631,6 +752,9 @@ impl Scope {
                 self.last_gen = snap.generation;
                 self.last_zgen = snap.zoom_generation;
             }
+        }
+        if std::mem::take(&mut self.reset_ask) {
+            out.commands.push(sdr::Command::ResetSpectrum);
         }
         // The GPU runs its own zoom FFT; the pipeline's is not needed then.
         self.gpu_zoom = req;
@@ -779,5 +903,119 @@ mod tests {
         };
         assert!(covers(&z, View { lo: 970.0, hi: 1030.0 }));
         assert!(!covers(&z, View { lo: 955.0, hi: 1030.0 }));
+    }
+
+    #[test]
+    fn the_display_holds_over_an_over_and_starts_again_after_it() {
+        let mut h = TxHold::default();
+        assert_eq!(h.step(false, 0.0), (false, false));
+        assert_eq!(h.step(true, 1.0), (true, false));
+        assert_eq!(h.step(true, 5.0), (true, false));
+        // Unkeyed: still held for the guard, then started again once.
+        assert_eq!(h.step(false, 5.1), (true, false));
+        assert_eq!(h.step(false, 5.1 + TX_GUARD_SECS), (false, true));
+        assert_eq!(h.step(false, 6.5), (false, false));
+        // Keyed again inside the guard: held on, no start in between.
+        h.step(true, 7.0);
+        h.step(false, 7.1);
+        assert_eq!(h.step(true, 7.2), (true, false));
+        assert_eq!(h.step(false, 7.3), (true, false));
+        assert_eq!(h.step(false, 9.0), (false, true));
+    }
+
+    /// The whole scope on the CPU spectrum (no GPU), drawn by egui with no
+    /// window, over a pipeline whose source simulates a transmission: the
+    /// leakage at full scale, the dial read back as 0, and the panel's
+    /// `transmitting` from 1 to 2.5 s. During the over the frame on screen
+    /// does not change and the span stays; after it the spectrum is the
+    /// receiver's again at once, with no peak or average left from the over
+    /// and FIT where it was.
+    #[test]
+    fn the_cpu_scope_comes_back_from_an_over_as_it_went_in() {
+        use sdr::{
+            Command, Pipeline, PipelineConfig, SynthSignal, SyntheticSource, TxEffects, TxSim,
+        };
+        use std::sync::atomic::Ordering as O;
+        let rate = 192_000.0;
+        let centre = 14.2e6;
+        let src =
+            SyntheticSource::new(rate, centre, -80.0, vec![SynthSignal::carrier(20e3, -50.0)])
+                .paced();
+        let fx = TxEffects { strong_dbfs: Some(0.0), centre_hz: Some(0.0), ..Default::default() };
+        let sim = TxSim::new(src, 1.0, 2.5, fx);
+        let keyed = sim.keyed();
+        let settings = ScopeSettings {
+            fft_size: 4096,
+            fps: 30.0,
+            avg: true,
+            peak: true,
+            fit: true,
+            fft_gpu: false,
+            ..ScopeSettings::default()
+        };
+        let mut sc = Scope::new(None, settings);
+        let p = Pipeline::spawn(
+            Box::new(sim),
+            PipelineConfig { spectrum: sc.spectrum_config(0.0), history: 16, ..Default::default() },
+        );
+        let ctx = egui::Context::default();
+        let start = std::time::Instant::now();
+        let mut held_seq = None;
+        let mut levels = None;
+        let mut seen_tx = false;
+        let mut after = None;
+        while start.elapsed().as_secs_f64() < 4.5 {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            let now = start.elapsed().as_secs_f64();
+            let tx = keyed.load(O::Relaxed);
+            seen_tx |= tx;
+            let snap = p.snapshot();
+            let rig = ScopeRig {
+                rx_hz: centre + 20e3,
+                mode: sdr::Mode::Usb,
+                passband: (100.0, 2900.0),
+                transmitting: tx,
+            };
+            let input = egui::RawInput {
+                time: Some(now),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut out = None;
+            let mut full = ctx.run_ui(input, |ui| out = Some(sc.ui(ui, &snap, rig)));
+            full.textures_delta.clear();
+            for c in out.unwrap().commands {
+                p.send(c);
+            }
+            let seq = sc.main.as_ref().map(|f| f.seq);
+            if tx {
+                // Held: the frame from before the over, and its span.
+                let s = *held_seq.get_or_insert(seq);
+                assert_eq!(seq, s, "a frame was taken during the over");
+                assert!(sc.held);
+                assert_eq!(sc.span(&snap).center, centre);
+                levels.get_or_insert((sc.settings.floor_dbm, sc.settings.ceil_dbm));
+            } else if seen_tx && now > 2.5 + TX_GUARD_SECS + 0.5 {
+                after = sc.main.clone();
+            }
+        }
+        assert!(seen_tx, "the over happened");
+        let f = after.expect("frames after the over");
+        assert_eq!(f.center_hz, centre);
+        assert!(f.noise_dbm < -100.0, "noise floor {} after the over", f.noise_dbm);
+        let k = f.bin_of(centre + 20e3).unwrap();
+        assert!((f.db[k] - -50.0).abs() < 3.0, "the carrier at {} dBFS", f.db[k]);
+        let pk = f.peak.as_ref().unwrap().iter().copied().fold(f32::MIN, f32::max);
+        assert!(pk < -40.0, "a peak of {pk} dBFS held from the over");
+        // FIT never saw the over: the scale still has the noise on it and
+        // its top nowhere near full scale.
+        let (_, ceil) = levels.unwrap();
+        let (f_now, c_now) = (sc.settings.floor_dbm, sc.settings.ceil_dbm);
+        assert!(c_now <= ceil.max(-40.0), "FIT dragged up to {c_now} (from {ceil})");
+        assert!(f_now < f.noise_dbm, "FIT floor {f_now} over the noise {}", f.noise_dbm);
+        p.send(Command::Stop);
     }
 }

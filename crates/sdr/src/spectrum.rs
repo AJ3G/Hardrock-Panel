@@ -528,10 +528,18 @@ impl Spectrum {
             self.transform();
         }
 
-        let alpha = if self.primed { 1.0 / self.cfg.averaging.frames() as f32 } else { 1.0 };
+        let alpha = 1.0 / self.cfg.averaging.frames() as f32;
+        let primed = self.primed;
         self.primed = true;
         for (a, &p) in self.avg.iter_mut().zip(&self.power) {
-            *a += alpha * (p - *a);
+            // Unprimed (or holding something that is not a number), the
+            // average starts from this frame: `a + 1·(p − a)` would keep a
+            // NaN for good.
+            if primed && a.is_finite() {
+                *a += alpha * (p - *a);
+            } else {
+                *a = p;
+            }
         }
         let cal = self.cfg.calibration_db;
         let db: Vec<f32> = self.avg.iter().map(|&p| 10.0 * (p + 1e-20).log10() + cal).collect();
