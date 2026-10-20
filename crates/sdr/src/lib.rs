@@ -20,6 +20,7 @@ pub mod audio;
 pub mod ddc;
 pub mod decim;
 pub mod demod;
+pub mod design;
 pub mod fir;
 pub mod nco;
 pub mod pipeline;
