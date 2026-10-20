@@ -211,6 +211,11 @@ const BLOCK: usize = 2 * 32_768;
 const SPECTRUM_QUEUE: usize = 192;
 
 /// One block of I/Q for the spectrum thread.
+/// The fewest complex samples handed to the spectrum thread at once: a
+/// source that trickles a few samples per read would otherwise send a flood
+/// of tiny blocks, each a channel message, and overflow the queue.
+const MIN_SPECTRUM_BLOCK: usize = 8192;
+
 struct IqBlock {
     iq: Vec<f32>,
     center: f64,
@@ -253,6 +258,7 @@ fn run(
         .spawn(move || run_spectrum(spectrum_cfg, history, rate, block_rx, msg_rx, spec_shared))
         .expect("spawn the spectrum thread");
     let mut drops = 0u64;
+    let mut pending = IqBlock { iq: Vec::new(), center: 0.0, rate };
 
     let mut buf = vec![0.0f32; BLOCK];
     let mut audio = Vec::with_capacity(4096);
@@ -330,10 +336,30 @@ fn run(
         }
         let center = source.center_hz();
         let t = Instant::now();
-        match block_tx.try_send(IqBlock { iq: buf[..n].to_vec(), center, rate }) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => drops += 1,
-            Err(TrySendError::Disconnected(_)) => break 'outer,
+        // Gather the I/Q into blocks of at least MIN_SPECTRUM_BLOCK, each
+        // all at one centre and rate.
+        if !pending.iq.is_empty() && (pending.center != center || pending.rate != rate) {
+            let full = std::mem::take(&mut pending.iq);
+            match block_tx.try_send(IqBlock {
+                iq: full,
+                center: pending.center,
+                rate: pending.rate,
+            }) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => drops += 1,
+                Err(TrySendError::Disconnected(_)) => break 'outer,
+            }
+        }
+        pending.center = center;
+        pending.rate = rate;
+        pending.iq.extend_from_slice(&buf[..n]);
+        if pending.iq.len() >= MIN_SPECTRUM_BLOCK * 2 {
+            let full = std::mem::replace(&mut pending.iq, Vec::with_capacity(BLOCK));
+            match block_tx.try_send(IqBlock { iq: full, center, rate }) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => drops += 1,
+                Err(TrySendError::Disconnected(_)) => break 'outer,
+            }
         }
         audio.clear();
         receiver.process(&buf[..n], &mut audio);
