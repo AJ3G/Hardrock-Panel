@@ -18,6 +18,16 @@
 //! receiver's passband ([`lane::Ddc`], on the ingestion thread) so that
 //! N = 4096 gives Δα = 0.73 Hz at 3 kS/s.
 //!
+//! Δf matters as much as Δα. A channel wider than the signal averages
+//! S^α(f) over the whole signal, which leaves only R^α(0), the cyclic part
+//! of |x|²: zero for a constant-envelope signal (FT8's GFSK) and nearly so
+//! for rectangular keying. So the narrow lane wants Δf well under the
+//! signal's bandwidth: N' = 1024 (2.9 Hz at 3 kS/s), the default. Measured
+//! (`scf_sensitivity`, 12 s of averaging, 5σ, SNR in 2.5 kHz): at N' = 64
+//! (47 Hz) FT8-like and 20 WPM CW were not found even at 0 dB; at 1024,
+//! BPSK31 at −12 dB, CW at −10 dB, FT8-like only at 0 dB (−2 dB in 60 s):
+//! GFSK's cyclic features are weak, so this is not a weak-signal FT8 tool.
+//!
 //! # Threads
 //!
 //! The pipeline's I/Q tap hands each block to a bounded queue (dropping when
@@ -62,7 +72,9 @@ pub enum LaneKind {
 /// Narrow-lane rates on offer, Hz (complex).
 pub const LANE_RATES: [u32; 4] = [3000, 6000, 12_000, 24_000];
 /// Channelizer lengths N'.
-pub const CHANNELS: [u32; 3] = [64, 128, 256];
+pub const CHANNELS: [u32; 5] = [64, 128, 256, 512, 1024];
+/// The grid's f columns at most (cells pool the channels under them).
+pub const MAX_GRID_F: u32 = 256;
 /// Strip lengths N.
 pub const STRIPS: [u32; 7] = [1024, 2048, 4096, 8192, 16_384, 32_768, 65_536];
 /// α rows in the grid.
@@ -100,7 +112,7 @@ impl Default for ScfSettings {
         ScfSettings {
             lane: LaneKind::Narrow,
             lane_hz: 3000,
-            channels: 64,
+            channels: 1024,
             strip: 4096,
             avg_blocks: 16,
             coherence: true,
@@ -119,7 +131,7 @@ impl ScfSettings {
             self.lane_hz = 3000;
         }
         if !CHANNELS.contains(&self.channels) {
-            self.channels = 64;
+            self.channels = 1024;
         }
         if !STRIPS.contains(&self.strip) {
             self.strip = 4096;
@@ -138,7 +150,7 @@ impl ScfSettings {
         EngineCfg {
             n: self.strip,
             nc: self.channels,
-            grid_f: self.channels,
+            grid_f: self.channels.min(MAX_GRID_F),
             grid_a: GRID_A,
             taper: if self.kaiser { Taper::Kaiser } else { Taper::Hamming },
         }
@@ -159,7 +171,7 @@ impl ScfSettings {
             a_hi: top,
             f_lo: -fs / 2.0,
             f_hi: fs / 2.0,
-            grid_f: self.channels,
+            grid_f: self.channels.min(MAX_GRID_F),
             fs,
             d_alpha: fs / self.strip as f64,
         }
@@ -417,7 +429,13 @@ fn gpu_loop(device: &wgpu::Device, queue: &wgpu::Queue, rx: Receiver<Job>, sh: &
         st.tap_drops = sh.tap_drops.load(Ordering::Relaxed);
         if let (Some(p), Some((s, rate, shift))) = (prof, done) {
             let ax = s.axes(rate);
-            st.features = features::features(&p, &ax, s.conjugate, 5.0, 6);
+            // The σ of a few blocks' average is not yet a σ: noise passes 5σ
+            // too often. No readout until min(avg, 8) blocks are in.
+            st.features = if since >= s.avg_blocks.min(8) as u64 {
+                features::features(&p, &ax, s.conjugate, 5.0, 6)
+            } else {
+                Vec::new()
+            };
             let (floor, ceil) = scale(&p, &ax, s.conjugate);
             st.floor_db = floor;
             st.ceil_db = ceil;

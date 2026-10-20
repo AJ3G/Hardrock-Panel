@@ -110,7 +110,9 @@ pub fn features(
         .filter(|&i| keep(i))
         .filter(|&i| {
             let v = prof[i][0];
-            (i == 0 || prof[i - 1][0] <= v) && (i + 1 == rows || prof[i + 1][0] < v)
+            // A peak with a row on each side: one at the axis's end may be
+            // the slope of something past it.
+            i > 0 && i + 1 < rows && prof[i - 1][0] <= v && prof[i + 1][0] < v
         })
         .map(|i| (i, (prof[i][0] - med) / sigma))
         .filter(|&(_, z)| z >= thresh)

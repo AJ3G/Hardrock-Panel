@@ -227,7 +227,10 @@ impl Scf {
             caption(ui, "· N′");
             for c in CHANNELS {
                 if chip(ui, s.channels == c, &c.to_string())
-                    .on_hover_text("Channelizer length: Δf = rate / N′")
+                    .on_hover_text(
+                        "Channelizer length: Δf = rate / N′. Keep Δf well under the \
+                         signal's bandwidth, or its features average away",
+                    )
                     .clicked()
                 {
                     s.channels = c;
@@ -447,7 +450,7 @@ fn readout(ui: &egui::Ui, r: Rect, st: &Status, centre_shown: f64) {
         } else {
             // A rate, not an identification: a harmonic of something else
             // can land on it too.
-            let m = f.mode.map(|m| format!("  ≈{m} rate")).unwrap_or_default();
+            let m = f.mode.map(|m| format!("  ~{m} rate")).unwrap_or_default();
             format!("{} α {}{m}", i + 1, fmt_hz(f.alpha_hz))
         };
         p.text(pos2(x, y), Align2::LEFT_TOP, main, mono(11.5), ink());

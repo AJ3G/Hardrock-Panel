@@ -353,11 +353,220 @@ fn the_threads_find_psk31_in_the_narrow_lane() {
             // At +300 Hz in the lane. The coherence spreads a strong signal's
             // features over the channels its leakage reaches, and the readout
             // judges each against its own column, so f is good to a few
-            // channels (47 Hz each), not one.
+            // channels, not one.
             assert!((f.f_hz - 300.0).abs() < 200.0, "{f:?}");
             break;
         }
         assert!(t.elapsed().as_secs() < 60, "no feature: {} blocks, {:?}", st.blocks, st.error);
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// The narrow lane's measurement set-up, as the view's defaults: 3 kS/s,
+/// N' = 1024 (Kaiser, Δf 2.9 Hz), N = 4096 (Δα 0.73 Hz, blocks of 1.37 s),
+/// coherence, α from 0 to 50 Hz on 256 rows. SCF_NC and SCF_N override.
+struct Bench {
+    /// Profile column: 0 (over the column's mean) or 3 (absolute).
+    col: usize,
+    fs: f64,
+    cfg: EngineCfg,
+    a_hi: f64,
+}
+
+impl Bench {
+    fn narrow() -> Bench {
+        Bench {
+            col: 0,
+            fs: 3000.0,
+            cfg: EngineCfg { n: 4096, nc: 1024, grid_f: 256, grid_a: 256, taper: Taper::Kaiser },
+            a_hi: 50.0,
+        }
+    }
+
+    /// Run `blocks` blocks of `x` (linear average over all of them) and
+    /// return the column-normalised profile (dB per α row).
+    fn profile(&self, e: &mut Engine, x: &[C], blocks: usize) -> Vec<f32> {
+        let n = self.cfg.n as usize;
+        let bp = |b: u64| BlockParams {
+            conj: false,
+            measure: Measure::Coherence,
+            beta: beta(b, blocks as u32) as f32,
+            a_range: (0.0, (self.a_hi / self.fs) as f32),
+            f_range: (-0.5, 0.5),
+            a_mask: (3.0 / n as f64) as f32,
+        };
+        for b in 0..blocks {
+            let blk = interleave(&x[b * n..b * n + e.block_len()]);
+            e.process(&blk, &bp(b as u64));
+        }
+        e.flush().expect("a profile").iter().map(|r| r[self.col]).collect()
+    }
+
+    fn row_of(&self, alpha: f64) -> f64 {
+        alpha / self.a_hi * self.cfg.grid_a as f64 - 0.5
+    }
+
+    /// The strongest profile value within ±0.5 Hz of `alpha`.
+    fn at(&self, prof: &[f32], alpha: f64) -> f32 {
+        let w = 0.5 / self.a_hi * self.cfg.grid_a as f64;
+        let c = self.row_of(alpha);
+        let lo = (c - w).ceil().max(0.0) as usize;
+        let hi = ((c + w).floor() as usize).min(prof.len() - 1);
+        prof[lo..=hi].iter().copied().fold(f32::MIN, f32::max)
+    }
+}
+
+/// Mean and σ of the same statistic on noise alone: the window max at many
+/// α away from 0, over several noise records.
+fn noise_stats(b: &Bench, e: &mut Engine, blocks: usize, alpha: f64) -> (f64, f64) {
+    let mut v = Vec::new();
+    for seed in 0..3u64 {
+        let mut rng = Rng::new(1000 + seed);
+        let x = noise(b.cfg.n as usize * blocks + b.cfg.nc as usize, 1.0, &mut rng);
+        let prof = b.profile(e, &x, blocks);
+        let mut a = 3.0;
+        while a < b.a_hi - 1.0 {
+            if (a - alpha).abs() > 1.0 {
+                v.push(b.at(&prof, a) as f64);
+            }
+            a += 1.1;
+        }
+    }
+    let m = v.iter().sum::<f64>() / v.len() as f64;
+    let s = (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (v.len() - 1) as f64).sqrt();
+    (m, s)
+}
+
+/// The sensitivity table for the report and docs/design-decisions.md 36:
+/// for FT8-like 8-GFSK, BPSK and CW in white Gaussian noise, the lowest
+/// SNR (in 2.5 kHz, WSJT-X's convention) at which the feature at its
+/// symbol (keying) rate stands 5σ over the noise-only statistic.
+/// `cargo test -p hardrock-panel scf_sensitivity -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn scf_sensitivity() {
+    let Some((ad, device, queue)) = gpu() else {
+        eprintln!("needs a wgpu adapter");
+        return;
+    };
+    eprintln!("GPU: {}", ad.get_info().name);
+    let col = std::env::var("SCF_COL").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mut b = Bench { col, ..Bench::narrow() };
+    if let Some(nc) = std::env::var("SCF_NC").ok().and_then(|v| v.parse().ok()) {
+        b.cfg.nc = nc;
+        b.cfg.grid_f = nc.min(super::MAX_GRID_F);
+    }
+    if let Some(n) = std::env::var("SCF_N").ok().and_then(|v| v.parse().ok()) {
+        b.cfg.n = n;
+    }
+    eprintln!(
+        "N' {} (Δf {:.1} Hz), N {} (Δα {:.2} Hz)",
+        b.cfg.nc,
+        b.fs / b.cfg.nc as f64,
+        b.cfg.n,
+        b.fs / b.cfg.n as f64
+    );
+    eprintln!("statistic: profile column {col}");
+    let mut e = Engine::new(&device, &queue, b.cfg);
+    let n = b.cfg.n as usize;
+    type Gen = fn(usize, f64, f64, &mut Rng) -> Vec<C>;
+    let ft8: Gen = |len, fs, amp, rng| ft8_like(len, fs, 300.0, amp, rng);
+    let psk: Gen = |len, fs, amp, rng| bpsk(len, fs, 31.25, 300.0, amp, false, rng);
+    let cw20: Gen = |len, fs, amp, rng| cw(len, fs, 20.0, 300.0, amp, rng);
+    // (name, generator, feature α, duty: mean power over amp²)
+    let sigs: [(&str, Gen, f64, f64); 3] = [
+        ("FT8-like 8-GFSK 6.25 Bd", ft8, 6.25, 1.0),
+        ("BPSK 31.25 Bd (rect.)", psk, 31.25, 1.0),
+        ("CW 20 WPM (OOK, 16.7 Bd)", cw20, 20.0 / 1.2, 0.5),
+    ];
+    let only: Option<usize> = std::env::var("SCF_BLOCKS").ok().and_then(|v| v.parse().ok());
+    for blocks in [9usize, 44].into_iter().filter(|b| only.is_none_or(|o| o == *b)) {
+        let secs = blocks as f64 * n as f64 / b.fs;
+        for (name, g, alpha, duty) in sigs {
+            let (m, s) = noise_stats(&b, &mut e, blocks, alpha);
+            let mut found = None;
+            let mut line = String::new();
+            let mut snr = -36.0;
+            while snr <= 0.0 {
+                let mut zs = Vec::new();
+                for seed in 0..2u64 {
+                    let mut rng = Rng::new(77 + seed);
+                    let len = n * blocks + b.cfg.nc as usize;
+                    let amp = amp_for_snr(snr, 1.0, b.fs, duty);
+                    let x = mix(&g(len, b.fs, amp, &mut rng), &noise(len, 1.0, &mut rng));
+                    let prof = b.profile(&mut e, &x, blocks);
+                    zs.push((b.at(&prof, alpha) as f64 - m) / s);
+                }
+                let z = zs.iter().sum::<f64>() / zs.len() as f64;
+                line += &format!(" {snr:.0}:{z:.1}");
+                if found.is_none() && z >= 5.0 {
+                    found = Some(snr);
+                }
+                if z > 12.0 {
+                    break;
+                }
+                snr += 2.0;
+            }
+            eprintln!(
+                "{name}, {blocks} blocks ({secs:.1} s): 5σ at {} dB SNR in 2.5 kHz   [SNR:σ{line}]",
+                found.map_or("> 0".to_string(), |v| format!("{v:.0}"))
+            );
+        }
+    }
+}
+
+/// GPU time a block for a range of sizes, and the sample rate that keeps
+/// up with. `cargo test -p hardrock-panel scf_throughput -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn scf_throughput() {
+    let Some((ad, device, queue)) = gpu() else {
+        eprintln!("needs a wgpu adapter");
+        return;
+    };
+    eprintln!("GPU: {}", ad.get_info().name);
+    for (nc, n) in [
+        (64u32, 4096u32),
+        (64, 16_384),
+        (64, 65_536),
+        (128, 4096),
+        (256, 4096),
+        (256, 16_384),
+        (1024, 4096),
+    ] {
+        let cfg = EngineCfg {
+            n,
+            nc,
+            grid_f: nc.min(super::MAX_GRID_F),
+            grid_a: 256,
+            taper: Taper::Kaiser,
+        };
+        let mut e = Engine::new(&device, &queue, cfg);
+        let mut rng = Rng::new(1);
+        let blk = interleave(&noise(e.block_len(), 1.0, &mut rng));
+        let bp = BlockParams {
+            conj: false,
+            measure: Measure::Coherence,
+            beta: 0.1,
+            a_range: (0.0, 0.5),
+            f_range: (-0.5, 0.5),
+            a_mask: 0.0,
+        };
+        for _ in 0..3 {
+            e.process(&blk, &bp);
+        }
+        e.flush();
+        let reps = 12;
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            e.process(&blk, &bp);
+        }
+        e.flush();
+        let ms = t.elapsed().as_secs_f64() * 1000.0 / reps as f64;
+        eprintln!(
+            "N' {nc:>3} N {n:>6}: {ms:7.2} ms a block, keeps up with {:.3} MS/s ({} points a block)",
+            n as f64 / ms / 1000.0,
+            n * nc
+        );
     }
 }

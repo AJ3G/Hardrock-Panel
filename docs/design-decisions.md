@@ -374,3 +374,24 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 **What the panel does.** DECODE, on the top bar, opens a window with every mode in four rows: WSJT (FT8, FT4, WSPR, JT65, JT9, FST4-60, Q65-30A), keyboard (RTTY 45.45 Bd 170 Hz, PSK31, NAVTEX, Olivia 8/500, THOR16), pictures (SSTV, WEFAX) and from the I/Q (HFDL, ACARS, VDL2, AIS, Mode S). RUN starts the chosen one; it keeps running when the window is closed, until STOP. The audio modes take the receiver's 48 kHz audio, the data links the I/Q. The list shows each decode's UTC, SNR, DT, audio frequency and RF frequency (the receiver's dial plus the audio, corrected by the scope's ppm, plus the transverter LO), newest first, and the line above it how many blocks the decoder dropped and how long the last slot took. Keyboard modes show running text with their audio frequency to set; pictures build up as they arrive, WEFAX with its LPM and IOC and a manual start and stop. Data links take the radio window's transverter offset as their LO, so they report true RF, and say when the span doesn't hold their channels. WSJT decodes also go out as WSJT-X UDP Decode, WSPR Decode and Status messages when that is on under SETTINGS. Only one sub-mode of FST4 and Q65 is offered for now.
 
 **Where.** `crates/hardrock-panel/src/decode.rs`.
+
+## 36. The scope's SCF view shows cyclic features, on the GPU, from a narrow lane by default
+
+**Status:** drafted by the SCF worker, 20 Oct 2026, for the integrator to confirm.
+
+**What the panel does.** The scope's top view has a fourth choice, *SCF*, beside Spectrum, 3D FFT and Both. It shows the spectral coherence (or the SCF itself) over frequency f and cycle frequency α, by the strip spectral correlation analyser (SSCA), as a terrain in the 3D view's perspective and palette or as a heat map, with axes in Hz and a readout of the strongest cycle frequencies (5σ over the median α row, each cell judged against its own f column), marked on the plane and labelled with a known mode whose symbol rate matches ("~FT8 rate": a rate, not an identification; nothing is reported before 8 blocks, or all of them if fewer are averaged). x·x* finds symbol and keying rates (α = k·Rs, with |α| < 3Δα left out because it is the PSD); x·x finds carriers (α = 2fc). It shows what is there and its parameters; it decodes nothing.
+
+**Lanes.** *Narrow* (the default) down-converts 3, 6, 12 or 24 kHz around the receiver's passband on the ingestion thread (an f64 NCO and decimate-by-2 FIR stages); *Whole span* runs on the I/Q as it comes, for wideband data with kHz symbol rates. Defaults: 3 kS/s, N′ = 1024 (Δf 2.9 Hz, Kaiser β = 10 channel taper), N = 4096 (Δα 0.73 Hz, a block every 1.37 s), 16 blocks averaged, α to 50 Hz.
+
+**Why N′ = 1024.** Δf has to be well under the signal's bandwidth. A channel wider than the signal averages S^α(f) over all of it, which leaves R^α(0), the cyclic part of |x|²: zero for constant-envelope FT8 and nearly zero for rectangular keying. Measured (`scf_sensitivity`, 9 blocks / 12 s, 5σ, SNR in 2.5 kHz): at N′ = 64 (47 Hz) FT8-like 8-GFSK and 20 WPM CW were not found even at 0 dB, and BPSK31 was found at −4 dB; at N′ = 1024 (as shipped, lavapipe):
+
+| Signal | 12 s (9 blocks) | 60 s (44 blocks) |
+|---|---|---|
+| BPSK 31.25 Bd, rectangular | −12 dB | −18 dB |
+| CW 20 WPM, random keying | −10 dB | −14 dB |
+| FT8-like 8-GFSK, 6.25 Bd | 0 dB (4.8σ) | −2 dB |
+ FT8 is only found well above WSJT-X's −21 dB decode limit, because its GFSK has weak cyclic features. The SCF is for finding and measuring what is there, not for weak-signal FT8.
+
+**Threads and GPU.** The pipeline's I/Q tap copies each block into a bounded queue (dropping when it is full) only while the view is on screen. The ingestion thread cuts blocks of N + N′ samples. The GPU thread uploads each block with one `write_buffer` and runs six compute passes: channelizer, channel power, strip FFTs with the product, averaging, the (f, α) grid, and the column floor with the α profile. FFTs are radix-4 in workgroup memory, with a four-step FFT past 2048 points. Two blocks are in flight, and only the profile (a few KB) is read back. The UI draws the grid buffer straight from VRAM with its own vertex shader. With no compute shaders or vertex storage buffers, the view says so and does nothing. On lavapipe (CPU) a default block takes about 140 ms; checked against an f64 CPU SSCA to 3e-7 of the peak.
+
+**Where.** `crates/hardrock-panel/src/scope/scf/` (`engine.rs` and `shaders/ssca.wgsl` the GPU SSCA, `reference.rs` the CPU one, `lane.rs` the DDC, `features.rs` the readout, `draw.rs` and `shaders/scf_view.wgsl` the drawing, `ui.rs` the view), `scope/mod.rs`, `scopewin.rs`.
