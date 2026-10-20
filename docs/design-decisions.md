@@ -276,6 +276,7 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 **How.** The look is an `AmpTheme` (`panel/amptheme.rs`), picked by `amp_theme()` from the radio settings, as `RigTheme` is for the radio window; the screen is drawn in `panel/tft.rs`. What both looks show is worked out once: the readings and needles (`Shown`), the tiles (`tiles()`), the keys with whether they can be pressed and why not (`keys()`, interlocks #2 and #4), the link's state and the tuner's. Each look only draws them.
 
 **Where.** `crates/hardrock-panel/src/panel.rs`, `panel/amptheme.rs`, `panel/tft.rs`; `main.rs` passes the radio settings to the window (`AmpMeters::set_radio`).
+
 ## 25. Outside programs connect by TCI and rigctld, and receive decodes over WSJT-X UDP
 
 **Decided:** AJ3G, 20 Oct 2026, through the coordinator: he may use third-party decoders over TCP/IP or TCI, so the panel keeps TCI and rigctld open for them beside its own decoders.
