@@ -33,32 +33,41 @@ pub enum Measure {
     Coherence,
 }
 
-/// The data taper on the channelizer and on the strips.
+/// The channelizer's data taper. (The strips always take Hamming: their
+/// sidelobes only have to keep the α = 0 ridge off its neighbours.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Taper {
+    /// −43 dB sidelobes, the narrowest main lobe: the finest Δf.
     Hamming,
-    /// Kaiser, β = 6: lower sidelobes (−44 dB) than Hamming's −43 with a
-    /// faster fall-off, for a strong carrier beside a weak feature.
+    /// Kaiser, β = 10: −74 dB sidelobes for a main lobe 1.6 times as wide.
+    /// A strong signal's leakage into far channels carries its own cyclic
+    /// features there, and the coherence (normalised by those channels'
+    /// small power) shows them across the whole lane; this keeps that 30 dB
+    /// further down.
     Kaiser,
 }
 
 impl Taper {
     pub fn coefficients(self, n: usize) -> Vec<f64> {
-        let m = (n.max(2) - 1) as f64;
-        (0..n)
-            .map(|i| {
-                let x = i as f64 / m;
-                match self {
-                    Taper::Hamming => 0.54 - 0.46 * (std::f64::consts::TAU * x).cos(),
-                    Taper::Kaiser => {
-                        let beta = 6.0;
-                        let t = 2.0 * x - 1.0;
-                        bessel_i0(beta * (1.0 - t * t).max(0.0).sqrt()) / bessel_i0(beta)
-                    }
-                }
-            })
-            .collect()
+        match self {
+            Taper::Hamming => {
+                let m = (n.max(2) - 1) as f64;
+                (0..n).map(|i| 0.54 - 0.46 * (std::f64::consts::TAU * i as f64 / m).cos()).collect()
+            }
+            Taper::Kaiser => kaiser(n, 10.0),
+        }
     }
+}
+
+/// A Kaiser window of `n` points and shape `beta`.
+pub fn kaiser(n: usize, beta: f64) -> Vec<f64> {
+    let m = (n.max(2) - 1) as f64;
+    (0..n)
+        .map(|i| {
+            let t = 2.0 * i as f64 / m - 1.0;
+            bessel_i0(beta * (1.0 - t * t).max(0.0).sqrt()) / bessel_i0(beta)
+        })
+        .collect()
 }
 
 /// The modified Bessel function I₀, by its series (converges fast for the
@@ -123,10 +132,14 @@ pub struct BlockParams {
     /// The grid's α rows and f columns, cycles per sample.
     pub a_range: (f32, f32),
     pub f_range: (f32, f32),
+    /// x·x* cells with |α| under this are left empty (the PSD at α = 0),
+    /// cycles per sample; 0 shows everything.
+    pub a_mask: f32,
 }
 
-/// One α row of the cyclic-domain profile: the strongest cell (dB), its
-/// column, and the row's mean and mean square (dB, dB²).
+/// One α row of the cyclic-domain profile: the strongest cell over its
+/// column's mean (dB), its column, the row's mean level and its strongest
+/// level (dB).
 pub type ProfileRow = [f32; 4];
 
 #[repr(C)]
@@ -148,6 +161,8 @@ struct Params {
     norm_scf: f32,
     norm_psd: f32,
     ntw: u32,
+    a_mask: f32,
+    _pad: [f32; 3],
 }
 
 #[repr(C)]
@@ -279,6 +294,7 @@ impl Engine {
         let psd = storage("scf-psd", nc as u64 * 4, src);
         let grid = storage("scf-grid", (cfg.grid_f * cfg.grid_a) as u64 * 4, src);
         let prof = storage("scf-profile", cfg.grid_a as u64 * 16, src);
+        let colm = storage("scf-columns", cfg.grid_f as u64 * 4, src);
         let readback = [0, 1].map(|i| {
             d.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(if i == 0 { "scf-readback-0" } else { "scf-readback-1" }),
@@ -290,7 +306,7 @@ impl Engine {
 
         // Windows and twiddles, computed in f64 and uploaded once.
         let a = cfg.taper.coefficients(nc as usize);
-        let g = cfg.taper.coefficients(n as usize);
+        let g = Taper::Hamming.coefficients(n as usize);
         let a32: Vec<f32> = a.iter().map(|&v| v as f32).collect();
         let g32: Vec<f32> = g.iter().map(|&v| v as f32).collect();
         let tw32: Vec<f32> = (0..n as usize)
@@ -380,6 +396,7 @@ impl Engine {
         let accum = count_pass(n * nc);
         let map = count_pass(cfg.grid_f * cfg.grid_a);
         let profile = count_pass(cfg.grid_a);
+        let columns = count_pass(cfg.grid_f);
 
         let mut passes = Vec::new();
         let mut add = |entry: &str, c: PassCfg, binds: &[(u32, [&wgpu::Buffer; 2])]| {
@@ -430,7 +447,8 @@ impl Engine {
         let s_buf = if s_in_x { &x } else { &t };
         add("accum_main", accum, &[(6, both(s_buf)), (8, both(&acc))]);
         add("map_main", map, &[(8, both(&acc)), (9, both(&psd)), (10, both(&grid))]);
-        add("profile_main", profile, &[(10, both(&grid)), (11, both(&prof))]);
+        add("column_main", columns, &[(10, both(&grid)), (12, both(&colm))]);
+        add("profile_main", profile, &[(10, both(&grid)), (11, both(&prof)), (12, both(&colm))]);
 
         Engine {
             device: device.clone(),
@@ -478,6 +496,8 @@ impl Engine {
             norm_scf: (1.0 / (self.sum_g * self.sum_g * self.sum_a * self.sum_a)) as f32,
             norm_psd: (1.0 / (c.n as f64 * self.sum_a * self.sum_a)) as f32,
             ntw: c.n,
+            a_mask: bp.a_mask,
+            _pad: [0.0; 3],
         }
     }
 

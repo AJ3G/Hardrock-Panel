@@ -296,10 +296,13 @@ impl Scf {
                 s.heat_map = true;
             }
             caption(ui, "· Taper");
-            if chip(ui, !s.kaiser, "Hamming").clicked() {
+            if chip(ui, !s.kaiser, "Hamming").on_hover_text("Finest Δf; −43 dB leakage").clicked() {
                 s.kaiser = false;
             }
-            if chip(ui, s.kaiser, "Kaiser").clicked() {
+            if chip(ui, s.kaiser, "Kaiser")
+                .on_hover_text("−74 dB leakage: a strong signal's features stay in its own channels")
+                .clicked()
+            {
                 s.kaiser = true;
             }
             if ui.button("Reset average").clicked() {
@@ -381,7 +384,7 @@ fn terrain_axes(p: &egui::Painter, plot: Rect, ax: &Axes) {
     let fstep = tick_step(ax.f_hi - ax.f_lo, 8.0);
     for t in ticks(ax.f_lo, ax.f_hi, fstep) {
         let xl = ((t - ax.f_lo) / (ax.f_hi - ax.f_lo)) as f32;
-        p.text(at(xl, 0.0) + vec2(0.0, 3.0), Align2::CENTER_TOP, fmt_hz(t), label(10.5), dim());
+        p.text(at(xl, 0.0) + vec2(0.0, 3.0), end_align(xl), fmt_hz(t), label(10.5), dim());
     }
     let astep = tick_step(ax.a_hi - ax.a_lo, 6.0);
     for t in ticks(ax.a_lo, ax.a_hi, astep) {
@@ -392,13 +395,25 @@ fn terrain_axes(p: &egui::Painter, plot: Rect, ax: &Axes) {
     p.text(at(1.0, 0.0) + vec2(4.0, 3.0), Align2::LEFT_TOP, "f", label(12.0), ink());
 }
 
+/// A label under an axis: centred on its tick, but kept inside at the ends.
+fn end_align(xl: f32) -> Align2 {
+    if xl < 0.02 {
+        Align2::LEFT_TOP
+    } else if xl > 0.98 {
+        Align2::RIGHT_TOP
+    } else {
+        Align2::CENTER_TOP
+    }
+}
+
 fn heat_axes(p: &egui::Painter, plot: Rect, ax: &Axes) {
     p.rect_stroke(plot, 0.0, Stroke::new(1.0, edge()), egui::StrokeKind::Outside);
     let fstep = tick_step(ax.f_hi - ax.f_lo, 8.0);
     for t in ticks(ax.f_lo, ax.f_hi, fstep) {
         let x = plot.left() + ((t - ax.f_lo) / (ax.f_hi - ax.f_lo)) as f32 * plot.width();
         p.vline(x, plot.y_range(), Stroke::new(1.0, grid().gamma_multiply(0.5)));
-        p.text(pos2(x, plot.bottom() + 3.0), Align2::CENTER_TOP, fmt_hz(t), label(10.5), dim());
+        let xl = (x - plot.left()) / plot.width();
+        p.text(pos2(x, plot.bottom() + 3.0), end_align(xl), fmt_hz(t), label(10.5), dim());
     }
     let astep = tick_step(ax.a_hi - ax.a_lo, 6.0);
     for t in ticks(ax.a_lo, ax.a_hi, astep) {
@@ -430,7 +445,9 @@ fn readout(ui: &egui::Ui, r: Rect, st: &Status, centre_shown: f64) {
         let main = if st.conj {
             format!("{} α {}  → fc {}", i + 1, fmt_hz(f.alpha_hz), fmt_hz(f.alpha_hz / 2.0))
         } else {
-            let m = f.mode.map(|m| format!("  {m}")).unwrap_or_default();
+            // A rate, not an identification: a harmonic of something else
+            // can land on it too.
+            let m = f.mode.map(|m| format!("  ≈{m} rate")).unwrap_or_default();
             format!("{} α {}{m}", i + 1, fmt_hz(f.alpha_hz))
         };
         p.text(pos2(x, y), Align2::LEFT_TOP, main, mono(11.5), ink());

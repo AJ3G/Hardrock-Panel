@@ -1,7 +1,9 @@
 //! The readout: the strongest cycle frequencies in the cyclic-domain
 //! profile, as a CFAR detector would pick them, and what they mean.
 //!
-//! Each α row's strongest cell (dB) is compared with the median of all rows,
+//! Each α row's strongest cell (dB over its own column's mean, so a column
+//! raised by a strong signal's leakage does not hide the rest) is compared
+//! with the median of all rows,
 //! in units of the rows' spread (1.4826 × the median absolute deviation, a
 //! σ that a few strong features do not inflate). Rows near α = 0 (the PSD
 //! itself, for x·x*) and near ±fs (the same, aliased) are left out.

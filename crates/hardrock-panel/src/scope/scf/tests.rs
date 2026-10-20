@@ -276,7 +276,14 @@ fn the_gpu_matches_the_cpu_reference() {
         let cfg = EngineCfg { n, nc, grid_f: gf, grid_a: ga, taper: Taper::Hamming };
         let a_range = (0.0f32, a_hi);
         let f_range = (-0.5f32, 0.5f32);
-        let bp = BlockParams { conj, measure: Measure::Coherence, beta: 1.0, a_range, f_range };
+        let bp = BlockParams {
+            conj,
+            measure: Measure::Coherence,
+            beta: 1.0,
+            a_range,
+            f_range,
+            a_mask: 0.0,
+        };
         let e = run_gpu(&dev, cfg, &x, bp, 4);
         let cpu = averaged(&x, n as usize, nc as usize, Taper::Hamming, conj, 4);
         let acc = e.read_f32(Readable::Acc);
@@ -330,6 +337,9 @@ fn the_threads_find_psk31_in_the_narrow_lane() {
     for c in iq.chunks(2 * 4800) {
         sh.seen_ms.store(sh.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
         rt.tap_tx.send((c.to_vec(), fs)).unwrap();
+        // Ten times real time: the GPU thread drops blocks it has no time
+        // for, as it should live, and lavapipe beside other tests is slow.
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let t = std::time::Instant::now();
     loop {
@@ -340,10 +350,11 @@ fn the_threads_find_psk31_in_the_narrow_lane() {
             let f = &st.features[0];
             assert!((f.alpha_hz - 31.25).abs() < 0.8, "{:?}", st.features);
             assert_eq!(f.mode, Some("PSK31"));
-            // At +300 Hz in the lane. The coherence spreads a strong signal
-            // over the channels its window's leakage reaches, so within a
-            // couple of channels (47 Hz each).
-            assert!((f.f_hz - 300.0).abs() < 120.0, "{f:?}");
+            // At +300 Hz in the lane. The coherence spreads a strong signal's
+            // features over the channels its leakage reaches, and the readout
+            // judges each against its own column, so f is good to a few
+            // channels (47 Hz each), not one.
+            assert!((f.f_hz - 300.0).abs() < 200.0, "{f:?}");
             break;
         }
         assert!(t.elapsed().as_secs() < 60, "no feature: {} blocks, {:?}", st.blocks, st.error);

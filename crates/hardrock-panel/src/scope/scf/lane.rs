@@ -15,7 +15,7 @@ use std::f64::consts::{PI, TAU};
 /// A windowed-sinc low-pass, cutoff `fc` (cycles per sample), Kaiser β = 6,
 /// unity gain at DC.
 fn lowpass(taps: usize, fc: f64) -> Vec<f32> {
-    let w = super::engine::Taper::Kaiser.coefficients(taps);
+    let w = super::engine::kaiser(taps, 6.0);
     let m = (taps - 1) as f64 / 2.0;
     let mut h: Vec<f64> = (0..taps)
         .map(|i| {

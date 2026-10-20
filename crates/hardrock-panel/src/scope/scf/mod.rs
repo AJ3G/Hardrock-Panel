@@ -90,7 +90,8 @@ pub struct ScfSettings {
     pub alpha_max_hz: f64,
     /// A flat heat map rather than the terrain.
     pub heat_map: bool,
-    /// Kaiser rather than Hamming tapers.
+    /// A Kaiser channelizer taper (low leakage) rather than Hamming (fine
+    /// Δf).
     pub kaiser: bool,
 }
 
@@ -106,7 +107,7 @@ impl Default for ScfSettings {
             conjugate: false,
             alpha_max_hz: 50.0,
             heat_map: false,
-            kaiser: false,
+            kaiser: true,
         }
     }
 }
@@ -401,6 +402,7 @@ fn gpu_loop(device: &wgpu::Device, queue: &wgpu::Queue, rx: Receiver<Job>, sh: &
             beta: average_weight(since, job.s.avg_blocks),
             a_range: ((ax.a_lo / fs) as f32, (ax.a_hi / fs) as f32),
             f_range: ((ax.f_lo / fs) as f32, (ax.f_hi / fs) as f32),
+            a_mask: (3.0 / job.s.strip as f64) as f32,
         };
         let t = Instant::now();
         let prof = e.process(&job.iq, &bp);
@@ -436,7 +438,7 @@ pub fn average_weight(b: u64, avg: u32) -> f32 {
 }
 
 /// The level scale for the plane: the floor a little under the median
-/// cell, the ceiling over the strongest row (at least 12 dB above).
+/// cell, the ceiling over the strongest cell (at least 12 dB above).
 fn scale(p: &[ProfileRow], ax: &Axes, conj: bool) -> (f32, f32) {
     let rows = p.len();
     let mask = 3.0 * ax.d_alpha;
@@ -453,7 +455,7 @@ fn scale(p: &[ProfileRow], ax: &Axes, conj: bool) -> (f32, f32) {
     means.sort_by(f32::total_cmp);
     let floor = means[means.len() / 2] - 2.0;
     let top =
-        p.iter().enumerate().filter(|(i, _)| keep(*i)).map(|(_, r)| r[0]).fold(floor, f32::max);
+        p.iter().enumerate().filter(|(i, _)| keep(*i)).map(|(_, r)| r[3]).fold(floor, f32::max);
     (floor, top.max(floor + 12.0) + 1.0)
 }
 

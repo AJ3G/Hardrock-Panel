@@ -7,7 +7,7 @@
 //! ```
 //!
 //! `--rate` picks the I/Q rate (one of the DUO's), `--3d` starts with the 3D
-//! FFT over the spectrum, `--fft N` sets the FFT size, `--height H` the window's height, `--screenshot` saves the
+//! FFT over the spectrum, `--scf` with the SCF view on the CW station (`--heat` as a heat map), `--fft N` sets the FFT size, `--height H` the window's height, `--screenshot` saves the
 //! window after a few seconds as a binary PPM and exits. The demo stands in
 //! for the radio: a tune moves the pipeline's receiver, a recentre moves the
 //! synthetic source's centre (its stations move with it, unlike a real band),
@@ -65,8 +65,10 @@ impl Demo {
     fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Demo {
         theme::apply(&cc.egui_ctx);
         let Args { rate, screenshot, settings } = args;
+        // The SCF view starts on the CW station, 300 Hz into its lane.
+        let scf = settings.top == scope::settings::TopView::Scf;
         let scope = Scope::new(cc.wgpu_render_state.as_ref(), settings);
-        let rx_hz = CENTER_HZ + 12_500.0;
+        let rx_hz = CENTER_HZ + if scf { -27_100.0 } else { 12_500.0 };
         let mode = Mode::Usb;
         let pipeline = start(&scope, rate, CENTER_HZ, rx_hz, mode);
         Demo {
@@ -133,7 +135,15 @@ impl eframe::App for Demo {
                         snap.source
                     ));
                 });
-                egui::ScrollArea::vertical().show(ui, |ui| self.scope.ui(ui, &snap, rig)).inner
+                let out =
+                    egui::ScrollArea::vertical().show(ui, |ui| self.scope.ui(ui, &snap, rig)).inner;
+                let p = &self.pipeline;
+                self.scope.scf_tap(&mut |sink| {
+                    let tap =
+                        sink.map(|s| Box::new(move |iq: &[f32], _: f64, r: f64| s(iq, r)) as _);
+                    p.send(Command::SetIqTap(tap));
+                });
+                out
             })
             .inner;
 
@@ -184,6 +194,8 @@ fn main() -> eframe::Result {
                 a.settings.fft_size = n.unwrap_or(a.settings.fft_size);
             }
             "--3d" => a.settings.top = scope::settings::TopView::Both,
+            "--scf" => a.settings.top = scope::settings::TopView::Scf,
+            "--heat" => a.settings.scf.heat_map = true,
             "--height" => {
                 let h = args.next().and_then(|r| r.parse().ok());
                 height = h.unwrap_or(height);

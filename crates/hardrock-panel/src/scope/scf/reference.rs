@@ -93,7 +93,7 @@ pub struct Block {
 pub fn ssca(x: &[C], n: usize, nc: usize, taper: Taper, conj: bool) -> Block {
     assert_eq!(x.len(), n + nc);
     let a = taper.coefficients(nc);
-    let g = taper.coefficients(n);
+    let g = Taper::Hamming.coefficients(n);
     let sa: f64 = a.iter().sum();
     let sg: f64 = g.iter().sum();
     // X(m, k), channel-major.

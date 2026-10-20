@@ -10,8 +10,10 @@
 //   accum_main    |S(k, q)|², averaged over the blocks
 //   map_main      the strip points onto the (f, α) grid, max-pooled, in dB,
 //                 as the SCF or as the spectral coherence
-//   profile_main  each α row's strongest cell, its column, and the row's
-//                 mean and mean square: the cyclic-domain profile
+//   column_main   each f column's mean level over α (its own floor)
+//   profile_main  each α row's strongest cell over its column's floor, its
+//                 column, the row's mean and strongest level: the cyclic-
+//                 domain profile, normalised column by column (a CFAR in f)
 //
 // Frequencies are in cycles per sample. Strip point (k, q), both signed, is
 // at α = k/N' + q/N and f = (k/N' − q/N)/2.
@@ -47,6 +49,12 @@ struct Params {
     norm_psd: f32,
     // Twiddle table length (= N).
     ntw: u32,
+    // For x·x*, cells with |α| under this (cycles per sample) are left
+    // empty: α = 0 is the PSD itself, a wall in front of everything else.
+    a_mask: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 };
 
 // One dispatch's shape. FFT passes: `per_wg` FFTs of `m` points to a
@@ -89,6 +97,7 @@ struct PassCfg {
 @group(0) @binding(9) var<storage, read_write> psd: array<f32>;
 @group(0) @binding(10) var<storage, read_write> grid: array<f32>;
 @group(0) @binding(11) var<storage, read_write> prof: array<vec4<f32>>;
+@group(0) @binding(12) var<storage, read_write> colm: array<f32>;
 
 const WG: u32 = 256u;
 
@@ -320,6 +329,10 @@ fn map_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
     let f1 = f0 + df;
     let a0 = p.a_lo + f32(ai) * da;
     let a1 = a0 + da;
+    if (p.conj == 0u && abs(a0 + 0.5 * da) < p.a_mask) {
+        grid[i] = -300.0;
+        return;
+    }
     // k/N' = f + α/2 over the cell.
     let k_lo = max(i32(ceil(nc * (f0 + 0.5 * a0))), kmin);
     let k_hi = min(i32(ceil(nc * (f1 + 0.5 * a1))) - 1, kmax);
@@ -363,8 +376,31 @@ fn map_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
     grid[i] = 3.0103 * log2(max(best, 1.0e-30));
 }
 
-// The cyclic-domain profile: one thread an α row. Cells outside the SCF's
-// support (below −250 dB) are left out of the mean.
+// Each column's mean level over the α rows it has, dB: one thread a column.
+// A column with a strong signal in it sits higher at every α (its leakage
+// and its own noise); features are judged against their own column.
+@compute @workgroup_size(256)
+fn column_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let f = wg_index(wid) * WG + li;
+    if (f >= pc.count) {
+        return;
+    }
+    var s = 0.0;
+    var used = 0.0;
+    for (var a = 0u; a < p.grid_a; a = a + 1u) {
+        let v = grid[a * p.grid_f + f];
+        if (v > -250.0) {
+            s = s + v;
+            used = used + 1.0;
+        }
+    }
+    colm[f] = s / max(used, 1.0);
+}
+
+// The cyclic-domain profile: one thread an α row. x: the strongest cell
+// over its column's mean (dB), y: its column, z: the row's mean level, w:
+// its strongest level (dB). Cells outside the SCF's support (below −250 dB)
+// are left out.
 @compute @workgroup_size(256)
 fn profile_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let a = wg_index(wid) * WG + li;
@@ -373,22 +409,22 @@ fn profile_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation
     }
     var mx = -1.0e30;
     var arg = 0u;
+    var top = -1.0e30;
     var s = 0.0;
-    var s2 = 0.0;
     var used = 0.0;
     let base = a * p.grid_f;
     for (var f = 0u; f < p.grid_f; f = f + 1u) {
         let v = grid[base + f];
-        if (v > mx) {
-            mx = v;
-            arg = f;
-        }
         if (v > -250.0) {
+            let rel = v - colm[f];
+            if (rel > mx) {
+                mx = rel;
+                arg = f;
+            }
+            top = max(top, v);
             s = s + v;
-            s2 = s2 + v * v;
             used = used + 1.0;
         }
     }
-    let u = max(used, 1.0);
-    prof[a] = vec4<f32>(mx, f32(arg), s / u, s2 / u);
+    prof[a] = vec4<f32>(mx, f32(arg), s / max(used, 1.0), top);
 }
