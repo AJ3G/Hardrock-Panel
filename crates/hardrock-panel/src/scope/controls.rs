@@ -400,7 +400,10 @@ fn level_sliders(sc: &mut Scope, ui: &mut egui::Ui) {
 
 /// A palette chip: a swatch of its ramp, then its name.
 fn palette_chip(ui: &mut egui::Ui, p: Palette, on: bool) -> egui::Response {
-    let r = chip(ui, on, &format!("      {}", p.label()));
+    // Room for the swatch: as many of the chip font's spaces as span it.
+    let space = (chrome::chip_width(ui, "  ", None) - chrome::chip_width(ui, " ", None)).max(1.0);
+    let pad = " ".repeat((26.0 / space).ceil() as usize);
+    let r = chip(ui, on, &format!("{pad}{}", p.label()));
     let sw =
         Rect::from_min_size(pos2(r.rect.left() + 6.0, r.rect.center().y - 4.0), vec2(22.0, 8.0));
     let painter = ui.painter();

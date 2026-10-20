@@ -11,8 +11,8 @@
 // The level over [f - half, f + half] (Hz from the reference) in history row
 // `row`: the strongest column it covers, so a one-bin carrier never falls
 // between pixels; or, when a pixel is narrower than a column, the column
-// under it, interpolated if `smooth`. `empty` when the row has nothing there.
-fn level_at(row: u32, f: f32, half: f32, tex_w: f32, smooth: bool, empty: f32) -> f32 {
+// under it, interpolated if `smoothing`. `empty` when the row has nothing there.
+fn level_at(row: u32, f: f32, half: f32, tex_w: f32, smoothing: bool, empty: f32) -> f32 {
     let g = textureLoad(geom_tex, vec2<i32>(i32(row), 0), 0).xy;
     let span = g.y - g.x;
     if (span <= 0.0) {
@@ -41,7 +41,7 @@ fn level_at(row: u32, f: f32, half: f32, tex_w: f32, smooth: bool, empty: f32) -
         }
         return m;
     }
-    if (smooth) {
+    if (smoothing) {
         let x = (f - g.x) * scale - 0.5;
         let i0 = clamp(i32(floor(x)), 0, last);
         let i1 = min(i0 + 1, last);

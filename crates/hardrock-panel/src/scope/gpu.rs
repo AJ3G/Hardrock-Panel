@@ -598,3 +598,36 @@ impl CallbackTrait for SurfacePaint {
 pub fn callback(rect: egui::Rect, cb: impl CallbackTrait + 'static) -> egui::Shape {
     egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(rect, cb))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse and validate a shader as `Shared::new` builds it, and return the
+    /// size of its uniform block, bytes.
+    fn check(body: &str) -> u32 {
+        let src = format!("{COMMON}\n{body}");
+        let module = naga::front::wgsl::parse_str(&src)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut layouter = naga::proc::Layouter::default();
+        layouter.update(module.to_ctx()).unwrap();
+        let (_, uniform) = module
+            .global_variables
+            .iter()
+            .find(|(_, g)| g.space == naga::AddressSpace::Uniform)
+            .expect("a uniform block");
+        layouter[uniform.ty].size
+    }
+
+    #[test]
+    fn shaders_compile_and_match_their_uniforms() {
+        assert_eq!(check(include_str!("shaders/waterfall.wgsl")), (WF_UNIFORMS * 4) as u32);
+        assert_eq!(check(include_str!("shaders/surface.wgsl")), (S3_UNIFORMS * 4) as u32);
+    }
+}

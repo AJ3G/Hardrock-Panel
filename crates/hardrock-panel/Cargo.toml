@@ -30,3 +30,7 @@ eframe = { version = "0.36.1", default-features = false, features = [
     "x11",
     "persistence",
 ] }
+
+[dev-dependencies]
+# Parses and validates the scope's WGSL in the tests, with no GPU.
+naga = { version = "30.0.1", features = ["wgsl-in"] }

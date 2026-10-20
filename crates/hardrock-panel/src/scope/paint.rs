@@ -178,7 +178,7 @@ fn paint_spectrum(
             };
             let col = if m.s9 { accent() } else { dim() };
             if in_gutter {
-                p.text(pos2(gut.left() + 4.0, yy), Align2::LEFT_CENTER, &m.label, mono(10.0), col);
+                p.text(pos2(gut.left() + 4.0, yy), Align2::LEFT_CENTER, &m.label, label(10.5), col);
             } else {
                 p.text(
                     pos2(trace.left() + 4.0, yy - 2.0),
@@ -292,7 +292,7 @@ fn paint_spectrum(
             ));
             let rbw = f.bin_width() * f.enbw as f64;
             p.text(
-                pos2(trace.right() - 4.0, yy - 2.0),
+                pos2(trace.right() - 4.0, (yy - 2.0).min(all.bottom() - 16.0)),
                 Align2::RIGHT_BOTTOM,
                 format!("NF {:.0} dBm/bin · RBW {}", f.noise_dbm, fmt_hz(rbw)),
                 mono(9.5),

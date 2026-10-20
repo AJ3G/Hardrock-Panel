@@ -12,7 +12,7 @@ struct Wf {
     px_w: f32,
     tex_w: f32,
     tex_h: f32,
-    smooth: f32,
+    smoothing: f32,
     srgb: f32,
     // How far the newest row has slid in, 0 to 1.
     scroll_frac: f32,
@@ -52,7 +52,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let row = (u32(u.newest) + h - (age % h)) % h;
     let f = mix(u.view_lo, u.view_hi, in.uv.x);
     let half = (u.view_hi - u.view_lo) / max(u.px_w, 1.0) * 0.5;
-    let v = level_at(row, f, half, u.tex_w, u.smooth > 0.5, -1.0e9);
+    let v = level_at(row, f, half, u.tex_w, u.smoothing > 0.5, -1.0e9);
     if (v < -1.0e8) {
         return vec4<f32>(empty, 1.0);
     }

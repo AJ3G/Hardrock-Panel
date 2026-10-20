@@ -1451,6 +1451,7 @@ dependencies = [
  "eframe",
  "half",
  "hardrock",
+ "naga",
  "rigcat",
  "sdr",
  "serde",
