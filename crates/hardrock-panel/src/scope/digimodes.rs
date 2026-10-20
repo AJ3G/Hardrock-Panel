@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(p.dial, 50_323_000);
         assert_eq!(p.note.as_deref(), Some("No FT8 frequency on 2 m, so 6 m"));
         // A 2 m converter on 28 MHz (116 MHz LO).
-        let xv = |f: u64| f >= 116_009_000 && f <= 170_000_000;
+        let xv = |f: u64| (116_009_000..=170_000_000).contains(&f);
         assert_eq!(ft8.pick(144_300_000, &hf(), xv).unwrap().dial, 144_174_000);
         assert_eq!(digi("ACARS").unwrap().pick(14_074_000, &hf(), duo), None);
         assert_eq!(digi("ACARS").unwrap().pick(131_000_000, &hf(), xv).unwrap().dial, 131_125_000);
