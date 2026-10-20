@@ -254,3 +254,35 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 **What the panel does.** The DUO's IQ window is centred on VFO A (`FA`) and stays put; clicking or dragging a signal moves the panel's own receiver inside the span, and the centre moves only when the receiver nears an edge. Above 192 kHz the DUO mutes its own audio, so the panel demodulates and plays the receiver to the sound output chosen in SETTINGS (VB-Cable can be chosen, for decoders). To transmit where the panel listens, the panel sets split (`SP1`) and `FB` to the receiver's frequency. Still to check on the bench: that the IQ window stays on VFO A while split.
 
 **Where.** `crates/elad-iq` (USB IQ, from SDRoxide's `sdroxide-elad`), `crates/sdr` (spectrum and receiver), and the scope in `crates/hardrock-panel`.
+
+## 25. Outside programs connect by TCI and rigctld, and receive decodes over WSJT-X UDP
+
+**Decided:** AJ3G, 20 Oct 2026, through the coordinator: he may use third-party decoders over TCP/IP or TCI, so the panel keeps TCI and rigctld open for them beside its own decoders.
+
+**What the panel does.** `crates/links` has a TCI server (websocket, port 50001), a Hamlib rigctld server (port 4532) and a WSJT-X UDP sender (port 2237), all bound to 127.0.0.1 by default. Both servers are driven by one `Rig` trait the panel implements: frequency, mode, split and VFO from the panel's state, I/Q and receive audio streamed to TCI clients that ask for them, and transmit audio paced by TCI's chrono messages. Transmitting is off unless the operator allows it, and even then every request goes to the panel, which can refuse it (interlock #8). The transmit power cannot be set from outside. The panel's own WSJT decodes go out as WSJT-X Decode and WSPR Decode messages, so GridTracker, JTAlert and loggers see them as they would see WSJT-X.
+
+**Where.** `crates/links` (`tci`, `rigctld`, `wsjtx`); the panel's `Rig` implementation is the integrator's.
+
+## 26. WSJT slot timing comes from the system clock, the radio frequency is exact, and each decode's DT is shown
+
+**Decided:** AJ3G, 20 Oct 2026, through the coordinator: his PC clock is disciplined by NTP with a GPS reference as fallback, and the same GPS reference clocks the DUO.
+
+**What the panel does.** `decoders::slot` puts each block of audio where its UTC time stamp says (the system clock at the first sample, less the receive chain's known delay), so a gap leaves silence instead of shifting the slot. No time offset is learnt from the decodes, but each decode's DT is reported as measured, so a clock that drifted would show there. A slot joined more than 1 s late is not decoded. The radio's frequency is taken as exact: `FreqCal` holds a ppm correction that is 0 by default and is kept for a radio on its own crystal. All decode times are UTC from the system clock. The WSJT modes are mfsk-core's (FT8, FT4, WSPR, JT65, JT9, FST4, Q65) at the settings SDRoxide measured, at 12 kHz from the panel's 48 kHz audio.
+
+**Where.** `crates/decoders` (`slot`, `wsjt`, `worker`, `freq`, `resample`).
+
+## 27. Aviation and maritime data links are xng's decoders, at true RF behind the converter
+
+**Decided:** AJ3G, 20 Oct 2026, through the coordinator: HFDL and SDRoxide's decoder set built in; and since the DUO is used with up and down converters, with a high-stability clock and GPS time, VHF ACARS, VDL Mode 2, AIS and Mode S as well, every I/Q decoder taking the converter's LO so it reports true RF.
+
+**What the panel does.** `crates/datalink` wraps airframesio/xng's decode cores (MIT OR Apache-2.0, vendored with their licences under `vendor/xng` as their own workspace, so the panel's fmt and clippy leave upstream's code alone). One `LinkDecoder` per link splits every wanted channel out of the DUO's I/Q at once (xng's polyphase channelizer, or a shared decimation where its bins don't suit the rate) and decodes the channels in parallel on a worker thread. `Tuning` gives the I/Q centre, the converter LO and the ppm correction; channels are asked for, and reported, at true RF. HFDL takes a 24 kS/s lane or a wide span. Its ground-station list is built in from EiBi's schedule and is replaced by the network's own system table once it is heard. Mode S needs at least 2 MS/s, so it works at the DUO's 3.072 and 6.144 MHz rates and not below. Each message carries xng's full JSON model as well as a one-line summary.
+
+**Where.** `crates/datalink`, `vendor/xng` (see its `VENDORED.md`).
+
+## 28. What the decoders leave out for now
+
+**Decided:** by the panel's author, 20 Oct 2026, under decisions 25 to 27.
+
+**What the panel does.** SDRoxide's CW decoder (deepcw) is AGPL, so it is left out until AJ3G decides. JS8 and SDRoxide's other decoders are not ported. Of SDRoxide's keyboard and picture modems, RTTY, PSK31, NAVTEX, SSTV and WEFAX are wired to workers; Olivia and THOR are wired too, and Hell is ported but not yet wired to a worker. SSTV and WEFAX pictures come out as RGBA buffers, row by row and whole.
+
+**Where.** `crates/decoders` (`modem`, `image`, `worker`).
