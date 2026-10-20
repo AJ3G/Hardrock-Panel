@@ -13,10 +13,15 @@
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Stroke, Vec2};
 use hardrock::{
     AmpAction, AmpGauge, AmpLevel, AmpLimits, AmpModel, AmpReadings, AmpStatus, AtuNetwork,
-    amp_band_label,
+    AtuReadout, amp_band_label,
 };
 
 use crate::{chrome, theme};
+
+mod amptheme;
+mod tft;
+
+pub(crate) use amptheme::{AmpTheme, amp_theme};
 
 /// What the two meters show, and what the window remembers from one frame to
 /// the next to show it: the bottom scales' ranges and the performance figures'
@@ -35,6 +40,12 @@ pub(crate) struct AmpMeters {
     /// The SWR at which the panel warns: the transmitter's tune limit (see
     /// [`swr_past`]).
     swr_warn: f32,
+    /// The look the window is drawn in: `None` for the panel's own, or a
+    /// radio maker's (see [`amp_theme`]).
+    look: Option<&'static AmpTheme>,
+    /// The radio chosen under SETTINGS and whether the amplifier's band
+    /// follows it, for the status line of a radio maker's look.
+    radio: Option<(&'static str, bool)>,
 }
 
 impl Default for AmpMeters {
@@ -49,6 +60,8 @@ impl Default for AmpMeters {
             perf: Perf::default(),
             rig: RigFill::default(),
             swr_warn: f32::INFINITY,
+            look: None,
+            radio: None,
         }
     }
 }
@@ -280,6 +293,13 @@ impl AmpMeters {
     /// The SWR at which the panel warns (see [`swr_past`]).
     pub(crate) fn set_swr_warn(&mut self, swr: f32) {
         self.swr_warn = swr;
+    }
+
+    /// The radio chosen under SETTINGS: it picks the window's look (see
+    /// [`amp_theme`]) and names where the band comes from.
+    pub(crate) fn set_radio(&mut self, rig: &rigcat::RigConfig) {
+        self.look = amp_theme(rig);
+        self.radio = rig.enabled.then(|| (rig.model.label(), rig.follow_band));
     }
 
     /// The meter picks as the settings keep them (see
@@ -750,7 +770,6 @@ fn amp_panel_inner(
     scale: Option<f32>,
     out: &mut PanelOut,
 ) -> bool {
-    let actions = &mut out.actions;
     if !st.configured {
         ui.label(
             RichText::new("No amplifier is set up yet. Choose its port under SETTINGS.").weak(),
@@ -760,9 +779,7 @@ fn amp_panel_inner(
 
     let limits = st.model.limits();
     let r = st.readings.unwrap_or_default();
-    let rig = view.rig;
     let live = st.connected && st.readings.is_some();
-    let past = live && swr_past(&r, view.swr_warn);
     let now = ui.input(|i| i.time);
     // Everything is drawn for a window 720 points wide and scaled from there:
     // by the width when docked, or as the pop-out fits it. Popped out in a
@@ -774,7 +791,6 @@ fn amp_panel_inner(
     // The spacing between rows and boxes scales too, so the whole panel grows
     // in proportion and the pop-out can fit it to the window's height.
     ui.spacing_mut().item_spacing *= s;
-    let gap = ui.spacing().item_spacing.x;
 
     // ── what changed since the last frame ──────────────────────────────────
     let perf_now = performance(&r).filter(|_| live);
@@ -783,52 +799,84 @@ fn amp_panel_inner(
     if view.perf.holding(now) {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(40));
     }
-
-    ui.horizontal(|ui| {
-        link_line(ui, st, s, perf_now.is_some());
-        if let Some(popped) = pop {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (text, hover) = if popped {
-                    ("DOCK", "Put the AMP window back inside the main window")
-                } else {
-                    (
-                        "POP OUT",
-                        "Give the AMP window a window of its own, to move to another screen",
-                    )
-                };
-                if button(ui, s, false, text, None).on_hover_text(hover).clicked() {
-                    out.pop = true;
-                }
-            });
-        }
-    });
-    ui.add_space(4.0 * s);
-
-    // ── the two meters ─────────────────────────────────────────────────────
-    // A reading shows its live colour or, if worse, the colour the amplifier
-    // is holding from the last transmission.
-    let level = |g: AmpGauge| live.then(|| st.alerts.shown(&limits, g, &r));
     view.range.update(now, live, &r);
-    let range = view.range.range;
-    // A reading's value and full scale, on the power range when it has one.
-    let read = |m: AmpMeter| {
-        let (value, full, zones) = m.read(&r, &limits);
-        match m.range_full(range) {
-            Some(rf) => (value, rf, zones.zoomed(rf / full), Some(range)),
+    // Blinking while the tuner tunes.
+    if st.atu.as_ref().is_some_and(|a| a.tuning) {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    }
+
+    let sh = Shown {
+        st,
+        r,
+        limits,
+        rig: view.rig,
+        live,
+        past: live && swr_past(&r, view.swr_warn),
+        range: view.range.range,
+        now,
+        s,
+        width,
+        nominal,
+        transmitting: perf_now.is_some(),
+    };
+    match view.look {
+        Some(th) => tft::screen(ui, &sh, view, th, pop, out),
+        None => panel_look(ui, &sh, view, pop, out),
+    }
+    false
+}
+
+/// What every look draws from, worked out once a frame.
+pub(super) struct Shown<'a> {
+    st: &'a AmpStatus,
+    r: AmpReadings,
+    limits: AmpLimits,
+    /// Which bypass readings came from the radio (see [`from_rig`]).
+    rig: RigFill,
+    /// The amplifier is answering, with readings.
+    live: bool,
+    /// The SWR is at or past the warning (see [`swr_past`]).
+    past: bool,
+    range: PowerRange,
+    now: f64,
+    /// The window's scale, its width, and the width the dials and the
+    /// tuner's drawing keep.
+    s: f32,
+    width: f32,
+    nominal: f32,
+    /// Transmitting with enough going in and out for the performance figures.
+    transmitting: bool,
+}
+
+impl Shown<'_> {
+    /// A reading's colour: its live colour or, if worse, the colour the
+    /// amplifier is holding from the last transmission.
+    fn level(&self, g: AmpGauge) -> Option<AmpLevel> {
+        self.live.then(|| self.st.alerts.shown(&self.limits, g, &self.r))
+    }
+
+    /// A reading's value and full scale, on the power range when it has one.
+    fn read(&self, m: AmpMeter) -> (f32, f32, Zones, Option<PowerRange>) {
+        let (value, full, zones) = m.read(&self.r, &self.limits);
+        match m.range_full(self.range) {
+            Some(rf) => (value, rf, zones.zoomed(rf / full), Some(self.range)),
             None => (value, full, zones, None),
         }
-    };
-    let dial = |m: AmpMeter, zoom: f32| {
-        let (value, full, zones, ranged) = read(m);
+    }
+
+    /// One needle, its scale `zoom` times the usual one.
+    fn dial(&self, m: AmpMeter, zoom: f32) -> Dial {
+        let (value, full, zones, ranged) = self.read(m);
+        let rig = self.rig;
         Dial {
             name: m.label(),
-            readout: live.then(|| m.text(&r)),
+            readout: self.live.then(|| m.text(&self.r)),
             value,
             full: full * zoom,
             zones: zones.zoomed(zoom),
-            live,
+            live: self.live,
             note: scale_note(m, ranged, zoom != 1.0),
-            unsure: past
+            unsure: self.past
                 && match m {
                     AmpMeter::Fwd => rig.fwd == Some("rig"),
                     AmpMeter::Rfl => rig.rfl == Some("rig"),
@@ -844,108 +892,125 @@ fn amp_panel_inner(
                 _ => "",
             },
         }
-    };
+    }
+
+    /// Meter `i`'s two needles, its bottom scale rescaled first to keep its
+    /// needle clear of the top one.
+    fn dials(&self, view: &mut AmpMeters, i: usize) -> (Dial, Option<Dial>) {
+        let pair = view.pairs[i];
+        if let Some(b) = pair.bottom {
+            let (tv, tf, _, _) = self.read(pair.top);
+            let (bv, bf, _, _) = self.read(b);
+            view.zoom[i] = if self.live { rescale(view.zoom[i], tv / tf, bv, bf) } else { 1.0 };
+        } else {
+            view.zoom[i] = 1.0;
+        }
+        (self.dial(pair.top, 1.0), pair.bottom.map(|b| self.dial(b, view.zoom[i])))
+    }
+}
+
+/// The panel's own look: SDRoxide's AMP window.
+fn panel_look(
+    ui: &mut egui::Ui,
+    sh: &Shown,
+    view: &mut AmpMeters,
+    pop: Option<bool>,
+    out: &mut PanelOut,
+) {
+    let Shown { st, r, live, s, width, nominal, .. } = *sh;
+    let gap = ui.spacing().item_spacing.x;
+    let actions = &mut out.actions;
+
+    ui.horizontal(|ui| {
+        link_line(ui, st, s, sh.transmitting);
+        if let Some(popped) = pop {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (text, hover) = pop_words(popped);
+                if button(ui, s, false, text, None).on_hover_text(hover).clicked() {
+                    out.pop = true;
+                }
+            });
+        }
+    });
+    ui.add_space(4.0 * s);
+
+    // ── the two meters ─────────────────────────────────────────────────────
     let meter_w = (width - 2.0 * gap) / 2.0;
     let meter_h = meter_w.min((nominal - 2.0 * gap) / 2.0) * 0.52;
     ui.horizontal(|ui| {
         for i in 0..2 {
-            let pair = &mut view.pairs[i];
-            if let Some(b) = pair.bottom {
-                let (tv, tf, _, _) = read(pair.top);
-                let (bv, bf, _, _) = read(b);
-                view.zoom[i] = if live { rescale(view.zoom[i], tv / tf, bv, bf) } else { 1.0 };
-            } else {
-                view.zoom[i] = 1.0;
-            }
             ui.vertical(|ui| {
                 ui.set_width(meter_w);
-                pickers(ui, i, pair, s);
+                pickers(ui, i, &mut view.pairs[i], s, &PickInk::panel());
                 ui.add_space(2.0 * s);
-                meter(
-                    ui,
-                    Vec2::new(meter_w, meter_h),
-                    s,
-                    &dial(pair.top, 1.0),
-                    pair.bottom.map(|b| dial(b, view.zoom[i])),
-                );
+                let (top, bottom) = sh.dials(view, i);
+                meter(ui, Vec2::new(meter_w, meter_h), s, &top, bottom);
             });
         }
     });
     ui.add_space(6.0 * s);
 
     // ── every reading, full width ──────────────────────────────────────────
-    if readings_row(ui, s, live, &r, rig, past, &level) {
+    if readings_row(ui, sh) {
         actions.push(AmpAction::SetCelsius(r.celsius == Some(false)));
     }
     ui.add_space(6.0 * s);
 
+    let keys = keys(sh);
+    // A key in the panel's chips: lit keys filled in their tone.
+    let chip = |ui: &mut egui::Ui, k: &Key| {
+        let fill = match k.tone {
+            Tone::Plain => None,
+            Tone::Blue => Some(theme::CYAN()),
+            Tone::Green => Some(theme::GREEN()),
+            Tone::Yellow => Some(theme::YELLOW()),
+            Tone::Red => Some(theme::ALERT()),
+        };
+        ui.add_enabled_ui(k.enabled, |ui| button(ui, s, k.lit, &k.text, fill))
+            .inner
+            .on_hover_text(k.hover)
+            .on_disabled_hover_text(&k.why_not)
+    };
+
     // ── mode, antenna, band ────────────────────────────────────────────────
-    ui.add_enabled_ui(live, |ui| {
-        ui.horizontal(|ui| {
-            // Green when keyed with the radio, the program's neutral blue in
-            // standby: lit either way so the state can be told at a glance,
-            // but never yellow or red, which only ever mean a warning (AJ3G).
-            let (mode, fill) = if r.ptt { ("PTT", theme::GREEN()) } else { ("OFF", theme::CYAN()) };
-            // SAFETY INTERLOCK (docs/hardrock/safety-interlocks.md, #4): no
-            // OFF to PTT while the radio drives harder than the amplifier's
-            // drive limit, as a 100 W radio running barefoot through the
-            // bypassed amp does. The link checks again before sending.
-            let overdriven = !r.ptt && r.drive_w > limits.drive_warn_w;
-            let ptt = ui.add_enabled_ui(!overdriven, |ui| button(ui, s, true, mode, Some(fill))).inner;
-            corner_mark(ui.painter(), ptt.rect, s, theme::INK_ON_BRIGHT());
-            if ptt
-                .on_hover_text("PTT keys the amplifier with the radio; OFF leaves it in bypass. Click to switch.")
-                .on_disabled_hover_text(format!(
-                    "Lower the drive first: {:.0} W would overdrive the amplifier in line (its limit is {:.0} W).",
-                    r.drive_w, limits.drive_warn_w
-                ))
-                .clicked()
-            {
-                actions.push(AmpAction::SetPtt(!r.ptt));
-            }
-            // SAFETY INTERLOCK (docs/hardrock/safety-interlocks.md, #2):
-            // antenna and band switch relays in the RF path, which must not
-            // be switched with RF on them; see NOT_WHILE_TX and `rf_present`.
-            // The link checks again before sending (#1).
-            let rf = rf_present(&r);
-            let relay_button = |ui: &mut egui::Ui, text: &str, hover: &str| {
-                ui.add_enabled_ui(!rf, |ui| button(ui, s, false, text, None))
-                    .inner
-                    .on_hover_text(hover)
-                    .on_disabled_hover_text(NOT_WHILE_TX)
-                    .clicked()
-            };
-            if st.model.antennas() > 1
-                && relay_button(ui, &format!("ANT {}", r.antenna.max(1)), "Switch antenna jack")
-            {
-                actions.push(AmpAction::SetAntenna(if r.antenna == 2 { 1 } else { 2 }));
-            }
-            ui.add_space(6.0 * s);
-            if relay_button(ui, "DN", "Band down") {
-                actions.push(AmpAction::BandDown);
-            }
+    ui.horizontal(|ui| {
+        let ptt = chip(ui, &keys.ptt);
+        corner_mark(ui.painter(), ptt.rect, s, theme::INK_ON_BRIGHT());
+        if ptt.clicked() {
+            actions.push(keys.ptt.action);
+        }
+        if let Some(k) = &keys.ant
+            && chip(ui, k).clicked()
+        {
+            actions.push(k.action);
+        }
+        ui.add_space(6.0 * s);
+        if chip(ui, &keys.dn).clicked() {
+            actions.push(keys.dn.action);
+        }
+        ui.add_enabled_ui(live, |ui| {
             ui.label(
                 RichText::new(r.band.map_or("UNK", amp_band_label))
                     .size(15.0 * s)
                     .strong()
                     .color(theme::YELLOW()),
-            );
-            if relay_button(ui, "UP", "Band up") {
-                actions.push(AmpAction::BandUp);
-            }
+            )
         });
+        if chip(ui, &keys.up).clicked() {
+            actions.push(keys.up.action);
+        }
     });
     ui.add_space(8.0 * s);
 
     // ── performance ────────────────────────────────────────────────────────
-    performance_row(ui, s, &view.perf, &limits, now);
+    performance_row(ui, s, &view.perf, &sh.limits, sh.now);
 
     // ── the tuner ──────────────────────────────────────────────────────────
     if let Some(atu) = st.atu.as_ref() {
         ui.add_space(8.0 * s);
         caption(ui, s, "Tuner");
         let net = atu.network;
-        let bypassed = !atu.active || net.is_none_or(|n| n.bypassed);
+        let bypassed = atu_bypassed(atu);
         let h = (nominal * 0.21).max(110.0 * s);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(width, h), egui::Sense::hover());
         let p = ui.painter_at(rect);
@@ -955,10 +1020,11 @@ fn amp_panel_inner(
         // the panel's scale, centred, rather than stretched across the box
         // (AJ3G, 18 Oct).
         let art = Rect::from_center_size(rect.center(), Vec2::new(nominal, rect.height()));
+        let ink = NetInk::panel();
         if bypassed {
-            bypass_drawing(&p, art, s);
+            bypass_drawing(&p, art, s, &ink);
         } else if let Some(n) = net {
-            lc_network(&p, art, s, n, st.model);
+            lc_network(&p, art, s, n, st.model, &ink);
         }
 
         // TUNE and ON/BYP sit in the drawing's bottom-left corner.
@@ -972,96 +1038,238 @@ fn amp_panel_inner(
                 .max_rect(corner)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        if !live {
-            inside.disable();
-        }
-        // Blinking blue while tuning (busy, not a warning), green once a
-        // tune has succeeded and the tuner is in line, red when the last one
-        // failed (AJ3G).
-        let failed = atu.last_result.as_deref().is_some_and(|r| {
-            ["Failed", "SWR above", "Lo power", "Power too high"].iter().any(|f| r.starts_with(f))
-        });
-        let tuned = atu.active && atu.last_result.as_deref() == Some("Tuned");
-        let (lit, tune_fill) = if atu.tuning {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-            (now.rem_euclid(1.0) < 0.5, theme::CYAN())
-        } else if tuned {
-            (true, theme::GREEN())
-        } else {
-            (failed, theme::ALERT())
-        };
-        if button(&mut inside, s, lit, "TUNE", Some(tune_fill))
-            .on_hover_text(
-                "Start a tune — then key a steady carrier (CW, FM or RTTY). Press again to stop.",
-            )
-            .clicked()
-        {
-            actions.push(AmpAction::Tune);
-        }
-        let (on_byp, fill) =
-            if atu.active { ("ON", theme::GREEN()) } else { ("BYP", theme::CYAN()) };
-        // SAFETY INTERLOCK (docs/hardrock/safety-interlocks.md, #2): the
-        // tuner's relays must not be switched with RF on them. Doing so
-        // made AJ3G's HR500 raise its RFL flag (17 Oct 2026); it stresses the
-        // output devices and pits the contacts. The link checks again (#1).
-        let rf = rf_present(&r);
-        if inside
-            .add_enabled_ui(!rf, |ui| button(ui, s, true, on_byp, Some(fill)))
-            .inner
-            .on_hover_text("Put the tuner in line, or bypass it")
-            .on_disabled_hover_text(NOT_WHILE_TX)
-            .clicked()
-        {
-            actions.push(AmpAction::SetAtu(!atu.active));
+        for k in [&keys.tune, &keys.atu].into_iter().flatten() {
+            if chip(&mut inside, k).clicked() {
+                actions.push(k.action);
+            }
         }
 
-        if atu.tuning || !bypassed {
+        if let Some((state, tone, swr)) = atu_words(atu) {
             ui.horizontal(|ui| {
-                let state = if atu.tuning {
-                    "Tuning…".to_string()
-                } else if let Some(res) = &atu.last_result {
-                    res.clone()
-                } else {
-                    "ON".into()
-                };
-                let col = if atu.tuning {
-                    theme::CYAN()
-                } else if failed {
-                    theme::ALERT()
-                } else {
-                    theme::GREEN()
+                let col = match tone {
+                    Tone::Red => theme::ALERT(),
+                    Tone::Blue => theme::CYAN(),
+                    _ => theme::GREEN(),
                 };
                 ui.label(RichText::new(state).size(14.0 * s).strong().color(col));
-                if let Some(swr) = net.and_then(|n| n.swr).filter(|_| !bypassed) {
-                    ui.label(
-                        RichText::new(if swr >= 10.0 {
-                            // A refused tune into an open wire reads near total
-                            // reflection; a three-figure ratio means nothing.
-                            "> 10:1".to_string()
-                        } else {
-                            format!("{swr:.2}:1")
-                        })
-                        .size(14.0 * s)
-                        .color(theme::TEXT()),
-                    );
+                if let Some(swr) = swr {
+                    ui.label(RichText::new(swr).size(14.0 * s).color(theme::TEXT()));
                 }
             });
         }
     }
-    false
+}
+
+/// POP OUT or DOCK, and what it does.
+fn pop_words(popped: bool) -> (&'static str, &'static str) {
+    if popped {
+        ("DOCK", "Put the AMP window back inside the main window")
+    } else {
+        ("POP OUT", "Give the AMP window a window of its own, to move to another screen")
+    }
+}
+
+/// How a key or a line is lit. Each look has its own colours for these;
+/// yellow and red only ever mean a warning (AJ3G).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    Plain,
+    /// A neutral state: OFF, BYP, tuning.
+    Blue,
+    /// In line, tuned, connected.
+    Green,
+    Yellow,
+    Red,
+}
+
+/// One of the amplifier's controls, as every look draws it. Whether it can
+/// be pressed, and why not, is decided here once, so no look can loosen an
+/// interlock.
+#[derive(Clone, Debug)]
+struct Key {
+    text: String,
+    /// Lit in its tone, rather than plain.
+    lit: bool,
+    tone: Tone,
+    enabled: bool,
+    hover: &'static str,
+    /// Why it is greyed, shown on hover while it is.
+    why_not: String,
+    action: AmpAction,
+}
+
+/// The amplifier's six controls. ANT only where there are two antennas, and
+/// TUNE and ON/BYP only with a tuner.
+struct Keys {
+    ptt: Key,
+    ant: Option<Key>,
+    dn: Key,
+    up: Key,
+    tune: Option<Key>,
+    atu: Option<Key>,
+}
+
+/// Why a key is greyed while the amplifier isn't answering.
+const NOT_CONNECTED: &str = "The amplifier isn't answering.";
+
+/// The amplifier's controls as the readings allow them now.
+fn keys(sh: &Shown) -> Keys {
+    let Shown { st, r, limits, live, now, .. } = *sh;
+    let off_line = || NOT_CONNECTED.to_string();
+    // SAFETY INTERLOCK (docs/safety-interlocks.md, #4): no OFF to PTT while
+    // the radio drives harder than the amplifier's drive limit, as a 100 W
+    // radio running barefoot through the bypassed amp does. The link checks
+    // again before sending.
+    let overdriven = ptt_overdriven(&r, &limits);
+    // Green when keyed with the radio, the program's neutral blue in standby:
+    // lit either way so the state can be told at a glance, but never yellow
+    // or red, which only ever mean a warning (AJ3G).
+    let (mode, tone) = if r.ptt { ("PTT", Tone::Green) } else { ("OFF", Tone::Blue) };
+    let ptt = Key {
+        text: mode.into(),
+        lit: true,
+        tone,
+        enabled: live && !overdriven,
+        hover: "PTT keys the amplifier with the radio; OFF leaves it in bypass. Click to switch.",
+        why_not: if overdriven {
+            format!(
+                "Lower the drive first: {:.0} W would overdrive the amplifier in line (its limit is {:.0} W).",
+                r.drive_w, limits.drive_warn_w
+            )
+        } else {
+            off_line()
+        },
+        action: AmpAction::SetPtt(!r.ptt),
+    };
+    // SAFETY INTERLOCK (docs/safety-interlocks.md, #2): antenna, band and
+    // tuner switch relays in the RF path, which must not be switched with RF
+    // on them; see NOT_WHILE_TX and `rf_present`. Doing so made AJ3G's HR500
+    // raise its RFL flag (17 Oct 2026); it stresses the output devices and
+    // pits the contacts. The link checks again before sending (#1).
+    let rf = rf_present(&r);
+    let relay = |text: String, hover: &'static str, action: AmpAction| Key {
+        text,
+        lit: false,
+        tone: Tone::Plain,
+        enabled: live && !rf,
+        hover,
+        why_not: if rf { NOT_WHILE_TX.to_string() } else { off_line() },
+        action,
+    };
+    let ant = (st.model.antennas() > 1).then(|| {
+        relay(
+            format!("ANT {}", r.antenna.max(1)),
+            "Switch antenna jack",
+            AmpAction::SetAntenna(if r.antenna == 2 { 1 } else { 2 }),
+        )
+    });
+    let dn = relay("DN".into(), "Band down", AmpAction::BandDown);
+    let up = relay("UP".into(), "Band up", AmpAction::BandUp);
+    let tune = st.atu.as_ref().map(|atu| {
+        // Blinking blue while tuning (busy, not a warning), green once a
+        // tune has succeeded and the tuner is in line, red when the last one
+        // failed (AJ3G). Not a relay switch: TUNE works on RF.
+        let (failed, tuned) = atu_result(atu);
+        let (lit, tone) = if atu.tuning {
+            (now.rem_euclid(1.0) < 0.5, Tone::Blue)
+        } else if tuned {
+            (true, Tone::Green)
+        } else {
+            (failed, Tone::Red)
+        };
+        Key {
+            text: "TUNE".into(),
+            lit,
+            tone,
+            enabled: live,
+            hover: "Start a tune — then key a steady carrier (CW, FM or RTTY). Press again to stop.",
+            why_not: off_line(),
+            action: AmpAction::Tune,
+        }
+    });
+    let atu = st.atu.as_ref().map(|atu| {
+        let (text, tone) = if atu.active { ("ON", Tone::Green) } else { ("BYP", Tone::Blue) };
+        Key {
+            lit: true,
+            tone,
+            ..relay(
+                text.into(),
+                "Put the tuner in line, or bypass it",
+                AmpAction::SetAtu(!atu.active),
+            )
+        }
+    });
+    Keys { ptt, ant, dn, up, tune, atu }
+}
+
+/// Whether the drive is over the amplifier's limit in bypass, so that going
+/// in line now would overdrive it (safety interlock #4).
+fn ptt_overdriven(r: &AmpReadings, limits: &AmpLimits) -> bool {
+    !r.ptt && r.drive_w > limits.drive_warn_w
+}
+
+/// The tuner is out of the line, or has no network to show.
+fn atu_bypassed(atu: &AtuReadout) -> bool {
+    !atu.active || atu.network.is_none_or(|n| n.bypassed)
+}
+
+/// Whether the last tune failed, and whether the tuner is in line on a
+/// successful one.
+fn atu_result(atu: &AtuReadout) -> (bool, bool) {
+    let failed = atu.last_result.as_deref().is_some_and(|r| {
+        ["Failed", "SWR above", "Lo power", "Power too high"].iter().any(|f| r.starts_with(f))
+    });
+    let tuned = atu.active && atu.last_result.as_deref() == Some("Tuned");
+    (failed, tuned)
+}
+
+/// The tuner's state in words, its tone, and the SWR it tuned to, while it
+/// tunes or is in line.
+fn atu_words(atu: &AtuReadout) -> Option<(String, Tone, Option<String>)> {
+    let bypassed = atu_bypassed(atu);
+    if !atu.tuning && bypassed {
+        return None;
+    }
+    let (failed, _) = atu_result(atu);
+    let state = if atu.tuning {
+        "Tuning…".to_string()
+    } else if let Some(res) = &atu.last_result {
+        res.clone()
+    } else {
+        "ON".into()
+    };
+    let tone = if atu.tuning {
+        Tone::Blue
+    } else if failed {
+        Tone::Red
+    } else {
+        Tone::Green
+    };
+    let swr = atu.network.and_then(|n| n.swr).filter(|_| !bypassed).map(|swr| {
+        if swr >= 10.0 {
+            // A refused tune into an open wire reads near total reflection; a
+            // three-figure ratio means nothing.
+            "> 10:1".to_string()
+        } else {
+            format!("{swr:.2}:1")
+        }
+    });
+    Some((state, tone, swr))
 }
 
 /// A meter's TOP and BOTTOM pickers, each showing its reading's name in its
 /// needle's colour.
-fn pickers(ui: &mut egui::Ui, i: usize, pair: &mut Pair, s: f32) {
-    let pt = 12.0 * s;
+fn pickers(ui: &mut egui::Ui, i: usize, pair: &mut Pair, s: f32, ink: &PickInk) {
+    let pt = ink.size * s;
+    let word =
+        |t: &str| RichText::new(t).size(pt).color(ink.label).extra_letter_spacing(ink.spacing * s);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("TOP").size(pt).color(theme::TEXT()));
+        ui.label(word("TOP"));
         let mut top = pair.top;
-        dot(ui, top_ink(), s);
+        dot(ui, ink.top, s);
         egui::ComboBox::from_id_salt(("amp-top", i))
             .width(64.0 * s)
-            .selected_text(RichText::new(top.label()).size(pt).color(top_ink()))
+            .selected_text(RichText::new(top.label()).size(pt).color(ink.top_text))
             .show_ui(ui, |ui| {
                 for m in AmpMeter::ALL {
                     ui.selectable_value(&mut top, m, m.label());
@@ -1071,13 +1279,13 @@ fn pickers(ui: &mut egui::Ui, i: usize, pair: &mut Pair, s: f32) {
             pair.set_top(top);
         }
         ui.add_space(8.0 * s);
-        ui.label(RichText::new("BOTTOM").size(pt).color(theme::TEXT()));
+        ui.label(word("BOTTOM"));
         let mut bottom = pair.bottom;
         let shown = bottom.map_or("none", |b| b.label());
-        dot(ui, if bottom.is_some() { bottom_ink() } else { theme::LINE() }, s);
+        dot(ui, if bottom.is_some() { ink.bottom } else { ink.none }, s);
         egui::ComboBox::from_id_salt(("amp-bottom", i))
             .width(64.0 * s)
-            .selected_text(RichText::new(shown).size(pt).color(bottom_ink()))
+            .selected_text(RichText::new(shown).size(pt).color(ink.bottom_text))
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut bottom, None, "none");
                 for m in AmpMeter::ALL {
@@ -1089,7 +1297,37 @@ fn pickers(ui: &mut egui::Ui, i: usize, pair: &mut Pair, s: f32) {
         }
     })
     .response
-    .on_hover_text("Pick any reading for either needle. The top needle is white, the bottom blue.");
+    .on_hover_text(ink.hover);
+}
+
+/// The pickers' colours: their words, the needles' dots, and the picked
+/// readings' names.
+struct PickInk {
+    label: Color32,
+    top: Color32,
+    bottom: Color32,
+    none: Color32,
+    top_text: Color32,
+    bottom_text: Color32,
+    size: f32,
+    spacing: f32,
+    hover: &'static str,
+}
+
+impl PickInk {
+    fn panel() -> PickInk {
+        PickInk {
+            label: theme::TEXT(),
+            top: top_ink(),
+            bottom: bottom_ink(),
+            none: theme::LINE(),
+            top_text: top_ink(),
+            bottom_text: bottom_ink(),
+            size: 12.0,
+            spacing: 0.0,
+            hover: "Pick any reading for either needle. The top needle is white, the bottom blue.",
+        }
+    }
 }
 
 /// A needle's colour as a dot beside its picker. Drawn rather than typed:
@@ -1099,17 +1337,23 @@ fn dot(ui: &mut egui::Ui, col: Color32, s: f32) {
     ui.painter().circle_filled(rect.center(), 4.0 * s, col);
 }
 
-/// The seven readings as tiles across the window, each in the amplifier's own
-/// colour for it. Returns whether the temperature was clicked (°C/°F).
-fn readings_row(
-    ui: &mut egui::Ui,
-    s: f32,
-    live: bool,
-    r: &AmpReadings,
-    rig: RigFill,
-    past: bool,
-    level: &dyn Fn(AmpGauge) -> Option<AmpLevel>,
-) -> bool {
+/// One of the seven readings under the meters.
+struct Tile {
+    name: &'static str,
+    value: String,
+    gauge: Option<AmpGauge>,
+    hover: &'static str,
+    /// How far along its full scale it is, 0 to 1.
+    frac: f32,
+    /// Its colour: the amplifier's own for it, or red for an SWR at or past
+    /// the warning.
+    level: Option<AmpLevel>,
+}
+
+/// The seven readings, each in the amplifier's own colour for it.
+fn tiles(sh: &Shown) -> [Tile; 7] {
+    let Shown { r, limits, rig, past, .. } = *sh;
+    let r = &r;
     let unit = if r.celsius == Some(false) { "F" } else { "C" };
     let swr = if r.swr >= 1.0 { format!("{:.1}:1", r.swr) } else { "---".into() };
     // In bypass, where a reading came from the radio (see `from_rig`).
@@ -1147,7 +1391,7 @@ fn readings_row(
     } else {
         "Standing wave ratio"
     };
-    let tiles: [(&str, String, Option<AmpGauge>, &str); 7] = [
+    let raw: [(&str, String, Option<AmpGauge>, &str); 7] = [
         ("FWD", AmpMeter::Fwd.text(r), Some(AmpGauge::Fwd), fwd_hover),
         ("RFL", AmpMeter::Rfl.text(r), Some(AmpGauge::Rfl), rfl_hover),
         ("DRV", AmpMeter::Drv.text(r), Some(AmpGauge::Drive), "Drive from the radio"),
@@ -1166,18 +1410,48 @@ fn readings_row(
         // that tells the operator something is wrong (AJ3G, 18 Oct 2026).
         ("SWR", swr, None, swr_hover),
     ];
+    let frac = |m: AmpMeter| {
+        let (v, full, _) = m.read(r, &limits);
+        v / full
+    };
+    let fracs = [
+        frac(AmpMeter::Fwd),
+        frac(AmpMeter::Rfl),
+        frac(AmpMeter::Drv),
+        frac(AmpMeter::Vdd),
+        frac(AmpMeter::Idd),
+        r.temp_c() / limits.temp_trip_c,
+        // 1:1 to 5:1.
+        if r.swr >= 1.0 { (r.swr - 1.0) / 4.0 } else { 0.0 },
+    ];
+    let mut i = 0;
+    raw.map(|(name, value, gauge, hover)| {
+        let level = if name == "SWR" && past {
+            Some(AmpLevel::Red)
+        } else {
+            gauge.and_then(|g| sh.level(g))
+        };
+        let frac = fracs[i].clamp(0.0, 1.0);
+        i += 1;
+        Tile { name, value, gauge, hover, frac, level }
+    })
+}
+
+/// The seven readings as tiles across the window, each in the amplifier's own
+/// colour for it. Returns whether the temperature was clicked (°C/°F).
+fn readings_row(ui: &mut egui::Ui, sh: &Shown) -> bool {
+    let Shown { s, live, r, .. } = *sh;
+    let unit = if r.celsius == Some(false) { "F" } else { "C" };
     let gap = ui.spacing().item_spacing.x;
     let w = (ui.available_width() - gap * 6.0) / 7.0;
     let h = 44.0 * s;
     let mut temp_clicked = false;
     ui.horizontal(|ui| {
-        for (name, value, gauge, hover) in tiles {
+        for Tile { name, value, gauge, hover, level, .. } in tiles(sh) {
             let temp = gauge == Some(AmpGauge::Temp);
             let sense = if temp && live { egui::Sense::click() } else { egui::Sense::hover() };
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), sense);
-            let lit =
-                if name == "SWR" && past { Some(AmpLevel::Red) } else { gauge.and_then(level) };
-            let (fill, ink) = match lit {
+            let (fill, ink) = match level {
                 Some(l) => (level_col(l), theme::INK_ON_BRIGHT()),
                 None => (theme::FILL(), theme::TEXT_STRONG()),
             };
@@ -1318,24 +1592,35 @@ fn performance_row(ui: &mut egui::Ui, s: f32, perf: &Perf, limits: &AmpLimits, n
 /// One line saying whether the amplifier is answering, and why not; or, when
 /// it has taken itself off line, why.
 fn link_line(ui: &mut egui::Ui, st: &AmpStatus, s: f32, transmitting: bool) {
+    let (text, tone) = link_state(st, transmitting);
+    let col = match tone {
+        Tone::Red => theme::ALERT(),
+        Tone::Yellow => theme::YELLOW(),
+        _ => theme::GREEN(),
+    };
+    ui.label(RichText::new(text).size(12.0 * s).color(col));
+}
+
+/// Whether the amplifier is answering, and why not; or, when it has taken
+/// itself off line, why. Green, or yellow or red for a warning.
+fn link_state(st: &AmpStatus, transmitting: bool) -> (String, Tone) {
     let trips = st.alerts.trips();
     let hot = st.readings.is_some_and(|r| st.model.limits().over_temp(&r));
-    let (text, col) = if st.connected && hot {
-        ("OFF LINE · over temperature".to_string(), theme::ALERT())
+    if st.connected && hot {
+        ("OFF LINE · over temperature".to_string(), Tone::Red)
     } else if st.connected && st.alerts.tripped {
         let why =
             if trips.is_empty() { String::new() } else { format!(" · {}", trips.join(", ")) };
-        (format!("TRIPPED{why}"), theme::ALERT())
+        (format!("TRIPPED{why}"), Tone::Red)
     } else if st.connected && transmitting {
-        ("CONNECTED · TRANSMITTING".to_string(), theme::GREEN())
+        ("CONNECTED · TRANSMITTING".to_string(), Tone::Green)
     } else if st.connected {
-        ("CONNECTED".to_string(), theme::GREEN())
+        ("CONNECTED".to_string(), Tone::Green)
     } else if let Some(e) = &st.error {
-        (e.clone(), theme::ALERT())
+        (e.clone(), Tone::Red)
     } else {
-        ("Connecting…".to_string(), theme::YELLOW())
-    };
-    ui.label(RichText::new(text).size(12.0 * s).color(col));
+        ("Connecting…".to_string(), Tone::Yellow)
+    }
 }
 
 /// What one needle shows.
@@ -1521,17 +1806,52 @@ fn arrow(p: &egui::Painter, from: Pos2, tip: Pos2, s: f32, col: Color32) {
     p.add(egui::Shape::convex_polygon(vec![tip, head + perp, head - perp], col, Stroke::NONE));
 }
 
-/// A wire's end: a small open circle.
-fn node(p: &egui::Painter, c: Pos2, s: f32, ink: Stroke) {
-    p.circle_filled(c, 5.0 * s, theme::BG_DEEP());
+/// A wire's end: a small open circle on the ground `bg`.
+fn node(p: &egui::Painter, c: Pos2, s: f32, ink: Stroke, bg: Color32) {
+    p.circle_filled(c, 5.0 * s, bg);
     p.circle_stroke(c, 5.0 * s, ink);
+}
+
+/// The tuner drawing's colours: wires and parts, values, small labels, the
+/// wire the capacitor is switched to, the ground, and the caption in the
+/// corner, if the drawing carries its own.
+struct NetInk {
+    wire: Color32,
+    value: Color32,
+    small: Color32,
+    lit: Color32,
+    bg: Color32,
+    caption: Option<Color32>,
+}
+
+impl NetInk {
+    fn panel() -> NetInk {
+        NetInk {
+            wire: theme::TEXT_STRONG(),
+            value: theme::TEXT_STRONG(),
+            small: theme::TEXT(),
+            lit: theme::CYAN(),
+            bg: theme::BG_DEEP(),
+            caption: Some(theme::CYAN()),
+        }
+    }
+}
+
+/// The tuner drawing's caption: which side the shunt capacitor is on, or
+/// that the tuner is bypassed.
+fn net_caption(atu: &AtuReadout) -> &'static str {
+    match atu.network.filter(|_| !atu_bypassed(atu)) {
+        None => "ATU BYPASSED",
+        Some(n) if n.cap_output => "C OUT · antenna side",
+        Some(_) => "C IN · transmitter side",
+    }
 }
 
 /// The tuner bypassed, drawn as HobbyPCB draws it: a relay at each end
 /// switched up to the straight-through wire, past the ATU. Only the wires
 /// stretch with the window; the parts keep their size.
-fn bypass_drawing(p: &egui::Painter, rect: Rect, s: f32) {
-    let ink = Stroke::new(2.0 * s, theme::TEXT_STRONG());
+fn bypass_drawing(p: &egui::Painter, rect: Rect, s: f32, c: &NetInk) {
+    let ink = Stroke::new(2.0 * s, c.wire);
     let x = |f: f32| rect.left() + rect.width() * f;
     let y = |f: f32| rect.top() + rect.height() * f;
     let (line, through, below) = (y(0.47), y(0.30), y(0.63));
@@ -1546,7 +1866,7 @@ fn bypass_drawing(p: &egui::Painter, rect: Rect, s: f32) {
     for (from, to) in [(sw_l, up_l), (sw_r, up_r)] {
         let tip = to + (from - to).normalized() * 7.0 * s;
         p.line_segment([from, tip], ink);
-        arrow(p, from, tip, s, theme::TEXT_STRONG());
+        arrow(p, from, tip, s, c.wire);
     }
     // The ATU, out of the path.
     let box_w = 100.0 * s;
@@ -1560,10 +1880,10 @@ fn bypass_drawing(p: &egui::Painter, rect: Rect, s: f32) {
         egui::Align2::CENTER_CENTER,
         "ATU",
         egui::FontId::proportional(18.0 * s),
-        theme::TEXT_STRONG(),
+        c.value,
     );
-    for c in [sw_l, sw_r, up_l, up_r, dn_l, dn_r] {
-        node(p, c, s, ink);
+    for at in [sw_l, sw_r, up_l, up_r, dn_l, dn_r] {
+        node(p, at, s, ink, c.bg);
     }
 
     let small = egui::FontId::proportional(11.0 * s);
@@ -1572,30 +1892,26 @@ fn bypass_drawing(p: &egui::Painter, rect: Rect, s: f32) {
         egui::Align2::LEFT_BOTTOM,
         "TX",
         small.clone(),
-        theme::TEXT(),
+        c.small,
     );
-    p.text(
-        Pos2::new(x(0.95), line - 8.0 * s),
-        egui::Align2::RIGHT_BOTTOM,
-        "ANT",
-        small,
-        theme::TEXT(),
-    );
-    p.text(
-        Pos2::new(rect.right() - 14.0 * s, rect.bottom() - 12.0 * s),
-        egui::Align2::RIGHT_BOTTOM,
-        "ATU BYPASSED",
-        egui::FontId::proportional(13.0 * s),
-        theme::CYAN(),
-    );
+    p.text(Pos2::new(x(0.95), line - 8.0 * s), egui::Align2::RIGHT_BOTTOM, "ANT", small, c.small);
+    if let Some(col) = c.caption {
+        p.text(
+            Pos2::new(rect.right() - 14.0 * s, rect.bottom() - 12.0 * s),
+            egui::Align2::RIGHT_BOTTOM,
+            "ATU BYPASSED",
+            egui::FontId::proportional(13.0 * s),
+            col,
+        );
+    }
 }
 
 /// The tuner's L network, drawn the way HobbyPCB's panel draws it: the
 /// inductor in the line and the capacitor switched to whichever side of it
 /// the tuner chose.
-fn lc_network(p: &egui::Painter, rect: Rect, s: f32, n: AtuNetwork, model: AmpModel) {
-    let ink = Stroke::new(2.0 * s, theme::TEXT_STRONG());
-    let lit = Stroke::new(2.5 * s, theme::CYAN());
+fn lc_network(p: &egui::Painter, rect: Rect, s: f32, n: AtuNetwork, model: AmpModel, c: &NetInk) {
+    let ink = Stroke::new(2.0 * s, c.wire);
+    let lit = Stroke::new(2.5 * s, c.lit);
     let x = |f: f32| rect.left() + rect.width() * f;
     let y = |f: f32| rect.top() + rect.height() * f;
     let top = y(0.34);
@@ -1625,9 +1941,9 @@ fn lc_network(p: &egui::Painter, rect: Rect, s: f32, n: AtuNetwork, model: AmpMo
     p.line_segment([Pos2::new(x(0.69), top), tap_r], ink);
     let side = if n.cap_output { tap_r } else { tap_l };
     p.line_segment([centre, side], lit);
-    node(p, tap_l, s, ink);
-    node(p, tap_r, s, ink);
-    node(p, centre, s, ink);
+    node(p, tap_l, s, ink, c.bg);
+    node(p, tap_r, s, ink, c.bg);
+    node(p, centre, s, ink, c.bg);
 
     let plate_w = 26.0 * s;
     let (p1, p2) = (mid + 14.0 * s, mid + 21.0 * s);
@@ -1669,14 +1985,14 @@ fn lc_network(p: &egui::Painter, rect: Rect, s: f32, n: AtuNetwork, model: AmpMo
         egui::Align2::CENTER_BOTTOM,
         l_text,
         font.clone(),
-        theme::TEXT_STRONG(),
+        c.value,
     );
     p.text(
         Pos2::new(centre.x + plate_w + 12.0 * s, (p1 + p2) / 2.0),
         egui::Align2::LEFT_CENTER,
         c_text,
         font,
-        theme::TEXT_STRONG(),
+        c.value,
     );
     // Which end is which, and which side the shunt capacitor is on: HobbyPCB
     // calls these CAP IN (transmitter side) and CAP OUT (antenna side).
@@ -1686,23 +2002,19 @@ fn lc_network(p: &egui::Painter, rect: Rect, s: f32, n: AtuNetwork, model: AmpMo
         egui::Align2::LEFT_BOTTOM,
         "TX",
         small.clone(),
-        theme::TEXT(),
+        c.small,
     );
-    p.text(
-        Pos2::new(x(0.95), top - 8.0 * s),
-        egui::Align2::RIGHT_BOTTOM,
-        "ANT",
-        small,
-        theme::TEXT(),
-    );
-    let shunt = if n.cap_output { "C OUT · antenna side" } else { "C IN · transmitter side" };
-    p.text(
-        Pos2::new(rect.right() - 14.0 * s, rect.bottom() - 12.0 * s),
-        egui::Align2::RIGHT_BOTTOM,
-        shunt,
-        egui::FontId::proportional(13.0 * s),
-        theme::CYAN(),
-    );
+    p.text(Pos2::new(x(0.95), top - 8.0 * s), egui::Align2::RIGHT_BOTTOM, "ANT", small, c.small);
+    if let Some(col) = c.caption {
+        let shunt = if n.cap_output { "C OUT · antenna side" } else { "C IN · transmitter side" };
+        p.text(
+            Pos2::new(rect.right() - 14.0 * s, rect.bottom() - 12.0 * s),
+            egui::Align2::RIGHT_BOTTOM,
+            shunt,
+            egui::FontId::proportional(13.0 * s),
+            col,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1897,6 +2209,92 @@ mod tests {
         assert_eq!(performance(&AmpReadings { fwd_w: 0.0, ..r }), None);
         assert_eq!(performance(&AmpReadings { ptt: false, ..r }), None);
         assert_eq!(performance(&AmpReadings::default()), None);
+    }
+
+    fn status(r: AmpReadings) -> AmpStatus {
+        AmpStatus {
+            configured: true,
+            connected: true,
+            readings: Some(r),
+            atu: Some(AtuReadout { active: true, ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
+    fn shown(st: &AmpStatus) -> Shown<'_> {
+        Shown {
+            st,
+            r: st.readings.unwrap_or_default(),
+            limits: st.model.limits(),
+            rig: RigFill::default(),
+            live: st.connected && st.readings.is_some(),
+            past: false,
+            range: PowerRange::Full,
+            now: 0.0,
+            s: 1.0,
+            width: 720.0,
+            nominal: 720.0,
+            transmitting: false,
+        }
+    }
+
+    #[test]
+    fn every_look_greys_the_relay_keys_while_there_is_rf() {
+        // Interlock #2: the keys both looks draw come from `keys`.
+        let quiet = status(AmpReadings { ptt: true, vdd_v: 53.0, ..Default::default() });
+        let k = keys(&shown(&quiet));
+        let relays = |k: &Keys| {
+            [k.ant.as_ref(), Some(&k.dn), Some(&k.up), k.atu.as_ref()]
+                .into_iter()
+                .map(|k| k.unwrap().enabled)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(relays(&k), [true; 4]);
+        let keyed =
+            status(AmpReadings { ptt: true, fwd_w: 400.0, drive_w: 6.0, ..Default::default() });
+        let k = keys(&shown(&keyed));
+        assert_eq!(relays(&k), [false; 4]);
+        assert_eq!(k.dn.why_not, NOT_WHILE_TX);
+        // TUNE is not a relay switch: it works on RF.
+        assert!(k.tune.unwrap().enabled);
+        // Not answering: nothing can be pressed.
+        let gone = AmpStatus { connected: false, ..quiet };
+        let k = keys(&shown(&gone));
+        assert!(!k.ptt.enabled && !k.dn.enabled && !k.tune.unwrap().enabled);
+    }
+
+    #[test]
+    fn every_look_refuses_ptt_while_overdriven_in_bypass() {
+        // Interlock #4: 9 W through the bypassed HR500, whose limit is 8 W.
+        let st = status(AmpReadings { ptt: false, drive_w: 9.0, ..Default::default() });
+        let k = keys(&shown(&st));
+        assert!(!k.ptt.enabled);
+        assert!(k.ptt.why_not.starts_with("Lower the drive first"));
+        let st = status(AmpReadings { ptt: false, drive_w: 5.0, ..Default::default() });
+        let k = keys(&shown(&st));
+        assert!(k.ptt.enabled);
+        assert_eq!(k.ptt.action, AmpAction::SetPtt(true));
+        // In line already, PTT to OFF is always allowed.
+        let st = status(AmpReadings { ptt: true, drive_w: 9.0, ..Default::default() });
+        assert!(keys(&shown(&st)).ptt.enabled);
+    }
+
+    #[test]
+    fn states_are_blue_or_green_and_only_a_failed_tune_is_red() {
+        let st = status(AmpReadings { ptt: false, ..Default::default() });
+        let k = keys(&shown(&st));
+        assert_eq!(k.ptt.tone, Tone::Blue);
+        assert_eq!(k.atu.as_ref().unwrap().tone, Tone::Green);
+        let mut atu = AtuReadout { active: false, ..Default::default() };
+        assert_eq!(atu_words(&atu), None);
+        atu.tuning = true;
+        assert_eq!(atu_words(&atu).unwrap().1, Tone::Blue);
+        atu.tuning = false;
+        atu.active = true;
+        atu.last_result = Some("Failed".into());
+        atu.network = Some(AtuNetwork { swr: Some(12.0), ..Default::default() });
+        let (_, tone, swr) = atu_words(&atu).unwrap();
+        assert_eq!((tone, swr.as_deref()), (Tone::Red, Some("> 10:1")));
     }
 
     #[test]

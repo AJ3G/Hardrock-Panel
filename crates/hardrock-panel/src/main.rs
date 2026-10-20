@@ -453,6 +453,7 @@ impl eframe::App for App {
             self.view.set_rig(fill);
         }
         self.view.set_swr_warn(self.saved.swr_warn);
+        self.view.set_radio(&self.saved.rig);
 
         egui::Panel::top("bar")
             .frame(
