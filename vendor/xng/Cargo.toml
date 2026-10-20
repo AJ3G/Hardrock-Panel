@@ -1,0 +1,42 @@
+# A trimmed copy of airframesio/xng (https://github.com/airframesio/xng),
+# MIT OR Apache-2.0 (LICENSE-MIT, LICENSE-APACHE), vendored by way of SDRoxide's
+# submodule at commit 096c805278faa0a904de7d98066bf4cf395cb6c2. Only the
+# decode cores hardrock-panel's `datalink` crate wraps are kept: HFDL, VHF
+# ACARS, VDL Mode 2, AIS and Mode S / ADS-B, with the DSP, message-model and
+# ACARS application-layer crates they need. The code is upstream's, unchanged;
+# see VENDORED.md.
+#
+# This is its own workspace, excluded from hardrock-panel's, so `cargo fmt` and
+# clippy on the panel's crates leave upstream's code alone.
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.21.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/airframesio/xng"
+authors = ["Kevin Elliott", "xng contributors"]
+
+[workspace.dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+crc = "3"
+num-complex = "0.4"
+rustfft = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+xng-types = { path = "crates/xng-types" }
+xng-dsp = { path = "crates/xng-dsp" }
+xng-acars = { path = "crates/xng-acars" }
+xng-mode-acars = { path = "crates/xng-mode-acars" }
+xng-mode-ais = { path = "crates/xng-mode-ais" }
+xng-mode-adsb = { path = "crates/xng-mode-adsb" }
+xng-mode-vdl2 = { path = "crates/xng-mode-vdl2" }
+xng-mode-hfdl = { path = "crates/xng-mode-hfdl" }
+
+# DSP loopback tests are too slow unoptimized.
+[profile.test]
+opt-level = 2

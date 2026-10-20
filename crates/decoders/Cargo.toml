@@ -1,0 +1,16 @@
+[package]
+name = "decoders"
+version.workspace = true
+edition.workspace = true
+# GPL because mfsk-core (the WSJT modes) is GPL-3.0-or-later, as is the code
+# ported from SDRoxide.
+license.workspace = true
+description = "The panel's own decoders: WSJT modes, RTTY, PSK31, NAVTEX, SSTV, WEFAX and more"
+
+[dependencies]
+sdr.workspace = true
+num-complex.workspace = true
+rustfft.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+mfsk-core.workspace = true

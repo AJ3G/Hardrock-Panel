@@ -1,6 +1,6 @@
 # Hardrock amplifier: safety interlocks
 
-Every place the panel refuses or delays something because doing it would be unsafe for the amplifier. #1, #2 and #4 came over unchanged from the AMP window in SDRoxide, where they were first written and bench-tested. #3 came over when the panel gained its own radio link, and #5 and #6 are new with that link. Each is marked in the code with `SAFETY INTERLOCK` and its number here. AJ3G asked (17 Oct 2026) that every such block say what it blocks and why.
+Every place the panel refuses or delays something because doing it would be unsafe for the amplifier. #1, #2 and #4 came over unchanged from the AMP window in SDRoxide, where they were first written and bench-tested. #3 came over when the panel gained its own radio link, and #5 and #6 are new with that link. #8 came with the links for outside programs (TCI, rigctld). Each is marked in the code with `SAFETY INTERLOCK` and its number here. AJ3G asked (17 Oct 2026) that every such block say what it blocks and why.
 
 Before removing or loosening any of these, read why it is there.
 
@@ -65,6 +65,22 @@ Before removing or loosening any of these, read why it is there.
 - **Why:** an ordinary transmission sends whatever audio is on the radio's input. With the wrong input it puts the shack on the air through the amplifier; in the wrong mode it is not the carrier the operator asked for.
 - **What the operator sees:** TX TUNE greyed, with the reason on hover. With menu 32 on anything but USB audio, a yellow line says so, with a USB AUDIO button that sets it.
 - **Added:** AJ3G, 19 Oct 2026, with TX TUNE (decision 17). Tested by `tune_with_drive_needs_usb_audio_and_a_sideband`, `tune_with_drive_reads_the_input_and_mode_then_keys_an_ordinary_transmission`, `tune_with_drive_is_refused_while_the_radio_takes_the_microphone` and `the_tone_needs_its_sound_output_usb_audio_and_a_sideband`.
+
+## 8. Outside programs key the radio only when the panel allows it
+
+- **Where:** `crates/links`: the `Rig` trait's `request_ptt()` and `release_ptt()` (`lib.rs`); `TciConfig::allow_tx` and the hub's `on_key()`, `pace_tx()`, `poll_state()`, `remove()` and `run()` (`tci/mod.rs`, `tci/hub.rs`); `RigctldConfig::allow_tx`, `set_ptt` and `vfo_op TUNE` (`rigctld/proto.rs`) and the client thread's exit (`rigctld/mod.rs`). The panel's side is its implementation of `Rig::request_ptt()`.
+- **Blocks:** any transmission an outside program asks for: TCI's `trx:0,true[,tci];` and `tune:0,true;`, rigctld's `T 1` and `G TUNE`.
+- **When:**
+  - the server's `allow_tx` is off, which it is unless the operator turns it on. TCI then says `receive_only:true;` and rigctld advertises no transmit ranges and `ptt_type=0x0`, so most programs don't even ask;
+  - the radio can't transmit (`RigState::can_tx`);
+  - another TCI client already holds the key;
+  - the panel refuses: `request_ptt()` returns an error whenever the panel's own checks would refuse its own transmission (interlocks #4, #6 and #7 apply as they do to TUNE: the amplifier must be connected, not tripped, on the radio's band, and the drive under its limit; for an ordinary transmission the radio's input must be on USB audio). The amplifier's own interlocks (#1 to #4) still apply to whatever goes out.
+  - The transmit power can't be set from outside: TCI's `drive`/`tune_drive` and rigctld's `L RFPOWER` are answered with the panel's value and change nothing.
+- **Unkeys when:** the client unkeys (never refused, even with `allow_tx` off); it disconnects; its server stops or is dropped; a TCI client keyed for its own audio sends none for 3 s; the radio stops transmitting by itself (the panel's interlocks, the operator's own PTT), after which the client is told `trx:0,false;` and must ask again. Every one of these calls `release_ptt()`, which the panel must always obey.
+- **Why:** an outside program that keys the radio drives the amplifier like the operator does, but it can't see the amplifier. WSJT-X keys on a schedule, a crashed or hung program can leave the radio keyed, and a program that sets power could overdrive the HR500. Asking the panel each time keeps every check in one place; unkeying on every way a client can go away means a program can never leave a carrier on the air.
+- **What the operator sees:** the program shows the radio as not transmitting; the panel logs why it refused.
+- **Tested by:** `transmit_is_refused_unless_the_server_allows_it_and_the_panel_grants_it`, `a_receive_only_radio_never_asks_the_panel_to_key`, `the_transmit_power_cannot_be_set_from_outside` (rigctld/proto.rs); `a_client_that_disconnects_while_keyed_unkeys_the_radio` (rigctld/mod.rs and tci/mod.rs); `transmit_is_refused_while_not_allowed_and_when_the_panel_says_no` and `a_keying_client_is_paced_and_unkeyed_when_its_audio_stops` (tci/mod.rs).
+- **Added:** AJ3G, 20 Oct 2026, with the links for outside programs ("I may use third party decoders … so we will want to use things like TCP/IP or TCI").
 
 ## Not interlocks, but related
 
