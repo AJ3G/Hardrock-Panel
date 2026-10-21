@@ -365,6 +365,21 @@ nearest band, with a note when it has none there).
 too, with handles at the top: drag one to widen or narrow the filter, as on
 the spectrum. Drag inside the passband to tune, carrying it along.
 
+**SCF**, beside Spectrum, 3D FFT and Both, shows a signal's cyclic features:
+the rhythm of its symbols (its baud rate) and its carriers. It finds and
+measures what is there; it decodes nothing. What it is good for depends on the
+mode:
+
+| Mode | SCF | Why |
+|---|---|---|
+| PSK31, RTTY, digital voice | Useful | Continuous, 30 baud and faster, usually above the noise: the symbol rate stands out and finds the centre. |
+| MFSK16, MFSK32 | Somewhat | Continuous at 15.6 and 31.25 baud: tells one from the other and finds an unknown signal's centre. The decoder does the rest. |
+| FT8, FT4 | Little | 6.25 baud (FT8) in a 12.6 s slot is about 80 symbols, and their smooth tone shifts leave a weak rhythm. Only strong signals show; the decoder's sync reaches about -21 dB. |
+| WSPR | None | 1.46 baud would need minutes of audio, and WSPR is often 20 to 30 dB under the noise. Use the waterfall on Slow or Very slow, zoomed to the 200 Hz window: WSPR shows as thin steady lines about 6 Hz wide. |
+
+As a rule, SCF helps with continuous signals of about 15 baud and faster, and
+very little with the slow, slotted weak-signal modes.
+
 **Receiver DSP**, under SETTINGS, *Scope and receiver*: the decimator (CIC +
 FIR to start, or half-band), the passband's shape (Soft, Sharp or Brick wall,
 with the audio delay each costs: about 9, 24 and 64 ms), the listening AGC's
