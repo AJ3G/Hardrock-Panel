@@ -114,14 +114,44 @@ pub fn window_body_bg(ui: &mut Ui) {
 }
 
 /// Frame for a floating window: flat panel fill with a roomy content margin,
-/// shaped by the current window style — square for most styles (the Angled
-/// cuts are painted on top afterwards by [`paint_window_border`]), rounded
-/// under the Rounded style.
+/// shaped by the current window style — square for most styles, rounded
+/// under the Rounded and Key caps styles — and an edge that stands it off
+/// the panel behind it ([`window_edge`]).
 pub fn window_frame() -> egui::Frame {
+    let (stroke, shadow) = window_edge();
+    plain_window_frame().stroke(stroke).shadow(shadow)
+}
+
+/// [`window_frame`] without its edge: the fill, margin and corners only.
+fn plain_window_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(theme::PANEL())
         .inner_margin(egui::Margin::same(11))
         .corner_radius(window_corner_radius())
+}
+
+/// The edge of a window docked over the panel, as the amplifier's case has
+/// one (AJ3G, 21 Oct 2026: "around the border you need to add something
+/// more pronounced ... to determine the GUI window edge"). A window is the
+/// same colour as the panel it sits on, so without it nothing marks where
+/// the window ends and its sides can't be found to resize it by.
+///
+/// A line in the theme's window-border colour taken a quarter of the way to
+/// its text colour (away from the ground, on a dark theme or a light one),
+/// a little heavier than a hairline, and a dark shadow all round just
+/// outside it, as the case's dark rim stands the amplifier off the bench. On
+/// a light theme the shadow is faint: a black halo on white reads as a
+/// smudge. The line is also what egui draws the window's resize grip in, so
+/// the grip shows too.
+pub fn window_edge() -> (Stroke, egui::Shadow) {
+    let line = Stroke::new(1.5, lerp(theme::PINK(), theme::TEXT(), 0.25));
+    let shadow = egui::Shadow {
+        offset: [0, 4],
+        blur: 16,
+        spread: 2,
+        color: Color32::from_black_alpha(if theme::is_light() { 50 } else { 170 }),
+    };
+    (line, shadow)
 }
 
 /// Paint the pink cut-corner border around a floating window (top-right +
@@ -266,7 +296,7 @@ fn window_corner_radius() -> CornerRadius {
 /// A floating-window frame (flat panel, square corners) with its fill faded to
 /// `alpha` — pair with [`paint_popup_cut_border`] for a fading popup.
 pub fn window_frame_alpha(alpha: f32) -> egui::Frame {
-    let mut f = window_frame();
+    let mut f = plain_window_frame();
     f.fill = fade(f.fill, alpha);
     f
 }
@@ -2406,4 +2436,68 @@ fn tab_shape(
         ));
     }
     (Shape::Vec(shapes), ink)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One pass of a context showing a resizable window in [`window_frame`],
+    /// with the pointer at `pointer`: the window's rect and the cursor asked
+    /// for.
+    fn pass(ctx: &egui::Context, pointer: Option<Pos2>) -> (Rect, egui::CursorIcon) {
+        let mut input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+            ..Default::default()
+        };
+        if let Some(p) = pointer {
+            input.events.push(egui::Event::PointerMoved(p));
+        }
+        let mut rect = Rect::NOTHING;
+        let mut out = ctx.run_ui(input, |ui| {
+            let r = egui::Window::new("Test")
+                .frame(window_frame())
+                .resizable(true)
+                .default_pos([100.0, 100.0])
+                .default_size([300.0, 200.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label("contents");
+                });
+            rect = r.expect("the window is open").response.rect;
+        });
+        out.textures_delta.clear();
+        (rect, out.platform_output.cursor_icon)
+    }
+
+    #[test]
+    fn a_window_has_an_edge_that_stands_off_the_panel() {
+        let f = window_frame();
+        assert!(f.stroke.width >= 1.0);
+        let lum = |c: Color32| c.r() as i32 + c.g() as i32 + c.b() as i32;
+        assert!((lum(f.stroke.color) - lum(f.fill)).abs() >= 60, "{:?} on {:?}", f.stroke, f.fill);
+        assert!(f.shadow.color.a() > 0 && f.shadow.blur > 0);
+        // The popups keep their own border, and none of this.
+        assert_eq!(window_frame_alpha(1.0).stroke, Stroke::NONE);
+    }
+
+    #[test]
+    fn a_windows_edges_and_corner_show_the_resize_cursor() {
+        let ctx = egui::Context::default();
+        let (rect, _) = pass(&ctx, None);
+        let at = |p: Pos2| {
+            // Hit-testing goes by the last pass's widgets: hover twice.
+            pass(&ctx, Some(p));
+            pass(&ctx, Some(p)).1
+        };
+        assert_eq!(at(rect.right_bottom() - vec2(1.0, 1.0)), egui::CursorIcon::ResizeNwSe);
+        assert_eq!(
+            at(pos2(rect.right() - 1.0, rect.center().y)),
+            egui::CursorIcon::ResizeHorizontal
+        );
+        assert_eq!(
+            at(pos2(rect.center().x, rect.bottom() - 1.0)),
+            egui::CursorIcon::ResizeVertical
+        );
+        assert_eq!(at(rect.center()), egui::CursorIcon::Default);
+    }
 }

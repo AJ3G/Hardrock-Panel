@@ -577,3 +577,19 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 
 **REF.** No CAT command and no documented USB field reports the reference input. SETTINGS has a "10 MHz reference connected" tick that lights REF 10M. The dial read-back's undocumented last byte read 0x30 on AJ3G's radio with a reference and 0x10 in earlier notes without; every change of it (but the dial-turning bit) now goes in the ELAD log, so a bench test with the reference pulled can show whether bit 0x20 is the reference. If it is, it replaces the tick.
 
+
+## 50. Docked windows wear an edge and can be resized by their edges (21 Oct 2026)
+
+**Why.** AJ3G: "On spectrum Display, around the border you need to add something more pronounced (like you did in AMP Panel) to determine the GUI Window edge. Also I am unable to change the size of the window when docked." A docked window is the panel's own colour on the panel, so nothing marked where it ended; SCOPE and SETTINGS could not be resized at all, and RADIO only in width.
+
+**What the panel does.**
+- **Edge.** Every window docked over the panel (SCOPE, RADIO, DECODE, SETTINGS, the radio's MENU) is framed by `chrome::window_frame`, which now has an edge as the amplifier's case has: a 1.5 pt line in the theme's window-border colour taken a quarter of the way to its text colour, and a dark shadow all round just outside it (faint on a light theme). It is one place: `chrome::window_edge`. Popped-out windows are windows of the operating system and are unchanged; the menu popups keep their own cut-corner border.
+- **Resizing.** All four can be dragged by any edge or corner, and egui shows the resize cursor there (tested). egui draws its corner grip in the edge's colour, so with the edge the grip shows too. Sizes are kept from run to run in egui's memory, which eframe saves (checked: a resized SCOPE came back at its size).
+  - SCOPE takes the window's width; its height is the window's, the scope and its controls scrolling within it. First opened it fills the screen as before. Smallest 560 × 320. The trace and waterfall keep their own height (HEIGHT, and the grip under the waterfall); the window does not stretch them.
+  - RADIO's face fits the window's width and height both, keeping its proportions and centred (the pop-out's fit), between 0.75 and 3 times; smaller than that it scrolls.
+  - DECODE already could; SETTINGS scrolls within whatever height it is given, APPLY kept below.
+- **How.** egui sizes a window to what its contents measure, so a resizable window's body has to take all the room it is given (`scopewin::fill_scroll`, or `set_min_size` for RADIO); a body that shrank to its contents would put the window's edge where the contents end.
+
+**Screens.** `screens/edges-before.png`, `screens/edges-after.png`, `screens/scope-docked-resized.png` beside this project's notes.
+
+**Where.** `chrome.rs` (`window_frame`, `window_edge`), `scopewin.rs`, `radio.rs` (`radio_window`), `main.rs` (`settings_window`).

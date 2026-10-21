@@ -66,27 +66,48 @@ pub(crate) fn scope_window(
             *open = false;
         }
     } else {
-        let w = (ctx.content_rect().width() - 40.0).clamp(560.0, 1400.0);
+        // Its edges and corner can be dragged both ways (AJ3G, 21 Oct 2026:
+        // "I am unable to change the size of the window when docked"). The
+        // scope takes the window's width, and scrolls within its height.
+        // First opened, it fills the screen as it always did; after that it
+        // keeps the size it was given, from run to run, as egui keeps every
+        // window's.
+        let screen = ctx.content_rect();
+        let w = (screen.width() - 24.0).clamp(MIN_W, 1430.0);
+        let h = (screen.height() - 56.0).max(MIN_H);
         egui::Window::new("Scope")
             .id(egui::Id::new("scope-window"))
             .open(open)
             .frame(chrome::window_frame())
-            .resizable(false)
+            .resizable(true)
             .collapsible(false)
             .default_pos([12.0, 44.0])
+            .default_size([w, h])
+            .min_size([MIN_W, MIN_H])
             .show(ctx, |ui| {
                 chrome::window_body_bg(ui);
-                ui.set_width(w);
-                let room = (ctx.content_rect().height() - 110.0).max(300.0);
-                egui::ScrollArea::vertical().max_height(room).min_scrolled_height(room).show(
-                    ui,
-                    |ui| {
-                        body(ui, false, scope, &mut a, &mut out);
-                    },
-                );
+                fill_scroll(ui, "scope-docked", |ui| body(ui, false, scope, &mut a, &mut out));
             });
     }
     out
+}
+
+/// The smallest the docked window can be dragged to: room for the scope's
+/// control rows without the trace going to nothing.
+const MIN_W: f32 = 560.0;
+const MIN_H: f32 = 320.0;
+
+/// A vertical scroll area that fills the room in `ui` whatever its contents
+/// measure, for the body of a window that can be resized: one that shrank to
+/// its contents would leave the window's free edge where the contents end,
+/// and one that measured more than the room would push the window out
+/// again as fast as it was dragged in.
+pub(crate) fn fill_scroll<R>(
+    ui: &mut egui::Ui,
+    salt: &'static str,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    egui::ScrollArea::vertical().id_salt(salt).auto_shrink([false, false]).show(ui, add).inner
 }
 
 fn caption(ui: &mut egui::Ui, t: &str) {
