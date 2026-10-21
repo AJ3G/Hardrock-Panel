@@ -41,6 +41,7 @@ mod theme;
 
 mod audio;
 mod decode;
+mod logfile;
 mod outside;
 mod panel;
 mod radio;
@@ -61,6 +62,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use panel::{AmpMeters, TxMeters};
+
+/// The app's name, which is also the folder eframe keeps its settings in
+/// ([`eframe::storage_dir`]); the log goes there too.
+const APP_NAME: &str = "Hardrock Panel";
 
 /// Where eframe keeps what's saved between runs.
 const STORAGE_KEY: &str = "hardrock-panel";
@@ -787,10 +792,11 @@ impl App {
                 let room = (ctx.content_rect().height() - 150.0).max(200.0);
                 egui::ScrollArea::vertical().max_height(room).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        if chrome::chip(ui, false, "REFRESH PORTS")
+                        if chrome::chip(ui, false, "REFRESH DEVICES")
                             .on_hover_text(
-                                "Look again for serial ports and sound outputs, after plugging \
-                                 the amp or the radio in",
+                                "Look again for serial ports, sound outputs and the ELAD's I/Q \
+                                 on USB, after plugging something in. The sound lists also \
+                                 look again each time they open.",
                             )
                             .clicked()
                         {
@@ -816,7 +822,7 @@ impl App {
                         &self.draft.serial.path,
                         rig,
                         &self.ports,
-                        &self.sounds,
+                        &mut self.sounds,
                         &mut self.saved.audio_out,
                     );
                     ui.add_space(10.0);
@@ -826,7 +832,7 @@ impl App {
                         ui,
                         &mut self.draft_source,
                         &mut self.saved.rx.audio_out,
-                        &self.sounds,
+                        &mut self.sounds,
                         &self.elad_devices,
                         &self.rx,
                     ) {
@@ -1285,11 +1291,8 @@ fn serial_ports() -> Vec<String> {
 }
 
 fn main() -> eframe::Result {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // The log goes beside the saved settings (eframe's folder for the app).
+    logfile::init(eframe::storage_dir(APP_NAME));
     let size = ViewArgs::parse(std::env::args().skip(1)).size;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1299,7 +1302,7 @@ fn main() -> eframe::Result {
         wgpu_options: scope::gpu::wgpu_options(),
         ..Default::default()
     };
-    eframe::run_native("Hardrock Panel", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+    eframe::run_native(APP_NAME, options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }
 
 #[cfg(test)]

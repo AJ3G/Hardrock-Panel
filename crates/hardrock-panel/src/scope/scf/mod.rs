@@ -80,6 +80,18 @@ pub const STRIPS: [u32; 7] = [1024, 2048, 4096, 8192, 16_384, 32_768, 65_536];
 /// α rows in the grid.
 pub const GRID_A: u32 = 256;
 
+/// The shortest strip N the engine runs with channelizer length `nc`
+/// (N ≥ 4 × N').
+pub fn min_strip(nc: u32) -> u32 {
+    nc.saturating_mul(4)
+}
+
+/// Whether strip length `n` can go with channelizer length `nc`: at least
+/// 4 × N', and N × N' within [`engine::MAX_POINTS`].
+pub fn strip_ok(n: u32, nc: u32) -> bool {
+    n >= min_strip(nc) && n as u64 * nc as u64 <= engine::MAX_POINTS as u64
+}
+
 /// What the SCF view keeps between runs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -136,6 +148,10 @@ impl ScfSettings {
         if !STRIPS.contains(&self.strip) {
             self.strip = 4096;
         }
+        // A pair the engine cannot run (N under 4 × N', or too many points)
+        // is put right here, so a bad pair kept from an earlier run cannot
+        // stop the engine on every start.
+        self.strip = self.strip.max(min_strip(self.channels));
         while self.strip as u64 * self.channels as u64 > engine::MAX_POINTS as u64 {
             self.strip /= 2;
         }
@@ -143,6 +159,13 @@ impl ScfSettings {
         if !self.alpha_max_hz.is_finite() || self.alpha_max_hz <= 0.0 {
             self.alpha_max_hz = 50.0;
         }
+    }
+
+    /// Set N', raising N to the smallest it may be with it when it is under
+    /// that (and lowering it when N × N' would be too many points).
+    pub fn set_channels(&mut self, c: u32) {
+        self.channels = c;
+        self.sanitise();
     }
 
     /// The engine this wants.
@@ -290,14 +313,41 @@ impl Runtime {
             .spawn(move || ingest(tap_rx, job_tx, &sh));
         let sh = shared.clone();
         let _ = std::thread::Builder::new().name("scf-gpu".into()).spawn(move || {
-            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                gpu_loop(&device, &queue, job_rx, &sh)
-            }));
-            if run.is_err() {
-                lock(&sh.status).error = Some("the SCF engine stopped (see the log)".into());
+            // A panic stops the engine; it is started again once by itself
+            // (a fresh engine, the same device) before the view gives up.
+            let mut restarts = 0;
+            loop {
+                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    gpu_loop(&device, &queue, &job_rx, &sh)
+                }));
+                let Err(payload) = run else { break };
+                let why = crate::logfile::panic_text(&*payload);
+                tracing::error!("the SCF engine stopped: {why}");
+                let restart = restarts < MAX_RESTARTS && !sh.stop.load(Ordering::Relaxed);
+                lock(&sh.status).error = Some(stop_message(&why, restart));
+                if !restart {
+                    break;
+                }
+                restarts += 1;
+                tracing::info!("starting the SCF engine again ({restarts} of {MAX_RESTARTS})");
             }
         });
         Runtime { tap_tx, shared }
+    }
+}
+
+/// How many times the GPU thread starts the engine again by itself after a
+/// panic before it gives up.
+const MAX_RESTARTS: u32 = 1;
+
+/// What the view says when the engine has stopped on `why` (the panic's
+/// text): that it was started again, or that it stopped for good and where
+/// the log is.
+fn stop_message(why: &str, restarted: bool) -> String {
+    if restarted {
+        format!("The SCF engine stopped ({why}) and was started again")
+    } else {
+        format!("The SCF engine stopped: {why}. {}", crate::logfile::where_it_is())
     }
 }
 
@@ -375,8 +425,10 @@ fn ingest(rx: Receiver<Chunk>, tx: SyncSender<Job>, sh: &Shared) {
 
 /// The GPU thread: one engine (rebuilt when its sizes change), a block at
 /// a time, the profile into the readout.
-fn gpu_loop(device: &wgpu::Device, queue: &wgpu::Queue, rx: Receiver<Job>, sh: &Shared) {
+fn gpu_loop(device: &wgpu::Device, queue: &wgpu::Queue, rx: &Receiver<Job>, sh: &Shared) {
     let mut engine: Option<Engine> = None;
+    // Sizes the engine refused, and the message shown for them.
+    let mut refused: Option<(EngineCfg, String)> = None;
     let mut version = 0u64;
     let mut since = 0u64;
     let mut epoch = u64::MAX;
@@ -392,8 +444,30 @@ fn gpu_loop(device: &wgpu::Device, queue: &wgpu::Queue, rx: Receiver<Job>, sh: &
             Err(RecvTimeoutError::Disconnected) => break,
         };
         let cfg = job.s.engine();
+        if refused.as_ref().is_some_and(|(c, _)| *c == cfg) {
+            continue;
+        }
         if engine.as_ref().is_none_or(|e| e.cfg != cfg) {
-            engine = Some(Engine::new(device, queue, cfg));
+            engine = None;
+            match Engine::new(device, queue, cfg) {
+                Ok(e) => engine = Some(e),
+                Err(why) => {
+                    let msg = format!("The SCF cannot run: {why}");
+                    tracing::warn!("{msg} ({cfg:?})");
+                    let mut st = lock(&sh.status);
+                    st.error = Some(msg.clone());
+                    st.grid = None;
+                    refused = Some((cfg, msg));
+                    continue;
+                }
+            }
+            // A refusal's message goes once sizes that run are chosen.
+            if let Some((_, msg)) = refused.take() {
+                let mut st = lock(&sh.status);
+                if st.error.as_ref() == Some(&msg) {
+                    st.error = None;
+                }
+            }
             version += 1;
             since = 0;
             prev = None;

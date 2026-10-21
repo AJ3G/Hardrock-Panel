@@ -474,3 +474,16 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 - **MUTE (item 10).** A MUTE chip beside the SOUND slider in place of the round checkbox, lit in the selected-chip blue while muted (a neutral state, so not yellow or red).
 
 **Where.** `scope/view.rs` (`follow_rx`, `keeps_centre`), `scope/mod.rs` (`follow`, the timing test), `main.rs` (the DECODE snap), `scopewin.rs` (MUTE), `crates/rigcat/src/link.rs` (`run`, `SETTINGS_AFTER_TX`).
+
+## 42. A log file beside the settings, the SCF's sizes kept valid, its engine started again once, and tuning in the ELAD log
+
+**Decided:** AJ3G, 21 Oct 2026, from testing build 3dd6b9d (NEXT-BUILD.md, items 1, 2, 7 and 8).
+
+**What the panel does.**
+- **A log file.** Everything logged also goes to `hardrock-panel.log` in the folder eframe keeps the settings in (`eframe::storage_dir("Hardrock Panel")`: `%APPDATA%\Hardrock Panel\data` on Windows, `~/.local/share/hardrockpanel` on Linux), as well as to stderr. The Windows release build has no console, so before this a message saying "see the log" pointed at nothing. Past 2 MB the file is moved to `hardrock-panel.log.1` (replacing the one before) and a new one begun, so it never takes more than 4 MB. A panic in any thread is written to it with the thread's name and the place. No crate for it: `tracing-appender` is not to be had here, and a size-capped writer is forty lines (`logfile.rs`).
+- **The SCF's N and N′.** The engine needs N ≥ 4 × N′. The N list greys out N under that as well as N too big for the GPU's buffers, each saying why on hover; choosing a larger N′ raises N to the smallest that goes with it; and a pair kept from an earlier run that the engine cannot run (N = N′ = 1024 stopped it on every start) is put right as the settings are loaded. The engine itself refuses sizes it cannot run with the reason on the view, rather than stopping on an assertion.
+- **When the SCF engine stops anyway.** The message carries the panic's own text and says where the log is, with COPY LOG beside it (the last 64 KB of the log). The engine is started again once by itself, and the view says it was; a second stop is left stopped, as a fault that repeats would only fill the log.
+- **Sound outputs** are read again each time one of the sound lists under SETTINGS opens, so a speaker or cable plugged in after start-up is there. REFRESH PORTS is now REFRESH DEVICES: serial ports, sound outputs and the ELAD on USB.
+- **The ELAD log's tuning.** The session trace covers only the opening; on the FDM-DUO later retunes go over CAT, past the driver, so a report showed the dial it opened on as if current (7.074 MHz while the radio was on 7.0386). COPY ELAD LOG now begins with where the radio is now (the dial over CAT, the I/Q centre and the receiver) and the last ten recentres and dial moves, each with its UTC time (`elad_iq::note_dial`, `note_retune`, fed by `rx.rs`).
+
+**Where.** `logfile.rs`, `main.rs` (`APP_NAME`, REFRESH DEVICES), `scope/scf/mod.rs` (`strip_ok`, `set_channels`, `sanitise`, the GPU thread's restart), `scope/scf/engine.rs` (`EngineCfg::problem`, `Engine::new` returns a `Result`), `scope/scf/ui.rs` (the N list, `error_row`), `settings.rs` (`reread_sounds_on_open`), `rx.rs` (`dial_line`), `elad-iq/src/trace.rs`.
