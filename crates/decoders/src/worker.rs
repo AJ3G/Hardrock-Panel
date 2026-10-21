@@ -24,8 +24,8 @@ use crate::modem::sstv::SstvRx;
 use crate::modem::thor::ThorRx;
 use crate::modem::wefax::{Ioc, Lpm, WefaxRx};
 use crate::resample::Resampler;
-use crate::slot::SlotRecorder;
-use crate::wsjt::{self, WsjtDecode, WsjtMode, WsjtSession};
+use crate::slot::{Slot, SlotRecorder};
+use crate::wsjt::{self, Msk144Live, WsjtDecode, WsjtMode, WsjtSession};
 
 /// Blocks a worker holds before it starts dropping them. At the panel's
 /// usual 10–20 ms blocks this is several seconds.
@@ -92,27 +92,47 @@ pub struct WsjtConfig {
     pub my_calls: Vec<String>,
     /// A slot joined later than this (seconds after its start) is not decoded:
     /// too little of its signals was heard. One second keeps every station
-    /// starting on time.
+    /// starting on time; MSK144's pings come any time, so it takes any slot.
     pub max_late_s: f64,
 }
 
 impl WsjtConfig {
     pub fn new(mode: WsjtMode) -> Self {
-        WsjtConfig { mode, input_rate: sdr::AUDIO_RATE, my_calls: Vec::new(), max_late_s: 1.0 }
+        let max_late_s = if mode == WsjtMode::Msk144 { mode.period_s() } else { 1.0 };
+        WsjtConfig { mode, input_rate: sdr::AUDIO_RATE, my_calls: Vec::new(), max_late_s }
     }
 }
 
-/// One slot's decodes.
+/// One slot's decodes, or (MSK144) what one pass heard as the slot runs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WsjtSlot {
     pub mode: WsjtMode,
     /// UTC of the slot's start, Unix seconds.
     pub slot_utc: i64,
-    /// Every message heard, sorted by audio frequency (possibly none).
+    /// At the slot's end, every message heard (possibly none): sorted by
+    /// audio frequency, or for MSK144 in the order first heard, each at its
+    /// best SNR. In a live report, the messages new to the slot and those
+    /// heard again at a better SNR.
     pub decodes: Vec<WsjtDecode>,
-    /// How long decoding took, so the panel can see a slow machine.
+    /// How long decoding took, so the panel can see a slow machine. For
+    /// MSK144's slot end, the passes as the slot ran are not counted.
     pub decode_ms: u32,
+    /// A report during the slot (MSK144 only, about once a second while
+    /// there is something new); the slot's end is reported with this false.
+    pub live: bool,
 }
+
+/// What the slot thread hands the decode thread.
+enum SlotMsg {
+    /// The next audio of the slot starting at this UTC, as it is heard
+    /// (MSK144 only).
+    Live(f64, Vec<f32>),
+    /// A finished slot.
+    Done(Slot),
+}
+
+/// How much new audio an MSK144 live pass waits for, samples at 12 kHz.
+const LIVE_STEP: usize = 12_000;
 
 /// A WSJT mode decoding slot after slot on its own threads: one collects the
 /// audio into UTC slots, the other decodes each finished slot.
@@ -128,7 +148,7 @@ const RESYNC_S: f64 = 0.05;
 impl WsjtDecoder {
     pub fn spawn(cfg: WsjtConfig) -> Self {
         let (mut feed, input) = Feed::<()>::new();
-        let (slot_tx, slot_rx) = unbounded::<crate::slot::Slot>();
+        let (slot_tx, slot_rx) = unbounded::<SlotMsg>();
         let (res_tx, results) = unbounded();
         let mode = cfg.mode;
         let in_rate = cfg.input_rate;
@@ -144,6 +164,9 @@ impl WsjtDecoder {
                     // UTC of the resampler's first input, outputs so far, and
                     // where the next block should start.
                     let (mut t0, mut outs, mut expect) = (0.0f64, 0u64, f64::NAN);
+                    let live = mode == WsjtMode::Msk144;
+                    // The slot (its UTC) and how much of it was sent live.
+                    let mut sent = (f64::NAN, 0usize);
                     for msg in input.iter() {
                         let Input::Audio(audio, utc) = msg else { continue };
                         // (`expect` is NaN before the first block, which also resyncs.)
@@ -167,8 +190,20 @@ impl WsjtDecoder {
                         let first = t0 + (outs as f64 - delay) / wsjt::RATE;
                         outs += block.len() as u64;
                         for s in rec.push(block, first) {
-                            if s.first_s <= max_late && slot_tx.send(s).is_err() {
+                            if s.first_s <= max_late && slot_tx.send(SlotMsg::Done(s)).is_err() {
                                 return;
+                            }
+                        }
+                        if live && let Some((at, audio, first_s)) = rec.partial() {
+                            if at != sent.0 {
+                                sent = (at, 0);
+                            }
+                            if first_s <= max_late && audio.len() >= sent.1 + LIVE_STEP {
+                                let new = audio[sent.1..].to_vec();
+                                sent.1 = audio.len();
+                                if slot_tx.send(SlotMsg::Live(at, new)).is_err() {
+                                    return;
+                                }
                             }
                         }
                     }
@@ -183,18 +218,64 @@ impl WsjtDecoder {
                 .spawn(move || {
                     let mut session = WsjtSession::new();
                     session.seed(&calls.iter().map(String::as_str).collect::<Vec<_>>());
-                    for s in slot_rx.iter() {
+                    let mut live: Option<Msk144Live> = None;
+                    let mut next = None;
+                    loop {
+                        let msg = match next.take() {
+                            Some(m) => m,
+                            None => match slot_rx.recv() {
+                                Ok(m) => m,
+                                Err(_) => return,
+                            },
+                        };
                         let t = Instant::now();
-                        let slot_utc = s.start_utc.round() as i64;
-                        let decodes = wsjt::decode_slot(mode, &s.audio, slot_utc, &mut session);
+                        let (slot_utc, decodes, is_live) = match msg {
+                            SlotMsg::Live(at, audio) => {
+                                let slot_utc = at.round() as i64;
+                                let l = match &mut live {
+                                    Some(l) if l.slot_utc() == slot_utc => l,
+                                    _ => live.insert(Msk144Live::new(slot_utc)),
+                                };
+                                l.push(&audio);
+                                // Behind: take all this slot's audio waiting,
+                                // then decode once.
+                                while let Ok(m) = slot_rx.try_recv() {
+                                    match m {
+                                        SlotMsg::Live(a, more) if a == at => l.push(&more),
+                                        other => {
+                                            next = Some(other);
+                                            break;
+                                        }
+                                    }
+                                }
+                                (slot_utc, l.pass(&mut session), true)
+                            }
+                            SlotMsg::Done(s) => {
+                                let slot_utc = s.start_utc.round() as i64;
+                                let decodes = match live.take() {
+                                    Some(mut l) if l.slot_utc() == slot_utc => {
+                                        l.push(&s.audio[l.heard().min(s.audio.len())..]);
+                                        l.finish(&mut session);
+                                        l.decodes().to_vec()
+                                    }
+                                    _ => wsjt::decode_slot(mode, &s.audio, slot_utc, &mut session),
+                                };
+                                (slot_utc, decodes, false)
+                            }
+                        };
                         let decode_ms = t.elapsed().as_millis() as u32;
                         tracing::debug!(
                             mode = mode.label(),
                             slot_utc,
                             n = decodes.len(),
-                            decode_ms
+                            decode_ms,
+                            live = is_live
                         );
-                        if res_tx.send(WsjtSlot { mode, slot_utc, decodes, decode_ms }).is_err() {
+                        if is_live && decodes.is_empty() {
+                            continue;
+                        }
+                        let slot = WsjtSlot { mode, slot_utc, decodes, decode_ms, live: is_live };
+                        if res_tx.send(slot).is_err() {
                             return;
                         }
                     }
@@ -530,6 +611,61 @@ mod tests {
         let m = slot.decodes.iter().find(|m| m.message == "CQ AJ3G FN20").expect("decode");
         assert!(m.dt_s.abs() < 0.05, "{m:?}");
         assert!((m.audio_hz - 1500.0).abs() < 3.0, "{m:?}");
+        assert_eq!(d.dropped(), 0);
+    }
+
+    #[test]
+    fn an_msk144_ping_is_reported_while_its_slot_runs() {
+        // A 144 ms ping 6.3 s into the slot at 12:00:15 UTC, in noise, at
+        // 12 kHz brought up to 48 kHz, with 2 s of lead-in.
+        let slot_utc = 1_700_000_010i64;
+        let mut x: u32 = 1;
+        let mut a12: Vec<f32> = (0..12_000 * 19)
+            .map(|_| {
+                x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                ((x >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 0.1
+            })
+            .collect();
+        let ping = crate::wsjt::tests::msk144_burst("CQ AJ3G FN20", 1480.0, 2, 0.05);
+        let at = 12_000 * 2 + 12_000 * 63 / 10;
+        for (o, s) in a12[at..].iter_mut().zip(&ping) {
+            *o += s;
+        }
+        let mut up = Resampler::<f32>::new(12_000.0, 48_000.0);
+        let mut a48 = Vec::new();
+        up.process(&a12, &mut a48);
+        let start = slot_utc as f64 - 2.0 - up.delay() / 48_000.0;
+
+        let d = WsjtDecoder::spawn(WsjtConfig::new(WsjtMode::Msk144));
+        let chunks: Vec<_> = a48.chunks(4800).collect();
+        // Up to 10 s into the slot: anything reported now is live.
+        let upto = 120;
+        for (i, c) in chunks[..upto].iter().enumerate() {
+            d.push(c, start + (i * 4800) as f64 / 48_000.0);
+        }
+        // (The lead-in's slot ends first, with nothing in it.)
+        let s = loop {
+            let s = d.results().recv_timeout(Duration::from_secs(30)).expect("a live report");
+            if s.slot_utc == slot_utc {
+                break s;
+            }
+        };
+        assert!(s.live, "{s:?}");
+        let m = s.decodes.iter().find(|m| m.message == "CQ AJ3G FN20").expect("decode");
+        assert!((m.dt_s - 6.3).abs() < 0.3, "{m:?}");
+        assert!((m.audio_hz - 1480.0).abs() < 10.0, "{m:?}");
+        // The rest, past the slot's end: the slot's end lists it once.
+        for (i, c) in chunks.iter().enumerate().skip(upto) {
+            d.push(c, start + (i * 4800) as f64 / 48_000.0);
+        }
+        let end = loop {
+            let s = d.results().recv_timeout(Duration::from_secs(30)).expect("the slot end");
+            if !s.live && s.slot_utc == slot_utc {
+                break s;
+            }
+        };
+        assert_eq!(end.decodes.len(), 1, "{end:?}");
+        assert_eq!(end.decodes[0].message, "CQ AJ3G FN20");
         assert_eq!(d.dropped(), 0);
     }
 

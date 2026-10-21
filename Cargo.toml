@@ -47,7 +47,7 @@ links = { path = "crates/links" }
 decoders = { path = "crates/decoders" }
 datalink = { path = "crates/datalink" }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
-mfsk-core = { version = "0.10.0", default-features = false, features = ["std", "ft8", "ft4", "wspr", "jt65", "jt9", "fst4", "q65", "parallel", "fft-rustfft"] }
+mfsk-core = { version = "0.10.0", default-features = false, features = ["std", "ft8", "ft4", "wspr", "jt65", "jt9", "fst4", "q65", "msk144", "parallel", "fft-rustfft"] }
 rayon = "1"
 xng-mode-hfdl = { path = "vendor/xng/crates/xng-mode-hfdl" }
 xng-mode-acars = { path = "vendor/xng/crates/xng-mode-acars" }

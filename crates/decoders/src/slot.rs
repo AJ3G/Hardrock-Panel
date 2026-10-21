@@ -56,6 +56,13 @@ impl SlotRecorder {
         self.period_s
     }
 
+    /// The slot being filled, if one is: its start (UTC), its audio up to the
+    /// last sample heard, and where in it the audio began (seconds).
+    pub fn partial(&self) -> Option<(f64, &[f32], f64)> {
+        let s = self.cur.as_ref()?;
+        Some((s.start_utc, &s.audio[..self.next_index.min(s.audio.len())], s.first_s))
+    }
+
     /// Add audio whose first sample was at `utc`. Returns every slot this
     /// block finished.
     pub fn push(&mut self, audio: &[f32], utc: f64) -> Vec<Slot> {
@@ -148,6 +155,20 @@ mod tests {
         let at = |sec: f64| s.audio[((sec - 15.0) * rate) as usize];
         assert_eq!(at(20.5), 0.0);
         assert!((at(25.0) - 2500.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn the_slot_being_filled_can_be_seen() {
+        let mut r = SlotRecorder::new(100.0, 15.0);
+        let start = 1_699_999_995.0;
+        assert!(r.partial().is_none());
+        r.push(&[1.0; 50], start + 2.0);
+        r.push(&[2.0; 30], start + 2.5);
+        let (at, audio, first_s) = r.partial().expect("a slot");
+        assert_eq!(at, start);
+        assert_eq!(audio.len(), 280);
+        assert_eq!((audio[199], audio[200], audio[279]), (0.0, 1.0, 2.0));
+        assert!((first_s - 2.0).abs() < 1e-9);
     }
 
     #[test]

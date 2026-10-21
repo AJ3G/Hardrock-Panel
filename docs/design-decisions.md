@@ -487,3 +487,17 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 - **The ELAD log's tuning.** The session trace covers only the opening; on the FDM-DUO later retunes go over CAT, past the driver, so a report showed the dial it opened on as if current (7.074 MHz while the radio was on 7.0386). COPY ELAD LOG now begins with where the radio is now (the dial over CAT, the I/Q centre and the receiver) and the last ten recentres and dial moves, each with its UTC time (`elad_iq::note_dial`, `note_retune`, fed by `rx.rs`).
 
 **Where.** `logfile.rs`, `main.rs` (`APP_NAME`, REFRESH DEVICES), `scope/scf/mod.rs` (`strip_ok`, `set_channels`, `sanitise`, the GPU thread's restart), `scope/scf/engine.rs` (`EngineCfg::problem`, `Engine::new` returns a `Result`), `scope/scf/ui.rs` (the N list, `error_row`), `settings.rs` (`reread_sounds_on_open`), `rx.rs` (`dial_line`), `elad-iq/src/trace.rs`.
+
+## 43. MSK144 is decoded as its slot runs, each message kept once at its best
+
+**Decided:** AJ3G, NEXT-BUILD item 15 (MSK144 for 6 m meteor scatter). The shape by the integrator.
+
+**What the panel does.**
+- **A WSJT mode.** MSK144 (`WsjtMode::Msk144`, mfsk-core 0.10's `msk144` feature) in 15 s UTC slots of 12 kHz audio, centred on WSJT-X's 1500 Hz with its ±100 Hz F Tol, the callsign table shared with FT8 so hashed calls resolve. DECODE offers it under WSJT; its snap takes the radio to 50.260 MHz USB (144.150 MHz behind a converter) with the WSJT 300–2700 Hz data filter, from the one data-mode table (decision 39). Its key's hover says a numbered CQ (CQ 265 …) asks for answers on that frequency.
+- **Live pings.** A ping lasts 50 to 200 ms and comes any time, so waiting for the slot's end would show it up to 15 s late. About once a second (`LIVE_STEP`) the decoder looks at the audio no pass has seen, with a block's overlap so a ping across the join is not lost and a second before it so the noise floor, which the SNR is measured against, is known (`Msk144Live::pass`); what was heard in the window's first block is not taken from it, since the last pass measured it with the floor known. Each decode is shown at once with DT its time into the slot, as WSJT-X shows it, SNR and audio frequency; a slot is taken however late it was joined.
+- **Cheap passes, one deep look.** The live passes run only the short-ping decoder (about 8 ms a pass, 1 ms a block, on the build machine). At the slot's end the whole slot is decoded again at WSJT-X's Normal depth, with the frame-averaging search too (about 0.7 s), for a signal too weak for one frame but lasting several. Deep depth everywhere cost 250 ms a pass, a quarter of a core.
+- **Once each.** A station sends the same message over and over and a long ping decodes in several blocks: within a slot a message is kept once, at its best SNR with the time and frequency of that hearing. A better hearing updates its line in DECODE rather than adding one; WSJT-X UDP is sent each message once, when first heard.
+
+**Not in mfsk-core, so not here.** Sh (short) messages and MSK40, and WSJT-X's adaptive equaliser trained on the session's decodes. A ping in a slot's first 0.6 s comes before any noise floor is known, and its SNR reads 0.
+
+**Where.** `decoders/src/wsjt.rs` (`Msk144Live`, `keep_best`), `decoders/src/worker.rs` (`SlotMsg`, `WsjtSlot::live`), `decoders/src/slot.rs` (`SlotRecorder::partial`), `hardrock-panel/src/decode.rs` (`Kind::Msk144`, `update_row`), the workspace's mfsk-core features.

@@ -2,9 +2,10 @@
 //! receiver's audio (48 kHz, each block stamped in UTC from the system
 //! clock) or on the radio's I/Q.
 //!
-//! * WSJT modes (FT8, FT4, WSPR, JT65, JT9, FST4, Q65) in UTC slots, each
-//!   decode with its UTC, SNR, DT, audio frequency and RF frequency, and sent
-//!   on as WSJT-X UDP when that is on under SETTINGS.
+//! * WSJT modes (FT8, FT4, WSPR, JT65, JT9, FST4, Q65, MSK144) in UTC slots,
+//!   each decode with its UTC, SNR, DT, audio frequency and RF frequency, and
+//!   sent on as WSJT-X UDP when that is on under SETTINGS. MSK144's meteor
+//!   pings show as they are heard, with DT their time into the slot.
 //! * Keyboard modes (RTTY, PSK31, NAVTEX, Olivia, THOR) as running text.
 //! * Pictures (SSTV, WEFAX) as they are drawn, line by line.
 //! * Data links (HFDL, ACARS, VDL2, AIS, Mode S) from the I/Q, at true RF:
@@ -42,6 +43,7 @@ pub(crate) enum Kind {
     Jt9,
     Fst4,
     Q65,
+    Msk144,
     Rtty,
     Psk31,
     Navtex,
@@ -67,7 +69,19 @@ enum Family {
 
 impl Kind {
     const GROUPS: [(&'static str, &'static [Kind]); 4] = [
-        ("WSJT", &[Kind::Ft8, Kind::Ft4, Kind::Wspr, Kind::Jt65, Kind::Jt9, Kind::Fst4, Kind::Q65]),
+        (
+            "WSJT",
+            &[
+                Kind::Ft8,
+                Kind::Ft4,
+                Kind::Wspr,
+                Kind::Jt65,
+                Kind::Jt9,
+                Kind::Fst4,
+                Kind::Q65,
+                Kind::Msk144,
+            ],
+        ),
         ("Keyboard", &[Kind::Rtty, Kind::Psk31, Kind::Navtex, Kind::Olivia, Kind::Thor]),
         ("Pictures", &[Kind::Sstv, Kind::Wefax]),
         ("From I/Q", &[Kind::Hfdl, Kind::Acars, Kind::Vdl2, Kind::Ais, Kind::ModeS]),
@@ -82,6 +96,7 @@ impl Kind {
             Kind::Jt9 => "JT9",
             Kind::Fst4 => "FST4-60",
             Kind::Q65 => "Q65-30A",
+            Kind::Msk144 => "MSK144",
             Kind::Rtty => "RTTY",
             Kind::Psk31 => "PSK31",
             Kind::Navtex => "NAVTEX",
@@ -105,7 +120,8 @@ impl Kind {
             | Kind::Jt65
             | Kind::Jt9
             | Kind::Fst4
-            | Kind::Q65 => Family::Wsjt,
+            | Kind::Q65
+            | Kind::Msk144 => Family::Wsjt,
             Kind::Rtty | Kind::Psk31 | Kind::Navtex | Kind::Olivia | Kind::Thor => Family::Text,
             Kind::Sstv | Kind::Wefax => Family::Picture,
             Kind::Hfdl | Kind::Acars | Kind::Vdl2 | Kind::Ais | Kind::ModeS => Family::Link,
@@ -121,6 +137,7 @@ impl Kind {
             Kind::Jt9 => WsjtMode::Jt9,
             Kind::Fst4 => WsjtMode::Fst4(Fst4Period::P60),
             Kind::Q65 => WsjtMode::Q65(Q65Mode::A30),
+            Kind::Msk144 => WsjtMode::Msk144,
             _ => return None,
         })
     }
@@ -136,6 +153,7 @@ impl Kind {
             Kind::Jt9 => "JT9",
             Kind::Fst4 => "FST4",
             Kind::Q65 => "Q65",
+            Kind::Msk144 => "MSK144",
             Kind::Rtty => "RTTY",
             Kind::Psk31 => "PSK31",
             Kind::Navtex => "NAVTEX",
@@ -446,7 +464,9 @@ impl Decode {
         match w {
             Worker::Wsjt(w, mode) => {
                 for slot in w.results().try_iter() {
-                    self.last_slot = Some((slot.slot_utc, slot.decodes.len(), slot.decode_ms));
+                    if !slot.live {
+                        self.last_slot = Some((slot.slot_utc, slot.decodes.len(), slot.decode_ms));
+                    }
                     for d in &slot.decodes {
                         let rf = at.rf_of_audio(d.audio_hz as f64);
                         let row = Row {
@@ -457,6 +477,11 @@ impl Decode {
                             rf_hz: Some(rf),
                             text: d.message.clone(),
                         };
+                        // MSK144 reports a message again when it is heard
+                        // better: that updates its line.
+                        if *mode == WsjtMode::Msk144 && update_row(&mut self.rows, &row) {
+                            continue;
+                        }
                         push_row(&mut self.rows, row);
                         if let Some(u) = wsjtx {
                             send_wsjtx(u, *mode, d, rf);
@@ -556,6 +581,17 @@ fn link_config(mode: LinkMode, rx: &Rx, at: Where) -> LinkConfig {
 fn push_row(rows: &mut VecDeque<Row>, r: Row) {
     rows.push_front(r);
     rows.truncate(ROWS);
+}
+
+/// Replace the line with `r`'s time and text, if there is one.
+fn update_row(rows: &mut VecDeque<Row>, r: &Row) -> bool {
+    match rows.iter_mut().find(|x| x.utc == r.utc && x.text == r.text) {
+        Some(x) => {
+            *x = r.clone();
+            true
+        }
+        None => false,
+    }
 }
 
 fn send_wsjtx(u: &WsjtxUdp, mode: WsjtMode, d: &decoders::WsjtDecode, rf_hz: f64) {
@@ -692,6 +728,13 @@ fn body(
                         if s.snap { ", at its frequency on this band" } else { "" }
                     ),
                     None => format!("{}: no calling frequency, tune to it by hand", k.label()),
+                };
+                let hover = if k == Kind::Msk144 {
+                    hover
+                        + ". Calling is on 50.260 MHz; a CQ with a number asks for answers \
+                           there (CQ 265 …: 50.265 MHz)"
+                } else {
+                    hover
                 };
                 if chrome::chip(ui, s.kind == k, k.label()).on_hover_text(hover).clicked() {
                     s.kind = k;
