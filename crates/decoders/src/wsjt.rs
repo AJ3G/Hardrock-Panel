@@ -1,8 +1,13 @@
 // The calls into mfsk-core follow SDRoxide's crates/sdroxide-digi/src/modem.rs
 // (https://github.com/dividebysandwich/sdroxide), GPL-3.0-or-later.
 
-//! The WSJT modes: FT8, FT4, WSPR, JT65, JT9, FST4 and Q65, decoded by the
-//! `mfsk-core` crate from one whole UTC slot of 12 kHz audio.
+//! The WSJT modes: FT8, FT4, WSPR, JT65, JT9, FST4, Q65 and MSK144, decoded
+//! by the `mfsk-core` crate from one whole UTC slot of 12 kHz audio.
+//!
+//! MSK144 (meteor scatter) is also decoded as the slot runs, by
+//! [`Msk144Live`]: a meteor ping lasts 50 to 200 ms and can come at any time
+//! in the slot, so each ping is shown a second or so after it was heard
+//! rather than at the slot's end.
 //!
 //! [`decode_slot`] is one slot, synchronously; [`WsjtSession`] keeps what a
 //! run of slots learns (the callsigns heard, which resolve the hashed ones in
@@ -13,9 +18,12 @@
 //! reported from where WSJT-X puts it (FT8 0.5 s into the slot, the others
 //! 1 s, FST4-15 and Q65-15/30 0.5 s), so an on-time station reads about 0.
 
+use std::sync::Arc;
+
 use mfsk_core::msg::decode_request::DecodeRequest;
 use mfsk_core::msg::hash_table::CallsignHashTable;
 use mfsk_core::msg::wsjt77;
+use mfsk_core::msk144::decode::Depth;
 
 /// The rate every WSJT mode is decoded at, Hz.
 pub const RATE: f64 = 12_000.0;
@@ -56,13 +64,16 @@ pub enum WsjtMode {
     Jt9,
     Fst4(Fst4Period),
     Q65(Q65Mode),
+    /// Meteor scatter, 15 s T/R. Its "DT" is the time into the slot the ping
+    /// was heard, as WSJT-X shows it.
+    Msk144,
 }
 
 impl WsjtMode {
     /// The slot length in seconds.
     pub fn period_s(self) -> f64 {
         match self {
-            WsjtMode::Ft8 => 15.0,
+            WsjtMode::Ft8 | WsjtMode::Msk144 => 15.0,
             WsjtMode::Ft4 => 7.5,
             WsjtMode::Wspr => 120.0,
             WsjtMode::Jt65 | WsjtMode::Jt9 => 60.0,
@@ -89,6 +100,8 @@ impl WsjtMode {
             WsjtMode::Ft8 | WsjtMode::Ft4 => 0.5,
             WsjtMode::Fst4(Fst4Period::P15) => 0.5,
             WsjtMode::Q65(Q65Mode::A15 | Q65Mode::A30) => 0.5,
+            // Pings come any time: DT is measured from the slot's start.
+            WsjtMode::Msk144 => 0.0,
             _ => 1.0,
         }
     }
@@ -102,6 +115,7 @@ impl WsjtMode {
             WsjtMode::Jt9 => "JT9",
             WsjtMode::Fst4(_) => "FST4",
             WsjtMode::Q65(_) => "Q65",
+            WsjtMode::Msk144 => "MSK144",
         }
     }
 
@@ -115,6 +129,7 @@ impl WsjtMode {
             WsjtMode::Q65(_) => ":",
             WsjtMode::Fst4(_) => "`",
             WsjtMode::Wspr => "WSPR",
+            WsjtMode::Msk144 => "&",
         }
     }
 }
@@ -149,7 +164,8 @@ pub struct WsjtDecode {
 /// later messages use.
 #[derive(Default)]
 pub struct WsjtSession {
-    hashes: CallsignHashTable,
+    /// Shared so MSK144, which takes the table by `Arc`, need not copy it.
+    hashes: Arc<CallsignHashTable>,
     wspr_calls: mfsk_core::wspr::decode::WsprCallsignTable,
 }
 
@@ -162,7 +178,18 @@ impl WsjtSession {
     /// hashed message naming them resolves.
     pub fn seed(&mut self, calls: &[&str]) {
         for c in calls.iter().filter(|c| !c.is_empty()) {
-            self.hashes.insert(c);
+            Arc::make_mut(&mut self.hashes).insert(c);
+        }
+    }
+
+    /// Remember the standard callsigns in `message`, for the hashed forms
+    /// later messages use.
+    fn learn(&mut self, message: &str) {
+        for tok in message.split_whitespace() {
+            let t = tok.trim_matches(|c| c == '<' || c == '>');
+            if wsjt77::is_standard_callsign(t) {
+                Arc::make_mut(&mut self.hashes).insert(t);
+            }
         }
     }
 }
@@ -201,7 +228,7 @@ pub fn decode_slot(
     let mut out: Vec<WsjtDecode> = match mode {
         WsjtMode::Ft8 => {
             let pcm = to_i16(audio);
-            let ht = &session.hashes;
+            let ht = &*session.hashes;
             DecodeRequest::<mfsk_core::Ft8>::new(
                 &pcm,
                 AUDIO_MIN_HZ,
@@ -222,7 +249,7 @@ pub fn decode_slot(
         }
         WsjtMode::Ft4 => {
             let pcm = to_i16(audio);
-            let ht = &session.hashes;
+            let ht = &*session.hashes;
             DecodeRequest::<mfsk_core::Ft4>::new(
                 &pcm,
                 AUDIO_MIN_HZ,
@@ -243,7 +270,7 @@ pub fn decode_slot(
         }
         WsjtMode::Fst4(p) => {
             let pcm = to_i16(audio);
-            let ht = &session.hashes;
+            let ht = &*session.hashes;
             // A deep, sparse mode: a lower sync floor and few candidates.
             macro_rules! run {
                 ($p:ty) => {
@@ -327,6 +354,12 @@ pub fn decode_slot(
             })
             .collect()
         }
+        WsjtMode::Msk144 => {
+            let mut live = Msk144Live::new(slot_utc);
+            live.push(audio);
+            live.finish(session);
+            return live.decodes().to_vec();
+        }
         WsjtMode::Wspr => {
             let params = mfsk_core::wspr::SearchParams::default();
             mfsk_core::wspr::decode::decode_scan_with_table(
@@ -368,14 +401,164 @@ pub fn decode_slot(
     out.dedup_by(|a, b| a.message == b.message && (a.audio_hz - b.audio_hz).abs() < 10.0);
     // Remember who was heard, for hashed callsigns in later slots.
     for d in &out {
-        for tok in d.message.split_whitespace() {
-            let t = tok.trim_matches(|c| c == '<' || c == '>');
-            if wsjt77::is_standard_callsign(t) {
-                session.hashes.insert(t);
-            }
-        }
+        session.learn(&d.message);
     }
     out
+}
+
+// ───────────────────────────── MSK144 ─────────────────────────────
+
+/// mfsk-core's MSK144 analysis block (7168 samples, 0.597 s) and its step
+/// (half a block), samples.
+const MSK_BLOCK: usize = 7168;
+const MSK_STEP: usize = MSK_BLOCK / 2;
+/// How far before the new audio each pass starts, past the block it must
+/// overlap, samples (1 s). The decoder learns the noise floor, which each
+/// ping's SNR is measured against, from the blocks with no ping in them;
+/// this gives it a few before the new audio.
+const MSK_LOOKBACK: usize = 12_000;
+/// Where MSK144 is listened for: WSJT-X's default 1500 Hz, ±100 Hz (its F Tol).
+const MSK_FC_HZ: f32 = 1500.0;
+const MSK_TOL_HZ: f32 = 100.0;
+
+/// MSK144 decoded as its slot runs.
+///
+/// Push the slot's audio as it comes and call [`Msk144Live::pass`] every
+/// second or so: each pass decodes only the audio not yet looked at (with a
+/// block's overlap, so a ping across the join is not missed, and a second
+/// before that for the noise floor), so a pass costs the same at the end of
+/// the slot as at its start. The passes run only mfsk-core's short-ping
+/// decoder, which is what a meteor ping needs and costs about a millisecond
+/// a block. At the slot's end [`Msk144Live::finish`] goes over the whole
+/// slot once more with the frame-averaging search as well (WSJT-X's
+/// "Normal" depth, some 15 ms a block, under a second a slot), for signals
+/// too weak for one frame but lasting several (a long trail, sporadic E).
+///
+/// A message heard more than once in the slot (a station sends the same one
+/// over and over, and a long ping is decoded in several blocks) is kept
+/// once, at its best SNR, with the time and frequency it was heard at then.
+///
+/// From mfsk-core: no Sh (short) messages or MSK40, and no adaptive
+/// equaliser trained on the session's decodes (WSJT-X's "Rx equalization"),
+/// so a station with a lopsided passband decodes a little worse than in
+/// WSJT-X. A ping in the slot's first 0.6 s is measured before any noise
+/// floor is known, and its SNR reads 0.
+pub struct Msk144Live {
+    slot_utc: i64,
+    pcm: Vec<i16>,
+    /// Where the last pass's last block ended, samples.
+    done_to: usize,
+    best: Vec<WsjtDecode>,
+}
+
+impl Msk144Live {
+    /// For the slot starting at `slot_utc` (Unix seconds).
+    pub fn new(slot_utc: i64) -> Self {
+        Msk144Live { slot_utc, pcm: Vec::new(), done_to: 0, best: Vec::new() }
+    }
+
+    pub fn slot_utc(&self) -> i64 {
+        self.slot_utc
+    }
+
+    /// How much of the slot's audio has been pushed, samples at 12 kHz.
+    pub fn heard(&self) -> usize {
+        self.pcm.len()
+    }
+
+    /// Add the next 12 kHz audio of the slot.
+    pub fn push(&mut self, audio: &[f32]) {
+        self.pcm.extend(to_i16(audio));
+    }
+
+    /// Decode the audio no pass has looked at yet, if there is a block's step
+    /// of it. Returns the messages new to the slot, and those heard again at
+    /// a better SNR (with their new SNR, time and frequency).
+    pub fn pass(&mut self, session: &mut WsjtSession) -> Vec<WsjtDecode> {
+        let len = self.pcm.len();
+        let fresh = if self.done_to == 0 { MSK_BLOCK } else { self.done_to + MSK_STEP };
+        if len < fresh {
+            return Vec::new();
+        }
+        let start = if self.done_to == 0 {
+            0
+        } else {
+            self.done_to.saturating_sub(MSK_BLOCK + MSK_LOOKBACK)
+        };
+        let blocks = (len - start - MSK_BLOCK) / MSK_STEP + 1;
+        let end = start + (blocks - 1) * MSK_STEP + MSK_BLOCK;
+        self.done_to = end;
+        // The window's first blocks were in the last pass too, which knew
+        // the noise floor there; this pass did not, so their SNR is wrong.
+        let skip_s = if start > 0 { MSK_BLOCK as f32 / RATE as f32 } else { 0.0 };
+        self.decode(start, end, Depth::Fast, skip_s, session)
+    }
+
+    /// At the slot's end: decode it all again, more deeply (see the type's
+    /// doc). Returns what [`Msk144Live::pass`] does.
+    pub fn finish(&mut self, session: &mut WsjtSession) -> Vec<WsjtDecode> {
+        self.done_to = self.pcm.len();
+        self.decode(0, self.pcm.len(), Depth::Normal, 0.0, session)
+    }
+
+    /// Decode samples `start..end`, ignoring what was heard in the first
+    /// `skip_s` seconds of them, and keep each message's best.
+    fn decode(
+        &mut self,
+        start: usize,
+        end: usize,
+        depth: Depth,
+        skip_s: f32,
+        session: &mut WsjtSession,
+    ) -> Vec<WsjtDecode> {
+        let found = mfsk_core::msk144::decode::decode_slot_with_hash_table(
+            &self.pcm[start..end],
+            MSK_FC_HZ,
+            MSK_TOL_HZ,
+            depth,
+            Some(session.hashes.clone()),
+        );
+        let start_s = start as f32 / RATE as f32;
+        let mut out = Vec::new();
+        for r in found.into_iter().filter(|r| r.tsec >= skip_s) {
+            let d = WsjtDecode {
+                mode: WsjtMode::Msk144,
+                slot_utc: self.slot_utc,
+                snr_db: r.snr_db as f32,
+                dt_s: start_s + r.tsec,
+                audio_hz: r.freq_hz,
+                message: r.message,
+                wspr: None,
+            };
+            if keep_best(&mut self.best, &d) {
+                session.learn(&d.message);
+                out.push(d);
+            }
+        }
+        out
+    }
+
+    /// Every message of the slot so far, each at its best SNR, in the order
+    /// first heard.
+    pub fn decodes(&self) -> &[WsjtDecode] {
+        &self.best
+    }
+}
+
+/// Keep `d` in `best` if its message is new there or it was heard better
+/// (a higher SNR) this time. Returns whether it was kept.
+fn keep_best(best: &mut Vec<WsjtDecode>, d: &WsjtDecode) -> bool {
+    match best.iter_mut().find(|b| b.message == d.message) {
+        None => {
+            best.push(d.clone());
+            true
+        }
+        Some(b) if d.snr_db > b.snr_db => {
+            *b = d.clone();
+            true
+        }
+        Some(_) => false,
+    }
 }
 
 /// A JT 72-bit message as text; the layouts this build does not unpack
@@ -390,7 +573,7 @@ fn jt72_text(m: mfsk_core::msg::Jt72Message) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A slot of low-level noise with `signal` added at `at_s` seconds.
@@ -493,8 +676,180 @@ mod tests {
         assert!(a.dt_s.abs() < 0.3, "{a:?}");
     }
 
+    /// Gaussian noise of RMS `rms`, deterministic (xorshift and Box-Muller).
+    fn gauss(n: usize, rms: f32, seed: u32) -> Vec<f32> {
+        let mut x = seed | 1;
+        let mut u = move || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x as f32 + 1.0) / (u32::MAX as f32 + 2.0)
+        };
+        (0..n)
+            .map(|_| {
+                let (a, b) = (u(), u());
+                rms * (-2.0 * a.ln()).sqrt() * (std::f32::consts::TAU * b).cos()
+            })
+            .collect()
+    }
+
+    /// An MSK144 transmission of `msg` at `hz`, `frames` frames long (72 ms
+    /// each), peak amplitude `amp`: packed, given its CRC-13, LDPC-encoded and
+    /// framed by mfsk-core, then carried up from baseband to audio.
+    pub(crate) fn msk144_burst(msg: &str, hz: f32, frames: usize, amp: f32) -> Vec<f32> {
+        use mfsk_core::fec::FecCodec;
+        let mut parts = msg.split_whitespace();
+        let (a, b, c) = (parts.next().unwrap(), parts.next().unwrap(), parts.next().unwrap());
+        let bits = wsjt77::pack77(a, b, c).expect("pack");
+        let mut info = [0u8; 90];
+        info[..77].copy_from_slice(&bits);
+        let mut bytes = [0u8; 12];
+        for (i, &b) in bits.iter().enumerate() {
+            bytes[i / 8] |= (b & 1) << (7 - i % 8);
+        }
+        let crc = mfsk_core::fec::ldpc_128_90::crc13(&bytes);
+        for i in 0..13 {
+            info[77 + i] = ((crc >> (12 - i)) & 1) as u8;
+        }
+        let mut cw = [0u8; 128];
+        mfsk_core::fec::Ldpc128_90.encode(&info, &mut cw);
+        let frame = mfsk_core::msk144::tx::synth_codeword_frame(&cw);
+        let w = std::f32::consts::TAU * hz / RATE as f32;
+        (0..frames * frame.len())
+            .map(|k| {
+                let c = frame[k % frame.len()];
+                let ph = w * k as f32;
+                amp * (c.re * ph.cos() - c.im * ph.sin())
+            })
+            .collect()
+    }
+
+    /// A 15 s slot of noise (0.03 RMS, about the panel's level) with a ping
+    /// of `msg` added at `at_s`.
+    fn msk144_slot(msg: &str, at_s: f64, hz: f32, frames: usize, amp: f32) -> Vec<f32> {
+        let mut audio = gauss(15 * RATE_U32 as usize, 0.03, 99);
+        let at = (at_s * RATE) as usize;
+        for (o, s) in audio[at..].iter_mut().zip(msk144_burst(msg, hz, frames, amp)) {
+            *o += s;
+        }
+        audio
+    }
+
+    #[test]
+    fn an_msk144_ping_is_reported_live_with_its_time_snr_and_df() {
+        // A 144 ms ping (two frames) at a time the decoder can't know,
+        // 30 Hz off the centre, at a modest SNR.
+        let at_s = 7.37;
+        let audio = msk144_slot("CQ AJ3G FN20", at_s, 1530.0, 2, 0.05);
+        let mut s = WsjtSession::new();
+        let mut live = Msk144Live::new(1_700_000_010);
+        let mut first = None;
+        let mut worst_ms = 0.0f64;
+        let mut total_ms = 0.0f64;
+        let mut passes = 0;
+        for chunk in audio.chunks(RATE_U32 as usize) {
+            live.push(chunk);
+            let t = std::time::Instant::now();
+            let new = live.pass(&mut s);
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            worst_ms = worst_ms.max(ms);
+            total_ms += ms;
+            passes += 1;
+            if first.is_none() && new.iter().any(|d| d.message == "CQ AJ3G FN20") {
+                first = Some(live.heard() as f64 / RATE);
+            }
+        }
+        let t = std::time::Instant::now();
+        live.finish(&mut s);
+        let end_ms = t.elapsed().as_secs_f64() * 1e3;
+        eprintln!(
+            "MSK144 live: {passes} passes, {total_ms:.0} ms in all, worst {worst_ms:.0} ms; \
+             slot end {end_ms:.0} ms"
+        );
+        let heard_at = first.expect("decoded");
+        // Reported a second or two after the ping, well before the slot ends.
+        assert!(heard_at < at_s + 2.5 && heard_at < 15.0, "{heard_at}");
+        let d = live.decodes();
+        assert_eq!(d.len(), 1, "{d:?}");
+        let d = &d[0];
+        assert_eq!(d.mode, WsjtMode::Msk144);
+        assert_eq!(d.slot_utc, 1_700_000_010);
+        assert!((d.dt_s - at_s as f32).abs() < 0.3, "{d:?}");
+        assert!((d.audio_hz - 1530.0).abs() < 10.0, "{d:?}");
+        assert!((-8.0..=24.0).contains(&d.snr_db), "{d:?}");
+        assert!(d.snr_db > 0.0, "{d:?}");
+    }
+
+    #[test]
+    fn msk144_whole_slot_keeps_each_message_once_at_its_best() {
+        // The same message in a weak ping and later a strong one, and another
+        // station's message.
+        let mut audio = msk144_slot("K1ABC AJ3G -03", 2.2, 1500.0, 3, 0.03);
+        for (o, s) in audio[(9.1 * RATE) as usize..].iter_mut().zip(msk144_burst(
+            "K1ABC AJ3G -03",
+            1490.0,
+            2,
+            0.2,
+        )) {
+            *o += s;
+        }
+        for (o, s) in audio[(12.0 * RATE) as usize..].iter_mut().zip(msk144_burst(
+            "CQ W9XYZ EN37",
+            1560.0,
+            2,
+            0.1,
+        )) {
+            *o += s;
+        }
+        let d = decode_slot(WsjtMode::Msk144, &audio, 0, &mut WsjtSession::new());
+        let a: Vec<_> = d.iter().filter(|d| d.message == "K1ABC AJ3G -03").collect();
+        assert_eq!(a.len(), 1, "{d:?}");
+        // The strong ping's SNR, time and frequency.
+        assert!((a[0].dt_s - 9.1).abs() < 0.3, "{d:?}");
+        assert!((a[0].audio_hz - 1490.0).abs() < 10.0, "{d:?}");
+        assert!(d.iter().any(|d| d.message == "CQ W9XYZ EN37"), "{d:?}");
+    }
+
+    #[test]
+    fn a_long_weak_msk144_signal_is_found_at_the_slot_end() {
+        // 2.9 s of a signal too weak for any one frame: the live passes miss
+        // it, the slot end's frame averaging finds it.
+        let audio = msk144_slot("CQ AJ3G FN20", 4.0, 1500.0, 40, 0.012);
+        let mut s = WsjtSession::new();
+        let mut live = Msk144Live::new(0);
+        for c in audio.chunks(RATE_U32 as usize) {
+            live.push(c);
+            assert!(live.pass(&mut s).is_empty());
+        }
+        let d = live.finish(&mut s);
+        assert!(d.iter().any(|d| d.message == "CQ AJ3G FN20"), "{d:?}");
+    }
+
+    #[test]
+    fn keep_best_keeps_the_higher_snr() {
+        let mk = |snr_db: f32, dt_s: f32, m: &str| WsjtDecode {
+            mode: WsjtMode::Msk144,
+            slot_utc: 0,
+            snr_db,
+            dt_s,
+            audio_hz: 1500.0,
+            message: m.into(),
+            wspr: None,
+        };
+        let mut best = Vec::new();
+        assert!(keep_best(&mut best, &mk(3.0, 1.0, "A B C")));
+        assert!(!keep_best(&mut best, &mk(2.0, 4.0, "A B C")));
+        assert!(!keep_best(&mut best, &mk(3.0, 5.0, "A B C")));
+        assert!(keep_best(&mut best, &mk(0.0, 6.0, "D E F")));
+        assert!(keep_best(&mut best, &mk(9.0, 7.0, "A B C")));
+        assert_eq!(best.len(), 2);
+        assert_eq!((best[0].snr_db, best[0].dt_s), (9.0, 7.0));
+    }
+
     #[test]
     fn noise_alone_decodes_nothing() {
+        let audio = gauss(15 * RATE_U32 as usize, 0.03, 5);
+        assert!(decode_slot(WsjtMode::Msk144, &audio, 0, &mut WsjtSession::new()).is_empty());
         for mode in [WsjtMode::Ft8, WsjtMode::Ft4] {
             let audio = slot(mode, &[], 0.0);
             assert!(decode_slot(mode, &audio, 0, &mut WsjtSession::new()).is_empty());
