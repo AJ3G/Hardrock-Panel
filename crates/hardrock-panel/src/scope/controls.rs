@@ -279,8 +279,9 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
         );
         chrome::checkbox(ui, &mut sc.settings.wf_time, "UTC ticks");
         chrome::checkbox(ui, &mut sc.settings.slot_lines, "Slot lines").on_hover_text(
-            "While DECODE runs a slotted mode (FT8, FT4, WSPR…): a green line where each \
-             slot's capture starts and a red one where it ends and the decoder takes it",
+            "While DECODE runs a slotted mode (FT8, FT4, WSPR…): a green line at each \
+             slot's start, a red one where its transmissions end, and a faint yellow \
+             over the dead time until the next slot",
         );
         ui.add(
             egui::Slider::new(&mut sc.settings.wf_contrast, 0.25..=4.0)

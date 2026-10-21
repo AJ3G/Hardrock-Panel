@@ -647,6 +647,26 @@ mod tests {
     }
 
     #[test]
+    fn each_modes_signal_ends_where_its_symbols_run_out() {
+        use crate::wsjt::{Fst4Period, Q65Mode};
+        let r = |x: Option<f64>| x.map(|v| (v * 1000.0).round() / 1000.0);
+        for (mode, len, end) in [
+            (WsjtMode::Ft8, 12.64, 13.14),
+            (WsjtMode::Ft4, 5.04, 5.54),
+            (WsjtMode::Wspr, 110.592, 111.592),
+            (WsjtMode::Jt65, 46.83, 47.83),
+            (WsjtMode::Jt9, 48.96, 49.96),
+            (WsjtMode::Fst4(Fst4Period::P60), 51.84, 52.84),
+            (WsjtMode::Q65(Q65Mode::A30), 25.5, 26.0),
+        ] {
+            assert_eq!(r(mode.signal_s()), Some(len), "{}", mode.label());
+            assert_eq!(r(mode.signal_end_s()), Some(end), "{}", mode.label());
+            assert!(end < mode.period_s(), "{}", mode.label());
+        }
+        assert_eq!(WsjtMode::Msk144.signal_end_s(), None);
+    }
+
+    #[test]
     fn the_first_slot_taken_is_the_one_joined_on_time() {
         let ft8 = WsjtConfig::new(WsjtMode::Ft8);
         let b = 1_700_000_010.0; // A 15 s boundary.

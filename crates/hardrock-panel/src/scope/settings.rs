@@ -264,8 +264,9 @@ pub struct ScopeSettings {
     pub wf_brightness: f32,
     /// UTC time ticks down the waterfall's edge.
     pub wf_time: bool,
-    /// DECODE's slot lines across the waterfall: green where a slot's
-    /// capture starts, red where it ends (decision 51).
+    /// DECODE's slot lines across the waterfall: green at each slot's
+    /// start, red where its transmissions end, a faint yellow over the dead
+    /// time after (decision 51).
     pub slot_lines: bool,
     /// The band plan strip under the spectrum.
     pub band_plan: bool,

@@ -766,13 +766,15 @@ fn send_wsjtx(u: &WsjtxUdp, mode: WsjtMode, d: &decoders::WsjtDecode, rf_hz: f64
 
 /// `hh:mm:ss` UTC.
 /// A mode's slots, its decoder having started hearing at `started_utc`: the
-/// period, and the first slot the decoder takes whole, from the decoder's
-/// own timing ([`WsjtConfig::first_slot`]). `None` for a mode without slots.
+/// period, the first slot the decoder takes whole ([`WsjtConfig::first_slot`])
+/// and where an on-time transmission ends in each
+/// ([`WsjtMode::signal_end_s`]). `None` for a mode without slots.
 fn slots_of(kind: Kind, started_utc: f64) -> Option<crate::scope::DecodeSlots> {
     let cfg = WsjtConfig::new(kind.wsjt()?);
     Some(crate::scope::DecodeSlots {
         period_s: cfg.mode.period_s(),
         first_utc: cfg.first_slot(started_utc),
+        end_s: cfg.mode.signal_end_s(),
     })
 }
 
@@ -1278,18 +1280,25 @@ mod tests {
         // Started 0.4 s into the slot at 22:34:00 (an even minute) + 90 s.
         let b = 1_700_000_040.0 + 90.0;
         let t = b + 0.4;
-        let at = |k| slots_of(k, t).map(|s| (s.period_s, s.first_utc - b));
-        assert_eq!(at(Kind::Ft8), Some((15.0, 0.0)));
-        assert_eq!(at(Kind::Ft4), Some((7.5, 0.0)));
-        assert_eq!(at(Kind::Msk144), Some((15.0, 0.0)));
+        let at = |k| {
+            slots_of(k, t).map(|s| {
+                let end = s.end_s.map(|e| (e * 1000.0).round() / 1000.0);
+                (s.period_s, s.first_utc - b, end)
+            })
+        };
+        // Each transmission's end: its start (DT 0) plus its symbols.
+        assert_eq!(at(Kind::Ft8), Some((15.0, 0.0, Some(13.14))));
+        assert_eq!(at(Kind::Ft4), Some((7.5, 0.0, Some(5.54))));
+        // MSK144's pings come any time: no end.
+        assert_eq!(at(Kind::Msk144), Some((15.0, 0.0, None)));
         // Q65-30A joined 0.4 s in; JT65, JT9 and FST4-60 joined 30.4 s in, too
         // late: their next minute.
-        assert_eq!(at(Kind::Q65), Some((30.0, 0.0)));
-        assert_eq!(at(Kind::Jt65), Some((60.0, 30.0)));
-        assert_eq!(at(Kind::Jt9), Some((60.0, 30.0)));
-        assert_eq!(at(Kind::Fst4), Some((60.0, 30.0)));
+        assert_eq!(at(Kind::Q65), Some((30.0, 0.0, Some(26.0))));
+        assert_eq!(at(Kind::Jt65), Some((60.0, 30.0, Some(47.83))));
+        assert_eq!(at(Kind::Jt9), Some((60.0, 30.0, Some(49.96))));
+        assert_eq!(at(Kind::Fst4), Some((60.0, 30.0, Some(52.84))));
         // WSPR: 90.4 s into its two minutes, so the next even minute.
-        assert_eq!(at(Kind::Wspr), Some((120.0, 30.0)));
+        assert_eq!(at(Kind::Wspr), Some((120.0, 30.0, Some(111.592))));
         // No slots, no lines.
         for k in [Kind::Psk31, Kind::Rtty, Kind::Navtex, Kind::Olivia, Kind::Thor, Kind::Sstv] {
             assert_eq!(slots_of(k, t), None, "{k:?}");

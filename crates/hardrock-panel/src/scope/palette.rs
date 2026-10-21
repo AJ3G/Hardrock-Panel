@@ -8,8 +8,8 @@
 //! ELAD, the default, stays in blues like the rest of the panel. Icom and
 //! Classic run up to yellow and red, the agreed exception to "yellow and red
 //! for warnings only" (AJ3G): a waterfall's ramp is a level, not a warning.
-//! The slot lines' green and red over the waterfall are the other named
-//! exception ([`super::slotlines`], decision 51).
+//! The slot lines' green, red and yellow over the waterfall are the other
+//! named exception, by AJ3G's request ([`super::slotlines`], decision 51).
 
 use serde::{Deserialize, Serialize};
 
