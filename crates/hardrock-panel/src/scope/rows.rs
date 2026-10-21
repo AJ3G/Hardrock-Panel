@@ -18,7 +18,7 @@
 //! the slots and bands (`push_*_gpu`), the rows go out with no bins, and the
 //! GPU pools its own spectrum into those slots.
 
-use super::view::{Span, View, coverage};
+use super::view::{Span, View, held_coverage};
 
 /// Rows of waterfall history: about 34 s at 60 frames a second.
 pub const WF_ROWS: u32 = 2048;
@@ -126,6 +126,10 @@ pub struct Rows {
     last_time: Option<f64>,
     /// A slow waterfall row the GPU is gathering: its band and frames.
     gpu_pending: Option<(View, u32)>,
+    /// The band the last waterfall row and the last surface row were laid
+    /// down over, held while the view stays inside it ([`held_coverage`]).
+    wf_cov: Option<View>,
+    s3_cov: Option<View>,
     /// The live surface row's band, the one before it, when the live row
     /// last changed and how often it does.
     live_band: Option<(f32, f32)>,
@@ -151,6 +155,8 @@ impl Rows {
             s3_accum: 0.0,
             last_time: None,
             gpu_pending: None,
+            wf_cov: None,
+            s3_cov: None,
             live_band: None,
             prev_band: None,
             live_at: f64::NAN,
@@ -228,6 +234,8 @@ impl Rows {
             self.s3_count = 0;
             self.pending = None;
             self.gpu_pending = None;
+            self.wf_cov = None;
+            self.s3_cov = None;
             self.live_band = None;
             self.prev_band = None;
         }
@@ -266,7 +274,8 @@ impl Rows {
             return;
         }
         self.use_center(frame.center);
-        let cov = coverage(frame, view);
+        let cov = held_coverage(frame, view, self.wf_cov);
+        self.wf_cov = Some(cov);
         // A slow row gathers over one band; if the band moves, start again.
         let restart = self.pending.as_ref().is_none_or(|p| p.cov != cov);
         self.pool(db, frame, cov);
@@ -301,7 +310,8 @@ impl Rows {
             return None;
         }
         self.use_center(frame.center);
-        let cov = coverage(frame, view);
+        let cov = held_coverage(frame, view, self.wf_cov);
+        self.wf_cov = Some(cov);
         let frames = match self.gpu_pending {
             Some((c, n)) if c == cov => n + 1,
             _ => 1,
@@ -382,7 +392,8 @@ impl Rows {
             return None;
         };
         self.use_center(frame.center);
-        let cov = coverage(frame, view);
+        let cov = held_coverage(frame, view, self.s3_cov);
+        self.s3_cov = Some(cov);
         self.s3_accum += dt as f32 * rows_per_sec;
         let due = (self.s3_accum.floor() as u32).min(MAX_STEP);
         self.s3_accum -= self.s3_accum.floor();
@@ -418,6 +429,7 @@ impl Rows {
     /// should not show minutes-old rows as the last few seconds.
     pub fn clear_surface(&mut self) {
         self.s3_count = 0;
+        self.s3_cov = None;
         self.live_band = None;
         self.prev_band = None;
         self.s3_accum = 0.0;
@@ -516,7 +528,7 @@ mod tests {
         let mut up = Upload::default();
         let v = View { lo: 14_070_000.0, hi: 14_078_000.0 };
         r.push_waterfall(&frame(4096, 10), SPAN, v, 1, 0.0, &mut up);
-        assert_eq!((up.wf[0].lo, up.wf[0].hi), (-6000.0, 6000.0));
+        assert_eq!((up.wf[0].lo, up.wf[0].hi), (-8000.0, 8000.0));
         // The centre follows the receiver 100 kHz up: same reference, so no
         // history is lost and the new row is stored against the old reference.
         let moved = Span { center: SPAN.center + 100_000.0, ..SPAN };
@@ -530,6 +542,34 @@ mod tests {
         assert_eq!(r.ref_hz(), 7_074_000.0);
         assert_eq!(r.wf_count(), 1);
         assert!(r.seal(up).clear);
+    }
+
+    #[test]
+    fn rows_hold_their_band_through_a_pan_inside_it() {
+        let mut r = Rows::new(128);
+        let mut up = Upload::default();
+        let v = View { lo: 14_070_000.0, hi: 14_078_000.0 };
+        // A slow row of three frames, panned 1 kHz then 3 kHz meanwhile: the
+        // band does not move, so the row keeps gathering rather than
+        // restarting, and is laid down over the first band.
+        for d in [0.0, 1000.0, 3000.0] {
+            let p = View { lo: v.lo + d, hi: v.hi + d };
+            r.push_waterfall(&frame(4096, 10), SPAN, p, 3, 0.0, &mut up);
+        }
+        assert_eq!(up.wf.len(), 1);
+        assert_eq!((up.wf[0].lo, up.wf[0].hi), (-8000.0, 8000.0));
+        // The GPU side and the surface hold it the same way.
+        for d in [0.0, 2500.0, -3000.0] {
+            let p = View { lo: v.lo + d, hi: v.hi + d };
+            let step = r.push_waterfall_gpu(SPAN, p, 1, 0.0, &mut up).unwrap();
+            assert_eq!((step.cov.lo, step.cov.hi), (14_066_000.0, 14_082_000.0));
+            let (cov, _) = r.push_surface_gpu(Some(SPAN), p, d, 16.0, &mut up).unwrap();
+            assert_eq!((cov.lo, cov.hi), (14_066_000.0, 14_082_000.0));
+        }
+        // Past it, the band moves on to centre on the new view.
+        let p = View { lo: v.lo + 5000.0, hi: v.hi + 5000.0 };
+        let step = r.push_waterfall_gpu(SPAN, p, 1, 0.0, &mut up).unwrap();
+        assert_eq!((step.cov.lo, step.cov.hi), (14_071_000.0, 14_087_000.0));
     }
 
     fn whole_of(s: Span) -> View {

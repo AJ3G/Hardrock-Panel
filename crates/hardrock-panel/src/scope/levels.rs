@@ -139,9 +139,80 @@ pub fn wf_auto_levels(noise_dbm: f32, strongest_dbm: f32) -> (f32, f32) {
     (floor, floor + range)
 }
 
+/// How bright, against the noise floor's own colour, the waterfall paints
+/// a pixel it has no history for: a shade dimmer, so an area never measured
+/// (the strip a recentre uncovers, the rows not filled yet) still reads as
+/// "nothing here" up close but not as a black block beside a quiet band.
+pub const NO_DATA_SHADE: f32 = 0.8;
+
+/// The quiet band's level as the scope draws it: the median of the trace's
+/// columns, which carriers (a minority of the columns) do not move. Each
+/// column is the strongest bin under it, so this sits a few dB over the
+/// averaged noise per bin, where a quiet band's waterfall pixels (also the
+/// strongest of several bins) sit too. `None` with no columns.
+pub fn quiet_dbm(cols: &[f32]) -> Option<f32> {
+    let mut v: Vec<f32> = cols.iter().copied().filter(|c| c.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    let mid = v.len() / 2;
+    let (_, m, _) = v.select_nth_unstable_by(mid, f32::total_cmp);
+    Some(*m)
+}
+
+/// Where on the palette, 0 to 1, the waterfall paints a pixel it has no
+/// history for: the noise floor's level ([`quiet_dbm`]), through the same levels, contrast
+/// and brightness as a measured pixel (see waterfall.wgsl), so it follows
+/// them. The bottom of the palette when there is no noise floor yet.
+pub fn no_data_t(
+    noise_dbm: Option<f32>,
+    floor: f32,
+    ceil: f32,
+    contrast: f32,
+    brightness: f32,
+) -> f32 {
+    let Some(n) = noise_dbm.filter(|n| n.is_finite()) else { return 0.0 };
+    let t = (n - floor) / (ceil - floor).max(1.0);
+    ((t - 0.5) * contrast + 0.5 + brightness).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_quiet_level_is_the_median_column() {
+        let mut cols = vec![-100.0f32; 99];
+        for (i, c) in cols.iter_mut().enumerate() {
+            *c += (i % 7) as f32 * 0.5; // -100 to -97
+        }
+        // Carriers in a tenth of the columns do not move it.
+        for c in cols.iter_mut().step_by(10) {
+            *c = -40.0;
+        }
+        let q = quiet_dbm(&cols).unwrap();
+        assert!((-100.0..=-97.0).contains(&q), "{q}");
+        assert_eq!(quiet_dbm(&[f32::NAN, -90.0]), Some(-90.0));
+        assert_eq!(quiet_dbm(&[]), None);
+    }
+
+    #[test]
+    fn no_data_is_drawn_at_the_noise_floor() {
+        // The auto levels put the floor 4 dB under the noise, over 45 dB.
+        let (floor, ceil) = wf_auto_levels(-120.0, -100.0);
+        let t = no_data_t(Some(-120.0), floor, ceil, 1.0, 0.0);
+        assert!((t - 4.0 / 45.0).abs() < 1e-6, "{t}");
+        // It follows the contrast and brightness as a measured pixel does.
+        let c = no_data_t(Some(-120.0), floor, ceil, 1.5, 0.2);
+        assert!((c - ((4.0 / 45.0 - 0.5) * 1.5 + 0.7)).abs() < 1e-6, "{c}");
+        // Kept on the palette, and its bottom with no noise floor known.
+        assert_eq!(no_data_t(Some(-200.0), floor, ceil, 1.0, 0.0), 0.0);
+        assert_eq!(no_data_t(Some(0.0), floor, ceil, 1.0, 0.0), 1.0);
+        assert_eq!(no_data_t(None, floor, ceil, 1.0, 0.0), 0.0);
+        assert_eq!(no_data_t(Some(f32::NAN), floor, ceil, 1.0, 0.0), 0.0);
+        // A shade, not black and not the floor itself.
+        const { assert!(NO_DATA_SHADE > 0.5 && NO_DATA_SHADE < 1.0) };
+    }
 
     #[test]
     fn s_units_follow_the_hf_convention() {

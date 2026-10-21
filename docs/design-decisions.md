@@ -577,3 +577,19 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 
 **REF.** No CAT command and no documented USB field reports the reference input. SETTINGS has a "10 MHz reference connected" tick that lights REF 10M. The dial read-back's undocumented last byte read 0x30 on AJ3G's radio with a reference and 0x10 in earlier notes without; every change of it (but the dial-turning bit) now goes in the ELAD log, so a bench test with the reference pulled can show whether bit 0x20 is the reference. If it is, it replaces the tick.
 
+
+## 49. No black blocks in the waterfall: unmeasured pixels at the noise floor, and a wider held band (21 Oct 2026)
+
+**Why.** AJ3G, on the DUO at 192 kHz: "black blocks in my display when moving around in the FFT". Each waterfall row covers only the band it was taken over, and wherever an old row did not cover the frequency under a pixel (the strip a recentre uncovers, a pan past a zoomed row's margin, a zoom out) the shader painted the bottom of the palette, which is black or nearly, well under the quiet band (the floor sits 4 dB under the noise).
+
+**What the panel does.**
+- **No history is drawn as a quiet band, a shade dimmer.** A pixel with no row covering it, and the rows not filled yet, are painted in the colour of the quiet band's level (the median of the trace's columns, else the noise floor) through the same levels, contrast and brightness as a measured pixel, at 80 % of that colour (`levels::quiet_dbm`, `no_data_t`, `NO_DATA_SHADE`; the waterfall's `empty_t` and `empty_shade` uniforms). Up close it still reads as "nothing here"; it no longer reads as a fault. The palettes are unchanged. There is no CPU waterfall (without the GPU renderer the panel says it needs it), so there is nothing to match there.
+- **Rows keep twice the view, held.** Zoomed, a row keeps half the view's width either side (was a quarter), slid inside the span at its edges rather than cut off there. The band is held while the view stays inside it with 5 % to spare (or the band is against the span's edge there) and is 1.15 to 3.5 views wide, as SDRoxide's `cfg_still_good`; otherwise it is laid out afresh around the view (`view::held_coverage`, held separately for the waterfall and the 3D surface in `Rows`). Pans inside it never meet an edge, and a slow row is not restarted by them. Not zoomed, rows cover the whole span as before.
+
+**Cost.** No GPU memory: the rows are as wide (`tex_w`, up to 16 384 columns) and as many (2048) as before; the uniform block grows by 16 bytes. The price is resolution: the same columns cover 2 views rather than 1.5, so a zoomed row has three quarters of the columns per hertz it had. At 16 384 columns that is still several columns a pixel; on an adapter limited to 2048-texel textures a wide zoomed waterfall can drop just under one column a pixel. A median of the trace's columns each repaint (about a thousand floats).
+
+**Not done.** The analysis's first fix, a second, whole-span history ring for pans and zoom-outs to fall back on (64 MB more at the widest), and its smaller recentre steps. A recentre still uncovers a strip; it is now drawn as a dim quiet band rather than black.
+
+**Screens.** `screens/wf-fill-before.png` and `screens/wf-fill-after.png`: two seconds after a recentre back from the top edge of the span, demo source.
+
+**Where.** `scope/view.rs` (`coverage`, `held_coverage`), `scope/rows.rs`, `scope/levels.rs`, `scope/paint.rs`, `scope/gpu.rs` (`WfParams`), `scope/shaders/waterfall.wgsl`, `scope/shaders/common.wgsl` (`palette_raw`).

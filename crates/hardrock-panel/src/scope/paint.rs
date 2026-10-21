@@ -807,6 +807,14 @@ fn paint_waterfall(
                 scroll_frac,
                 contrast: sc.settings.wf_contrast,
                 brightness: sc.settings.wf_brightness,
+                empty_t: levels::no_data_t(
+                    levels::quiet_dbm(&sc.cols).or(sc.shown().map(|f| f.noise_dbm)),
+                    floor,
+                    ceil,
+                    sc.settings.wf_contrast,
+                    sc.settings.wf_brightness,
+                ),
+                empty_shade: levels::NO_DATA_SHADE,
             };
             let cb = gpu::WaterfallPaint {
                 id: sc.id,
