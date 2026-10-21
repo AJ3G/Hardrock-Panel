@@ -463,3 +463,25 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 
 **Where.** `scope/mod.rs` (`TxHold`, `hold_over_tx`, `span`), `scope/gpu_run.rs` (`resync`, `stalled`, a held epoch), `scope/shaders/spectrum.wgsl` (`finite`), `scope/paint.rs` (the top bar and status line), `rx.rs` (`watch_stream`, `DIAL_SETTLE`), `sdr/src/pipeline.rs` (`sanitise`, `ResetSpectrum`), `sdr/src/spectrum.rs`, `sdr/src/source.rs` (`TxSim`, `plausible_dial`), `examples/scope_demo.rs` (`--tx`), `tools/fake_duo.py` (`--key-at`, `--unkey-at`).
 
+## 42. The AMP buttons go out ahead of the next read, and show as asked until read back
+
+**Decided:** AJ3G, 21 Oct 2026, from "AMP buttons respond slowly, slower than the SDRoxide panel" (NEXT-BUILD #5). The shape by the integrator.
+
+**What the link does.**
+- **One read at a time.** The link's loop makes one query (`Read`) and looks at the panel's channel before every one, so a click waits behind at most one read: up to the 400 ms reply timeout when the amplifier skips an answer, tens of milliseconds when it doesn't. Before, the channel was looked at once a round, and a round was the status, the temperature and four tuner reads, each up to 400 ms.
+- **Spread.** The status frame stays every 250 ms; the temperature and the tuner's three queries (`HRTT`, `HRTB`, `HRTMP`, and `HRTR` after a tune) are separate reads fitted between status frames. Straight after a status frame one other due read goes first (`next_read`), so a run of unanswered status reads can't shut the others out.
+- **After a click** the status is read next, to confirm it, and the tuner again after its relays settle (300 ms).
+- **Interlocks #1 and #4** keep their status read just before a relay or OFF-to-PTT command, except that a frame the amplifier answered within 100 ms and showing it clear stands in for it (`FRESH`, docs/safety-interlocks.md). The band-follow read of #3 is always its own.
+
+**What the panel shows.** A click on PTT/OFF, ANT, DN/UP or ON/BYP shows at once as asked, in the neutral blue (`AmpStatus::pending`, set by `AmpLink::action` on the panel's own thread): the PTT key reads PTT in blue until the amplifier reads PTT (then green), ANT the antenna asked for, the band the one stepped to. The first read that shows it confirms it. A refused click goes back at once; one still read in its old state after a second (`PENDING_HOLD`) goes back to what the amplifier reads. The interlocks go by the readings, never by what is pending. TUNE and the C/F tile show only what is read back.
+
+**Measured** (`a_click_goes_out_without_waiting_for_a_round_of_reads`, a simulated HR500 answering after 25 ms, 400 ms reply timeout, 16 clicks of each at scattered moments):
+
+| amplifier | before: mean / worst | after: mean / worst |
+|---|---|---|
+| answers everything, PTT/OFF | 16 / 48 ms | 6 / 25 ms |
+| answers everything, ANT | 29 / 74 ms | 14 / 26 ms |
+| skips `HRTP` and the tuner reads, PTT/OFF | 1191 / 1552 ms | 228 / 385 ms |
+| skips `HRTP` and the tuner reads, ANT | 1184 / 1551 ms | 250 / 419 ms |
+
+**Where.** `crates/hardrock/src/link.rs` (`run`, `Read`, `next_read`, `act`, `Clear`, `queue`), `crates/hardrock/src/types.rs` (`AmpStatus::pending`, `AmpAction::control`), `panel.rs` (`keys`, `Shown::band`), `panel/tft.rs`.

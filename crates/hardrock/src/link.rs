@@ -211,9 +211,11 @@ impl AmpLink {
         self.status.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Carry out a button. The control shows as asked at once (see
+    /// [`AmpStatus::pending`]); the command goes out ahead of the next read.
     pub fn action(&self, a: AmpAction) {
         if let Some(tx) = &self.tx {
-            let _ = tx.try_send(Msg::Action(a));
+            queue(tx, &self.status, a);
         }
     }
 
@@ -316,7 +318,9 @@ fn worker(cfg: AmpConfig, rx: Receiver<Msg>, status: Arc<Mutex<AmpStatus>>) {
     if cfg.serial.path.trim().is_empty() {
         set(&status, |s| s.error = Some("No serial port chosen".into()));
         // Nothing to do but wait to be dropped.
-        while rx.recv().is_ok() {}
+        while rx.recv().is_ok() {
+            set(&status, |s| s.pending.clear());
+        }
         return;
     }
     let mut backoff = Duration::from_secs(1);
@@ -336,6 +340,7 @@ fn worker(cfg: AmpConfig, rx: Receiver<Msg>, status: Arc<Mutex<AmpStatus>>) {
                     s.connected = false;
                     s.readings = None;
                     s.atu = None;
+                    s.pending.clear();
                     s.error = Some("The amplifier stopped answering".into());
                 });
             }
@@ -353,10 +358,115 @@ fn worker(cfg: AmpConfig, rx: Receiver<Msg>, status: Arc<Mutex<AmpStatus>>) {
             match rx.recv_timeout(left) {
                 Err(RecvTimeoutError::Disconnected) => return,
                 Err(RecvTimeoutError::Timeout) => break,
-                Ok(_) => {}
+                // Nothing is sent while the port is closed.
+                Ok(_) => set(&status, |s| s.pending.clear()),
             }
         }
         backoff = (backoff * 2).min(RETRY_MAX);
+    }
+}
+
+/// One read the link makes between the panel's clicks. Each is a single
+/// query, and the channel is looked at before every one, so a click waits
+/// behind at most one read (up to the reply timeout when the amplifier skips
+/// its answer) rather than a whole round of them. Before (AJ3G, 21 Oct 2026:
+/// the AMP buttons were slow), a click waited behind the status, the
+/// temperature and four tuner reads, well over a second when the amplifier
+/// left the tuner's queries unanswered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Read {
+    /// `HRST`, every reading at once.
+    Status,
+    /// A band change held back by interlock #3: a status read, then the
+    /// frequency if it is clear.
+    Band,
+    /// `HRTP`.
+    Temp,
+    /// The tuner, one query each: `HRTT`, `HRTB`, `HRTMP`, and `HRTR` once a
+    /// tune has ended.
+    AtuTuning,
+    AtuActive,
+    AtuParams,
+    AtuResult,
+}
+
+/// The last status frame the amplifier answered: when, and whether it showed
+/// RF and how much drive. Interlocks #1 and #4 take it in place of a read of
+/// their own when it is no older than [`FRESH`].
+#[derive(Clone, Copy, Debug)]
+struct Clear {
+    at: Instant,
+    /// Keyed, or drive or output showing (see [`rf_in`]).
+    rf: bool,
+    drive_w: f32,
+}
+
+/// How old a status answer may be and still stand for the read interlocks
+/// #1 and #4 make just before a command. Shorter than any transmission can
+/// start and show on the amplifier's meters, and short enough that it is
+/// only ever used for a click that arrives straight after a status read;
+/// any later click gets a read of its own, as before.
+const FRESH: Duration = Duration::from_millis(100);
+
+/// How long a clicked control is shown as asked while the amplifier is read
+/// back still in its old state (it often answers the first read after a
+/// change with the old one); after that the control shows what is read.
+const PENDING_HOLD: Duration = Duration::from_secs(1);
+
+/// Whether a status frame shows RF in the amplifier: keyed (its TX light),
+/// drive of 0.1 W or more, or output of 1 W or more. Interlocks #1 and #3
+/// refuse a relay switch when it does.
+fn rf_in(s: &crate::Status) -> bool {
+    s.lights().is_some_and(|l| l.tx) || s.forward_w >= 1.0 || s.drive_w >= 0.1
+}
+
+/// Put a click on the link's channel and show it as asked at once (see
+/// [`AmpStatus::pending`]). Not shown when the channel is full and the
+/// click is dropped.
+fn queue(tx: &Sender<Msg>, status: &Mutex<AmpStatus>, a: AmpAction) {
+    if tx.try_send(Msg::Action(a)).is_ok() && a.control().is_some() {
+        set(status, |s| {
+            s.pending.retain(|p| p.control() != a.control());
+            s.pending.push(a);
+        });
+    }
+}
+
+/// A click the amplifier has been sent and not yet read back doing.
+#[derive(Clone, Copy, Debug)]
+struct Sent {
+    /// As sent: a band step is the band it stepped to.
+    action: AmpAction,
+    at: Instant,
+}
+
+/// Whether a reading shows `a` done.
+fn shows(a: AmpAction, r: &AmpReadings, atu_active: Option<bool>) -> bool {
+    match a {
+        AmpAction::SetPtt(on) => r.ptt == on,
+        AmpAction::SetAntenna(n) => r.antenna == n.clamp(1, 2),
+        AmpAction::SetBand(code) => r.band == Some(code),
+        AmpAction::SetAtu(on) => atu_active == Some(on),
+        _ => true,
+    }
+}
+
+/// The reads due now, most urgent first: the status frame when its time
+/// has come, except that straight after one, one other due read goes first,
+/// so a run of unanswered status reads (each its full timeout) cannot shut
+/// out the temperature and the tuner.
+fn next_read(
+    now: Instant,
+    last: Option<Read>,
+    status_due: Instant,
+    extras: impl IntoIterator<Item = (Read, bool)>,
+) -> Option<Read> {
+    let extra = extras.into_iter().find(|&(_, due)| due).map(|(r, _)| r);
+    let status = now >= status_due;
+    match (status, extra) {
+        (true, Some(e)) if last == Some(Read::Status) => Some(e),
+        (true, _) => Some(Read::Status),
+        (false, e) => e,
     }
 }
 
@@ -372,8 +482,12 @@ fn run<P: std::io::Read + std::io::Write>(
     set(status, |s| s.atu = has_atu.then(AtuReadout::default));
     let mut celsius: Option<bool> = None;
     let mut misses = 0;
+    let mut next_status = Instant::now();
     let mut next_atu = Instant::now();
     let mut next_temp = Instant::now();
+    // The tuner's queries still to make in this reading of it.
+    let mut atu_left: Vec<Read> = Vec::new();
+    let mut last_read: Option<Read> = None;
     // A C/F toggle not yet seen on the amplifier, and how long to keep looking.
     let mut scale_wanted: Option<(bool, Instant)> = None;
     // The temperature as `HRTP` last gave it, in the scale it gave, and when.
@@ -390,19 +504,73 @@ fn run<P: std::io::Read + std::io::Write>(
     // The radio's frequency waiting to be sent (#3), and when to try next.
     let mut want_hz: Option<u64> = None;
     let mut next_band_try = Instant::now();
+    // The last status the amplifier answered (#1, #4).
+    let mut clear: Option<Clear> = None;
+    // Clicks sent and not yet read back.
+    let mut sent: Vec<Sent> = Vec::new();
     loop {
-        match rx.recv_timeout(POLL) {
+        // ── the panel first: a click goes out before the next read ─────────
+        let now = Instant::now();
+        let extras = [
+            (Read::Band, want_hz.is_some() && now >= next_band_try),
+            (Read::Temp, scale_wanted.is_some_and(|(_, until)| now < until) || now >= next_temp),
+        ];
+        let atu_due = has_atu && (!atu_left.is_empty() || was_tuning || now >= next_atu);
+        if has_atu && atu_left.is_empty() && atu_due {
+            atu_left = vec![Read::AtuParams, Read::AtuActive, Read::AtuTuning];
+        }
+        let atu_next = atu_left.last().copied();
+        let read = next_read(
+            now,
+            last_read,
+            next_status,
+            extras.into_iter().chain(atu_next.map(|r| (r, true))),
+        );
+        let wait = match read {
+            Some(_) => Duration::ZERO,
+            None => {
+                let mut until = next_status;
+                if want_hz.is_some() {
+                    until = until.min(next_band_try);
+                }
+                until = until.min(next_temp);
+                if has_atu {
+                    until = until.min(next_atu);
+                }
+                until.saturating_duration_since(now)
+            }
+        };
+        match rx.recv_timeout(wait) {
             Err(RecvTimeoutError::Disconnected) => return false,
             Ok(Msg::Action(a)) => {
                 if matches!(a, AmpAction::SetPtt(_)) {
                     ptt_set_at = Some(Instant::now());
                 }
-                match act(&mut amp, a, status, &limits) {
-                    Err(e) => warn!("hardrock: {a:?}: {e}"),
-                    // The drawing follows the click at once rather than
-                    // waiting for the relays: the amplifier answers a read
-                    // straight after with the old state.
-                    Ok(true) => {
+                // A band step is taken from the band last asked for while
+                // it is still being read back, so two quick clicks step two
+                // bands.
+                let band_base = sent
+                    .iter()
+                    .find_map(|s| match s.action {
+                        AmpAction::SetBand(c) => Some(c),
+                        _ => None,
+                    })
+                    .or_else(|| status.lock().unwrap_or_else(|e| e.into_inner()).readings?.band);
+                let done = act(&mut amp, a, band_base, &limits, clear);
+                if let Ok(Some(_)) = done {
+                    // Anything the amplifier said before this is out of date.
+                    clear = None;
+                }
+                match done {
+                    Err(e) => {
+                        warn!("hardrock: {a:?}: {e}");
+                        drop_pending(status, &mut sent, a);
+                    }
+                    Ok(None) => drop_pending(status, &mut sent, a),
+                    Ok(Some(did)) => {
+                        // The drawing follows the click at once rather than
+                        // waiting for the relays: the amplifier answers a
+                        // read straight after with the old state.
                         if let AmpAction::SetAtu(on) = a {
                             set(status, |st| {
                                 let atu = st.atu.get_or_insert_with(AtuReadout::default);
@@ -412,11 +580,22 @@ fn run<P: std::io::Read + std::io::Write>(
                                 }
                             });
                         }
+                        if did.control().is_some() {
+                            sent.retain(|s| s.action.control() != did.control());
+                            sent.push(Sent { action: did, at: Instant::now() });
+                            set(status, |st| {
+                                st.pending.retain(|p| p.control() != did.control());
+                                st.pending.push(did);
+                            });
+                        }
+                        // Read the result back next.
+                        next_status = Instant::now();
                     }
-                    Ok(false) => {}
                 }
-                // Read back once the relays have settled, to confirm the click.
+                // Read the tuner back once the relays have settled, to
+                // confirm the click.
                 next_atu = Instant::now() + ATU_SETTLE;
+                atu_left.clear();
                 // After a C/F toggle the scale is read on every poll until
                 // the amplifier has switched: the status reading arrives in
                 // the new unit, and a letter left over from before put the
@@ -424,158 +603,208 @@ fn run<P: std::io::Read + std::io::Write>(
                 if let AmpAction::SetCelsius(c) = a {
                     scale_wanted = Some((c, Instant::now() + SCALE_SETTLE));
                 }
+                // Look at the channel again before any read.
+                continue;
             }
-            Ok(Msg::Frequency(hz)) => want_hz = Some(hz),
+            Ok(Msg::Frequency(hz)) => {
+                want_hz = Some(hz);
+                continue;
+            }
             Err(RecvTimeoutError::Timeout) => {}
         }
 
-        // SAFETY INTERLOCK (docs/safety-interlocks.md, #3): the radio's
-        // frequency, which sets the amplifier's band, is never sent while
-        // there is RF in the amplifier. A band change switches the low-pass
-        // filter relays; under power that arcs the contacts and can leave the
-        // output devices driving an open or wrong filter. It is held and sent
-        // once the amplifier shows no transmission, no drive and no output.
-        // As in #1, no answer to the status read counts as "not safe".
-        if let Some(hz) = want_hz
-            && Instant::now() >= next_band_try
-        {
-            next_band_try = Instant::now() + BAND_RETRY;
-            match amp.status() {
-                Ok(s)
-                    if !(s.lights().is_some_and(|l| l.tx)
-                        || s.forward_w >= 1.0
-                        || s.drive_w >= 0.1) =>
-                {
-                    let _ = amp.set_frequency(hz);
-                    want_hz = None;
-                }
-                _ => debug!("hardrock: band change held: transmitting or no answer"),
-            }
+        // A click the amplifier still reads in its old state is let go.
+        let expired: Vec<AmpAction> =
+            sent.iter().filter(|s| s.at.elapsed() >= PENDING_HOLD).map(|s| s.action).collect();
+        for a in expired {
+            debug!("hardrock: {a:?} not read back; showing the amplifier's state");
+            drop_pending(status, &mut sent, a);
         }
 
-        let settling = scale_wanted.filter(|&(_, until)| Instant::now() < until);
-        if settling.is_some() || Instant::now() >= next_temp {
-            next_temp = Instant::now() + if was_keyed { TEMP_POLL_TX } else { TEMP_POLL };
-            match amp.query(&Command::GetTemperature) {
-                Ok(Response::Temperature(v, Some(scale))) => {
-                    celsius = Some(scale == TempScale::C);
-                    screen_temp = Some((v, Instant::now()));
-                }
-                // No scale letter: the scale last seen still holds.
-                Ok(Response::Temperature(v, None)) if celsius.is_some() => {
-                    screen_temp = Some((v, Instant::now()));
-                }
-                other => debug!("HRTP not read: {other:?}"),
-            }
-        }
-        scale_wanted = settling.filter(|&(want, _)| celsius != Some(want));
-
-        match amp.status() {
-            Ok(s) => {
-                misses = 0;
-                let r = AmpReadings {
-                    fwd_w: s.forward_w,
-                    rfl_w: s.reflected_w,
-                    drive_w: s.drive_w,
-                    swr: s.swr,
-                    vdd_v: s.vdd_v,
-                    idd_a: s.idd_a,
-                    temperature: shown_temp(
-                        fresh_temp(screen_temp, Instant::now()),
-                        s.temperature,
-                        s.mode == KeyMode::Ptt || was_keyed,
-                    ),
-                    celsius,
-                    ptt: s.mode == KeyMode::Ptt,
-                    band: s.band.map(Band::code),
-                    antenna: s.antenna,
-                };
-                if let Some(l) = s.lights() {
-                    // The amplifier's own lights: shown as sent.
-                    seen_tx |= l.tx;
-                    alerts = lights_seen(l, seen_tx);
-                    was_keyed = l.tx;
-                } else {
-                    // Older firmware sends no lights, so they are worked out
-                    // as on the amplifier's screen: a key-up clears the
-                    // indicators, and the worst of the transmission stays lit.
-                    // A reading past a trip level is only shown as a trip once
-                    // the amplifier is seen to go off line.
-                    let keyed = r.ptt && r.drive_w > KEYED_DRIVE_W;
-                    if keyed && !was_keyed {
-                        alerts = AmpAlerts::default();
-                        watch.reset();
-                    }
-                    if keyed {
-                        alerts.hold(&limits, &r);
-                        if watch.keyed(&limits, &r) && !alerts.tripped {
-                            watch.trip(&mut alerts, &limits, &r);
+        let Some(read) = read else { continue };
+        last_read = Some(read);
+        match read {
+            // SAFETY INTERLOCK (docs/safety-interlocks.md, #3): the radio's
+            // frequency, which sets the amplifier's band, is never sent while
+            // there is RF in the amplifier. A band change switches the
+            // low-pass filter relays; under power that arcs the contacts and
+            // can leave the output devices driving an open or wrong filter.
+            // It is held and sent once the amplifier shows no transmission,
+            // no drive and no output. As in #1, no answer to the status read
+            // counts as "not safe". This read is always its own, never
+            // `clear`.
+            Read::Band => {
+                next_band_try = Instant::now() + BAND_RETRY;
+                match amp.status() {
+                    Ok(s) if !rf_in(&s) => {
+                        if let Some(hz) = want_hz.take() {
+                            let _ = amp.set_frequency(hz);
                         }
                     }
-                    let clicked_off =
-                        ptt_set_at.is_some_and(|t| t.elapsed() < Duration::from_secs(2));
-                    if was_keyed
-                        && !r.ptt
-                        && r.drive_w > KEYED_DRIVE_W
-                        && !clicked_off
-                        && !alerts.tripped
-                    {
-                        // Still driven, but the amplifier switched itself to OFF.
-                        watch.trip(&mut alerts, &limits, &r);
-                    }
-                    was_keyed = keyed;
+                    _ => debug!("hardrock: band change held: transmitting or no answer"),
                 }
-                let tx_light = s.lights().map(|l| l.tx);
-                set(status, |st| {
-                    st.readings = Some(r);
-                    st.alerts = alerts;
-                    st.transmitting = tx_light;
-                });
             }
-            Err(e) => {
-                misses += 1;
-                debug!("hardrock: status: {e}");
-                if misses >= MISSES {
-                    return true;
+            Read::Temp => {
+                next_temp = Instant::now() + if was_keyed { TEMP_POLL_TX } else { TEMP_POLL };
+                match amp.query(&Command::GetTemperature) {
+                    Ok(Response::Temperature(v, Some(scale))) => {
+                        celsius = Some(scale == TempScale::C);
+                        screen_temp = Some((v, Instant::now()));
+                    }
+                    // No scale letter: the scale last seen still holds.
+                    Ok(Response::Temperature(v, None)) if celsius.is_some() => {
+                        screen_temp = Some((v, Instant::now()));
+                    }
+                    other => debug!("HRTP not read: {other:?}"),
+                }
+                let settling = scale_wanted.filter(|&(_, until)| Instant::now() < until);
+                scale_wanted = settling.filter(|&(want, _)| celsius != Some(want));
+            }
+            Read::Status => {
+                let asked = Instant::now();
+                next_status = asked + POLL;
+                match amp.status() {
+                    Ok(s) => {
+                        misses = 0;
+                        clear =
+                            Some(Clear { at: Instant::now(), rf: rf_in(&s), drive_w: s.drive_w });
+                        let r = AmpReadings {
+                            fwd_w: s.forward_w,
+                            rfl_w: s.reflected_w,
+                            drive_w: s.drive_w,
+                            swr: s.swr,
+                            vdd_v: s.vdd_v,
+                            idd_a: s.idd_a,
+                            temperature: shown_temp(
+                                fresh_temp(screen_temp, Instant::now()),
+                                s.temperature,
+                                s.mode == KeyMode::Ptt || was_keyed,
+                            ),
+                            celsius,
+                            ptt: s.mode == KeyMode::Ptt,
+                            band: s.band.map(Band::code),
+                            antenna: s.antenna,
+                        };
+                        if let Some(l) = s.lights() {
+                            // The amplifier's own lights: shown as sent.
+                            seen_tx |= l.tx;
+                            alerts = lights_seen(l, seen_tx);
+                            was_keyed = l.tx;
+                        } else {
+                            // Older firmware sends no lights, so they are
+                            // worked out as on the amplifier's screen: a
+                            // key-up clears the indicators, and the worst of
+                            // the transmission stays lit. A reading past a
+                            // trip level is only shown as a trip once the
+                            // amplifier is seen to go off line.
+                            let keyed = r.ptt && r.drive_w > KEYED_DRIVE_W;
+                            if keyed && !was_keyed {
+                                alerts = AmpAlerts::default();
+                                watch.reset();
+                            }
+                            if keyed {
+                                alerts.hold(&limits, &r);
+                                if watch.keyed(&limits, &r) && !alerts.tripped {
+                                    watch.trip(&mut alerts, &limits, &r);
+                                }
+                            }
+                            let clicked_off =
+                                ptt_set_at.is_some_and(|t| t.elapsed() < Duration::from_secs(2));
+                            if was_keyed
+                                && !r.ptt
+                                && r.drive_w > KEYED_DRIVE_W
+                                && !clicked_off
+                                && !alerts.tripped
+                            {
+                                // Still driven, but the amplifier switched
+                                // itself to OFF.
+                                watch.trip(&mut alerts, &limits, &r);
+                            }
+                            was_keyed = keyed;
+                        }
+                        let tx_light = s.lights().map(|l| l.tx);
+                        set(status, |st| {
+                            st.readings = Some(r);
+                            st.alerts = alerts;
+                            st.transmitting = tx_light;
+                        });
+                        // Clicks sent before this read and shown in it.
+                        let done: Vec<AmpAction> = sent
+                            .iter()
+                            .filter(|c| c.at <= asked && shows(c.action, &r, None))
+                            .map(|c| c.action)
+                            .filter(|a| !matches!(a, AmpAction::SetAtu(_)))
+                            .collect();
+                        for a in done {
+                            drop_pending(status, &mut sent, a);
+                        }
+                    }
+                    Err(e) => {
+                        misses += 1;
+                        debug!("hardrock: status: {e}");
+                        if misses >= MISSES {
+                            return true;
+                        }
+                    }
+                }
+            }
+            Read::AtuTuning => {
+                atu_left.pop();
+                let tuning = matches!(amp.query(&Command::IsTuning), Ok(Response::Tuning(true)));
+                if was_tuning && !tuning {
+                    atu_left.insert(0, Read::AtuResult);
+                }
+                was_tuning = tuning;
+                set(status, |st| st.atu.get_or_insert_with(AtuReadout::default).tuning = tuning);
+            }
+            Read::AtuActive => {
+                atu_left.pop();
+                let asked = Instant::now();
+                if let Ok(Response::AtuActive(a)) = amp.query(&Command::GetAtuActive) {
+                    set(status, |st| st.atu.get_or_insert_with(AtuReadout::default).active = a);
+                    let done: Vec<AmpAction> = sent
+                        .iter()
+                        .filter(|c| {
+                            c.at <= asked && shows(c.action, &AmpReadings::default(), Some(a))
+                        })
+                        .filter(|c| matches!(c.action, AmpAction::SetAtu(_)))
+                        .map(|c| c.action)
+                        .collect();
+                    for a in done {
+                        drop_pending(status, &mut sent, a);
+                    }
+                }
+            }
+            Read::AtuParams => {
+                atu_left.pop();
+                if let Ok(Response::AtuParams(p)) = amp.query(&Command::AtuParams) {
+                    set(status, |st| {
+                        st.atu.get_or_insert_with(AtuReadout::default).network = Some(network_of(p))
+                    });
+                }
+            }
+            Read::AtuResult => {
+                atu_left.pop();
+                if let Ok(Response::TuneResult(r)) = amp.query(&Command::LastTuneResult) {
+                    set(status, |st| {
+                        st.atu.get_or_insert_with(AtuReadout::default).last_result =
+                            Some(result_text(r))
+                    });
                 }
             }
         }
-
-        if has_atu && (was_tuning || Instant::now() >= next_atu) {
+        if matches!(read, Read::AtuTuning | Read::AtuActive | Read::AtuParams | Read::AtuResult)
+            && atu_left.is_empty()
+        {
             next_atu = Instant::now() + ATU_POLL;
-            let tuning = matches!(amp.query(&Command::IsTuning), Ok(Response::Tuning(true)));
-            let active = match amp.query(&Command::GetAtuActive) {
-                Ok(Response::AtuActive(a)) => Some(a),
-                _ => None,
-            };
-            let network = match amp.query(&Command::AtuParams) {
-                Ok(Response::AtuParams(p)) => Some(network_of(p)),
-                _ => None,
-            };
-            let result = if was_tuning && !tuning {
-                match amp.query(&Command::LastTuneResult) {
-                    Ok(Response::TuneResult(r)) => Some(result_text(r)),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            was_tuning = tuning;
-            set(status, |st| {
-                let atu = st.atu.get_or_insert_with(AtuReadout::default);
-                atu.tuning = tuning;
-                if let Some(a) = active {
-                    atu.active = a;
-                }
-                if network.is_some() {
-                    atu.network = network;
-                }
-                if result.is_some() {
-                    atu.last_result = result;
-                }
-            });
         }
     }
+}
+
+/// Stop showing `a`'s control as asked: done, refused or not read back.
+fn drop_pending(status: &Mutex<AmpStatus>, sent: &mut Vec<Sent>, a: AmpAction) {
+    sent.retain(|s| s.action.control() != a.control());
+    set(status, |st| st.pending.retain(|p| p.control() != a.control()));
 }
 
 fn network_of(p: AtuParams) -> AtuNetwork {
@@ -600,18 +829,25 @@ fn result_text(r: TuneResult) -> String {
     }
 }
 
-/// Carries out one button. `Ok(false)` when it was refused (a relay switch
-/// while transmitting).
+/// Carries out one button. `Ok(Some(..))` with what was sent, a band step
+/// as the band it stepped to; `Ok(None)` when it was refused (a relay switch
+/// while transmitting, or going in line overdriven). A band step is taken
+/// from `band_now`.
+///
+/// `clear` is the last status the amplifier answered. Interlocks #1 and #4
+/// read the amplifier's status just before the command; a status answered
+/// within [`FRESH`] that passes the same test stands in for that read, so a
+/// click straight after a poll does not wait for a second one.
 fn act<P: std::io::Read + std::io::Write>(
     amp: &mut Amp<P>,
     a: AmpAction,
-    status: &Mutex<AmpStatus>,
+    band_now: Option<u8>,
     limits: &AmpLimits,
-) -> crate::Result<bool> {
-    let band_now =
-        || status.lock().unwrap_or_else(|e| e.into_inner()).readings.and_then(|r| r.band);
-    // SAFETY INTERLOCK (docs/hardrock/safety-interlocks.md, #1): never switch
-    // a relay in the RF path (antenna, band filter, tuner) with RF on it.
+    clear: Option<Clear>,
+) -> crate::Result<Option<AmpAction>> {
+    let fresh = clear.filter(|c| c.at.elapsed() <= FRESH);
+    // SAFETY INTERLOCK (docs/safety-interlocks.md, #1): never switch a relay
+    // in the RF path (antenna, band filter, tuner) with RF on it.
     // Hot-switching opens the load under power: the reflected power spike
     // makes the amplifier raise its RFL flag (seen on AJ3G's HR500, 17 Oct
     // 2026), stresses the VRF2944 output devices, and arcs and pits the relay
@@ -621,6 +857,9 @@ fn act<P: std::io::Read + std::io::Write>(
     // raced the key-up. Things are left as they are if the amplifier is
     // keyed, has drive or output, or does not answer (it often skips its
     // status reply mid-transmission), because "don't know" is not "safe".
+    // A status the amplifier answered no more than FRESH (100 ms) ago and
+    // showing no RF stands in for the read; anything older, or showing RF,
+    // and the status is read again here.
     let switches_rf = matches!(
         a,
         AmpAction::SetAntenna(_)
@@ -629,56 +868,59 @@ fn act<P: std::io::Read + std::io::Write>(
             | AmpAction::BandDown
             | AmpAction::SetAtu(_)
     );
-    if switches_rf {
-        let s = amp.status()?;
-        if s.lights().is_some_and(|l| l.tx) || s.forward_w >= 1.0 || s.drive_w >= 0.1 {
-            warn!("hardrock: {a:?} refused: transmitting");
-            return Ok(false);
-        }
+    if switches_rf && !fresh.is_some_and(|c| !c.rf) && rf_in(&amp.status()?) {
+        warn!("hardrock: {a:?} refused: transmitting");
+        return Ok(None);
     }
-    // SAFETY INTERLOCK (docs/hardrock/safety-interlocks.md, #4): never put the
+    // SAFETY INTERLOCK (docs/safety-interlocks.md, #4): never put the
     // amplifier in line (OFF to PTT) while the radio is driving it harder
     // than its drive limit. In OFF the radio's power goes straight through,
     // so a 100 W radio running barefoot is fine there; switched in line, it
     // would drive the amplifier far past its trip level and can damage the
     // output devices. Checked against the amplifier itself just before the
-    // command goes out; no answer refuses it, as in #1. The panel greys the
-    // button too (#4, AMP window).
+    // command goes out; no answer refuses it, as in #1. A status answered no
+    // more than FRESH ago with the drive under the limit stands in for the
+    // read, as in #1. The panel greys the button too (#4, AMP window).
     if a == AmpAction::SetPtt(true) {
-        let s = amp.status()?;
-        if s.drive_w > limits.drive_warn_w {
-            warn!(
-                "hardrock: {a:?} refused: drive {:.1} W is over the amplifier's limit",
-                s.drive_w
-            );
-            return Ok(false);
+        let drive_w = match fresh {
+            Some(c) if c.drive_w <= limits.drive_warn_w => c.drive_w,
+            _ => amp.status()?.drive_w,
+        };
+        if drive_w > limits.drive_warn_w {
+            warn!("hardrock: {a:?} refused: drive {drive_w:.1} W is over the amplifier's limit");
+            return Ok(None);
         }
     }
-    match a {
+    // Codes run 1 = 10 m to 10 = 160 m, so "up" in frequency is down in code.
+    let step = |up: bool| match band_now {
+        Some(c) if up => c.saturating_sub(1).max(1),
+        Some(c) => (c + 1).min(10),
+        None => Band::M20.code(),
+    };
+    let did = match a {
+        AmpAction::BandUp => AmpAction::SetBand(step(true)),
+        AmpAction::BandDown => AmpAction::SetBand(step(false)),
+        other => other,
+    };
+    match did {
         AmpAction::SetPtt(on) => amp.set_mode(if on { KeyMode::Ptt } else { KeyMode::Off }),
         AmpAction::SetAntenna(n) => amp.set_antenna(n.clamp(1, 2)),
+        // A step past the end of the bands sends nothing.
+        AmpAction::SetBand(code) if Some(code) == band_now && a != AmpAction::SetBand(code) => {
+            Ok(())
+        }
         AmpAction::SetBand(code) => match Band::from_code(code) {
             Some(b) => amp.set_band(b),
             None => Ok(()),
-        },
-        // Codes run 1 = 10 m to 10 = 160 m, so "up" in frequency is down in code.
-        AmpAction::BandUp => match band_now() {
-            Some(c) if c > 1 => amp.set_band(Band::from_code(c - 1).unwrap_or(Band::M10)),
-            Some(_) => Ok(()),
-            None => amp.set_band(Band::M20),
-        },
-        AmpAction::BandDown => match band_now() {
-            Some(c) if c < 10 => amp.set_band(Band::from_code(c + 1).unwrap_or(Band::M160)),
-            Some(_) => Ok(()),
-            None => amp.set_band(Band::M20),
         },
         AmpAction::Tune => amp.send(&Command::Tune),
         AmpAction::SetAtu(on) => amp.send(&Command::SetAtuActive(on)),
         AmpAction::SetCelsius(c) => {
             amp.send(&Command::SetTempScale(if c { TempScale::C } else { TempScale::F }))
         }
+        AmpAction::BandUp | AmpAction::BandDown => Ok(()),
     }
-    .map(|()| true)
+    .map(|()| Some(did))
 }
 
 /// The temperature the panel shows. At rest, `HRTP`'s (the amplifier's own
@@ -704,6 +946,413 @@ fn fresh_temp(screen: Option<(f32, Instant)>, now: Instant) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
+    /// A simulated amplifier on a serial port: it answers each query after
+    /// `latency`, or never when `skip` says so (the HR500 often leaves a
+    /// query unanswered, mid-transmission most of all), and logs when each
+    /// command reached it.
+    #[derive(Clone)]
+    struct SimPort(Arc<Mutex<Sim>>);
+
+    struct Sim {
+        latency: Duration,
+        skip: fn(&str, u32) -> bool,
+        /// Bytes written that don't yet end in `;`.
+        partial: String,
+        replies: VecDeque<(Instant, Vec<u8>)>,
+        /// Every command, as it arrived.
+        log: Vec<(Instant, String)>,
+        queries: u32,
+        ptt: bool,
+        antenna: u8,
+        atu: bool,
+        /// Forward power in watts and drive in tenths, as the status frame
+        /// reports them.
+        fwd: u32,
+        drive: u32,
+        band: u8,
+        /// The antenna relay ignores its command.
+        stuck: bool,
+    }
+
+    impl SimPort {
+        fn new(latency: Duration, skip: fn(&str, u32) -> bool) -> SimPort {
+            SimPort(Arc::new(Mutex::new(Sim {
+                latency,
+                skip,
+                partial: String::new(),
+                replies: VecDeque::new(),
+                log: Vec::new(),
+                queries: 0,
+                ptt: false,
+                antenna: 1,
+                atu: false,
+                fwd: 0,
+                drive: 0,
+                band: 7,
+                stuck: false,
+            })))
+        }
+
+        fn sim(&self) -> std::sync::MutexGuard<'_, Sim> {
+            self.0.lock().unwrap()
+        }
+
+        /// When `cmd` was first seen at or after `since`.
+        fn seen(&self, cmd: &str, since: Instant) -> Option<Instant> {
+            self.sim().log.iter().find(|(t, c)| *t >= since && c == cmd).map(|(t, _)| *t)
+        }
+    }
+
+    impl Sim {
+        fn answer(&self, cmd: &str) -> Option<String> {
+            Some(match cmd {
+                "HRAP" => "HRAP1;".into(),
+                "HRAA" => "HRAA;".into(),
+                "HRST" => format!(
+                    "HRST-{:03}-000-{:03}-000-058-000-075-{}-{:02}-{}-;",
+                    self.fwd,
+                    self.drive,
+                    u8::from(self.ptt),
+                    self.band,
+                    self.antenna
+                ),
+                "HRTP" => "HRTP75F;".into(),
+                "HRTB" => format!("HRTB{};", u8::from(self.atu)),
+                "HRTT" => "HRTT0;".into(),
+                "HRTMP" => "HRTM-L012-C034-H1-B5-S000-F145-;".into(),
+                "HRTR" => "HRTRS;".into(),
+                _ => return None,
+            })
+        }
+
+        fn command(&mut self, cmd: &str) {
+            let now = Instant::now();
+            self.log.push((now, cmd.to_string()));
+            match cmd {
+                "HRMD0" => self.ptt = false,
+                "HRMD1" => self.ptt = true,
+                "HRAN1" if !self.stuck => self.antenna = 1,
+                "HRAN2" if !self.stuck => self.antenna = 2,
+                c if c.starts_with("HRBN") && c.len() > 4 => {
+                    self.band = c[4..].parse().unwrap_or(self.band)
+                }
+                "HRTB0" => self.atu = false,
+                "HRTB1" => self.atu = true,
+                _ => {}
+            }
+            if let Some(a) = self.answer(cmd) {
+                self.queries += 1;
+                if !(self.skip)(cmd, self.queries) {
+                    self.replies.push_back((now + self.latency, a.into_bytes()));
+                }
+            }
+        }
+    }
+
+    impl std::io::Write for SimPort {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut sim = self.sim();
+            sim.partial.push_str(&String::from_utf8_lossy(buf));
+            while let Some(i) = sim.partial.find(';') {
+                let cmd: String = sim.partial.drain(..=i).collect();
+                sim.command(cmd.trim_end_matches(';'));
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl std::io::Read for SimPort {
+        /// As a serial port with a short read timeout: whatever has arrived,
+        /// or `TimedOut` after a few milliseconds of nothing.
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let until = Instant::now() + Duration::from_millis(5);
+            loop {
+                {
+                    let mut sim = self.sim();
+                    if let Some((at, _)) = sim.replies.front()
+                        && *at <= Instant::now()
+                    {
+                        let (_, r) = sim.replies.pop_front().unwrap();
+                        buf[..r.len()].copy_from_slice(&r);
+                        return Ok(r.len());
+                    }
+                }
+                if Instant::now() >= until {
+                    return Err(std::io::ErrorKind::TimedOut.into());
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    /// A link on a simulated amplifier, with the same reply timeout as a real
+    /// port.
+    struct SimLink {
+        port: SimPort,
+        tx: Option<Sender<Msg>>,
+        status: Arc<Mutex<AmpStatus>>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl SimLink {
+        fn start(port: SimPort) -> SimLink {
+            let (tx, rx) = bounded(16);
+            let status = Arc::new(Mutex::new(AmpStatus {
+                configured: true,
+                connected: true,
+                ..AmpStatus::default()
+            }));
+            let (p, st) = (port.clone(), status.clone());
+            let thread = thread::spawn(move || {
+                let amp = Amp::new(p).with_timeout(Duration::from_millis(400));
+                run(amp, &rx, &st, crate::types::AmpModel::Hr500.limits());
+            });
+            SimLink { port, tx: Some(tx), status, thread: Some(thread) }
+        }
+
+        fn action(&self, a: AmpAction) {
+            queue(self.tx.as_ref().unwrap(), &self.status, a);
+        }
+
+        fn status(&self) -> AmpStatus {
+            self.status.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for SimLink {
+        fn drop(&mut self) {
+            self.tx = None;
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    /// Click `n` times at scattered moments, alternating `a` and `b`, and
+    /// give the time from each click to its command reaching the amplifier:
+    /// (mean, worst) in milliseconds.
+    fn click_latency(
+        link: &SimLink,
+        n: u32,
+        clicks: [(AmpAction, &str); 2],
+    ) -> (f64, f64, Vec<f64>) {
+        // Let the first round of reads start.
+        thread::sleep(Duration::from_millis(300));
+        let mut got = Vec::new();
+        let mut seed: u32 = 12345;
+        for i in 0..n {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            thread::sleep(Duration::from_millis(u64::from(seed >> 16) % 700 + 100));
+            let (a, cmd) = clicks[i as usize % 2];
+            let t0 = Instant::now();
+            link.action(a);
+            let deadline = t0 + Duration::from_secs(5);
+            let at = loop {
+                if let Some(t) = link.port.seen(cmd, t0) {
+                    break t;
+                }
+                assert!(Instant::now() < deadline, "{cmd} never sent");
+                thread::sleep(Duration::from_millis(1));
+            };
+            got.push(at.duration_since(t0).as_secs_f64() * 1000.0);
+        }
+        let mean = got.iter().sum::<f64>() / got.len() as f64;
+        let worst = got.iter().cloned().fold(0.0, f64::max);
+        (mean, worst, got)
+    }
+
+    /// The tuner's and the temperature's queries go unanswered, as they often
+    /// do while the amplifier is busy; the status frame is answered.
+    fn skips_extras(cmd: &str, _: u32) -> bool {
+        matches!(cmd, "HRTP" | "HRTB" | "HRTT" | "HRTMP" | "HRTR")
+    }
+
+    fn answers_all(_: &str, _: u32) -> bool {
+        false
+    }
+
+    /// Measures how long a click waits before its command goes out, against
+    /// a simulated amplifier that answers everything and one that leaves
+    /// the tuner's and the temperature's queries unanswered. Run with
+    /// `--nocapture` to see the figures.
+    #[test]
+    fn a_click_goes_out_without_waiting_for_a_round_of_reads() {
+        let mut worst = Vec::new();
+        for (name, skip) in [
+            ("answers everything", answers_all as fn(&str, u32) -> bool),
+            ("skips HRTP and the tuner reads", skips_extras),
+        ] {
+            let link = SimLink::start(SimPort::new(Duration::from_millis(25), skip));
+            // PTT/OFF (the OFF to PTT one checks the drive first, #4) and
+            // the antenna, a relay checked against a status read (#1).
+            let ptt = click_latency(
+                &link,
+                16,
+                [(AmpAction::SetPtt(true), "HRMD1"), (AmpAction::SetPtt(false), "HRMD0")],
+            );
+            let ant = click_latency(
+                &link,
+                16,
+                [(AmpAction::SetAntenna(2), "HRAN2"), (AmpAction::SetAntenna(1), "HRAN1")],
+            );
+            eprintln!(
+                "click to send, amplifier {name}: PTT/OFF mean {:.0} ms, worst {:.0} ms; \
+                 ANT mean {:.0} ms, worst {:.0} ms",
+                ptt.0, ptt.1, ant.0, ant.1
+            );
+            worst.push((ptt.1, ant.1));
+        }
+        // Answered, a click waits at most for one reply in flight and the
+        // status read of #1 or #4; with replies skipped, for one timeout
+        // (400 ms) at most, where it waited behind a whole round before.
+        assert!(worst[0].0 < 150.0 && worst[0].1 < 150.0, "{worst:?}");
+        assert!(worst[1].0 < 520.0 && worst[1].1 < 520.0, "{worst:?}");
+    }
+
+    /// The commands that reached the simulated amplifier.
+    fn log(port: &SimPort) -> Vec<String> {
+        port.sim().log.iter().map(|(_, c)| c.clone()).collect()
+    }
+
+    fn fresh(rf: bool, drive_w: f32, ago: Duration) -> Option<Clear> {
+        Some(Clear { at: Instant::now() - ago, rf, drive_w })
+    }
+
+    #[test]
+    fn a_relay_click_straight_after_a_clear_status_goes_without_another_read() {
+        let l = crate::types::AmpModel::Hr500.limits();
+        let run = |clear: Option<Clear>, fwd: u32| {
+            let port = SimPort::new(Duration::from_millis(5), answers_all);
+            port.sim().fwd = fwd;
+            let mut amp = Amp::new(port.clone()).with_timeout(Duration::from_millis(100));
+            let r = act(&mut amp, AmpAction::SetAntenna(2), None, &l, clear).unwrap();
+            (r, log(&port))
+        };
+        // A status answered 20 ms ago with no RF stands in for the read.
+        let (r, sent) = run(fresh(false, 0.0, Duration::from_millis(20)), 0);
+        assert_eq!((r, sent), (Some(AmpAction::SetAntenna(2)), vec!["HRAN2".to_string()]));
+        // Older than FRESH: read again.
+        let (_, sent) = run(fresh(false, 0.0, Duration::from_millis(150)), 0);
+        assert_eq!(sent, ["HRST", "HRAN2"]);
+        // SAFETY INTERLOCK #1: one that showed RF is never taken as clear; the
+        // read shows output, and nothing is switched.
+        let (r, sent) = run(fresh(true, 0.0, Duration::from_millis(20)), 100);
+        assert_eq!((r, sent), (None, vec!["HRST".to_string()]));
+        // No status to go by, and the amplifier shows output.
+        let (r, sent) = run(None, 100);
+        assert_eq!((r, sent), (None, vec!["HRST".to_string()]));
+    }
+
+    #[test]
+    fn a_relay_click_with_no_answer_to_its_status_read_is_refused() {
+        let l = crate::types::AmpModel::Hr500.limits();
+        let port = SimPort::new(Duration::from_millis(5), |c, _| c == "HRST");
+        let mut amp = Amp::new(port.clone()).with_timeout(Duration::from_millis(50));
+        for a in [AmpAction::SetAntenna(2), AmpAction::SetAtu(true), AmpAction::BandUp] {
+            assert!(
+                act(&mut amp, a, Some(7), &l, fresh(false, 0.0, Duration::from_secs(1))).is_err()
+            );
+        }
+        assert!(log(&port).iter().all(|c| c == "HRST"));
+    }
+
+    #[test]
+    fn going_in_line_takes_a_fresh_status_only_when_the_drive_was_under_the_limit() {
+        let l = crate::types::AmpModel::Hr500.limits();
+        let run = |clear: Option<Clear>, drive: u32| {
+            let port = SimPort::new(Duration::from_millis(5), answers_all);
+            port.sim().drive = drive;
+            let mut amp = Amp::new(port.clone()).with_timeout(Duration::from_millis(100));
+            let r = act(&mut amp, AmpAction::SetPtt(true), None, &l, clear).unwrap();
+            (r, log(&port))
+        };
+        let (r, sent) = run(fresh(false, 2.0, Duration::from_millis(20)), 20);
+        assert_eq!((r, sent), (Some(AmpAction::SetPtt(true)), vec!["HRMD1".to_string()]));
+        // SAFETY INTERLOCK #4: over the limit, read again; still over, refused.
+        let (r, sent) = run(fresh(false, 20.0, Duration::from_millis(20)), 200);
+        assert_eq!((r, sent), (None, vec!["HRST".to_string()]));
+        let (r, sent) = run(fresh(false, 2.0, Duration::from_millis(150)), 200);
+        assert_eq!((r, sent), (None, vec!["HRST".to_string()]));
+        // Going to OFF needs no read.
+        let port = SimPort::new(Duration::from_millis(5), answers_all);
+        let mut amp = Amp::new(port.clone()).with_timeout(Duration::from_millis(100));
+        act(&mut amp, AmpAction::SetPtt(false), None, &l, None).unwrap();
+        assert_eq!(log(&port), ["HRMD0"]);
+    }
+
+    /// Wait until `f` holds of the link's status, or a few seconds.
+    fn wait_for(link: &SimLink, f: impl Fn(&AmpStatus) -> bool) -> bool {
+        let until = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < until {
+            if f(&link.status()) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    #[test]
+    fn a_click_shows_as_asked_until_the_amplifier_reads_it_back() {
+        let link = SimLink::start(SimPort::new(Duration::from_millis(10), answers_all));
+        assert!(wait_for(&link, |s| s.readings.is_some()));
+        link.action(AmpAction::SetAntenna(2));
+        // At once, before the link has done anything.
+        assert_eq!(link.status().pending, [AmpAction::SetAntenna(2)]);
+        assert!(wait_for(&link, |s| s.pending.is_empty()));
+        assert_eq!(link.status().readings.unwrap().antenna, 2);
+        // A band step shows as the band it steps to, and two quick steps
+        // step two bands.
+        link.action(AmpAction::BandUp);
+        link.action(AmpAction::BandUp);
+        assert!(wait_for(&link, |s| s.pending.is_empty()));
+        assert!(wait_for(&link, |s| s.readings.unwrap().band == Some(5)));
+        // TUNE is shown only as read back.
+        link.action(AmpAction::Tune);
+        assert!(link.status().pending.is_empty());
+    }
+
+    #[test]
+    fn a_refused_or_unread_click_goes_back_to_what_the_amplifier_reads() {
+        let port = SimPort::new(Duration::from_millis(10), answers_all);
+        let link = SimLink::start(port.clone());
+        assert!(wait_for(&link, |s| s.readings.is_some()));
+        // Output showing: the antenna is not switched (#1) and the button
+        // shows the antenna it is on.
+        port.sim().fwd = 100;
+        assert!(wait_for(&link, |s| s.readings.unwrap().fwd_w > 50.0));
+        link.action(AmpAction::SetAntenna(2));
+        assert!(wait_for(&link, |s| s.pending.is_empty()));
+        assert_eq!(link.status().readings.unwrap().antenna, 1);
+        assert!(!log(&port).iter().any(|c| c == "HRAN2"));
+        // Sent, but the relay never moves: let go after PENDING_HOLD.
+        port.sim().fwd = 0;
+        port.sim().stuck = true;
+        assert!(wait_for(&link, |s| s.readings.unwrap().fwd_w < 1.0));
+        let t0 = Instant::now();
+        link.action(AmpAction::SetAntenna(2));
+        assert!(wait_for(&link, |s| s.pending.is_empty()));
+        assert!(t0.elapsed() >= PENDING_HOLD);
+        assert!(log(&port).iter().any(|c| c == "HRAN2"));
+    }
+
+    #[test]
+    fn the_status_is_never_shut_out_and_neither_are_the_other_reads() {
+        let t = Instant::now();
+        let later = t + Duration::from_secs(1);
+        // Status due, nothing else: status.
+        assert_eq!(next_read(t, None, t, [(Read::Temp, false)]), Some(Read::Status));
+        // Status due and another read due: status first, then the other.
+        assert_eq!(next_read(t, Some(Read::Temp), t, [(Read::Temp, true)]), Some(Read::Status));
+        assert_eq!(next_read(t, Some(Read::Status), t, [(Read::Temp, true)]), Some(Read::Temp));
+        // Nothing due: wait.
+        assert_eq!(next_read(t, Some(Read::Status), later, [(Read::Temp, false)]), None);
+    }
 
     #[test]
     fn a_peak_past_a_trip_level_is_not_a_trip() {
