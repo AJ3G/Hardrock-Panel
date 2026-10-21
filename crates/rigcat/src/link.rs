@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded};
 use tracing::{debug, info, warn};
 
 use crate::protocol::{Frame, FrameKind, Incoming, Protocol, Reply};
@@ -33,11 +33,14 @@ const MISSES: u32 = 4;
 const RETRY_MAX: Duration = Duration::from_secs(2);
 const OPEN_PINGS: u32 = 3;
 /// How long the panel may go without saying it still wants the TUNE carrier
-/// before the link unkeys by itself (interlock #6). The panel says so ten
-/// times a second.
+/// before the link unkeys by itself (interlock #6). The panel says so every
+/// frame, and [`RigLink::tune_alive`] passes one on every [`ALIVE_EVERY`].
 const TUNE_ALIVE: Duration = Duration::from_secs(1);
 /// The longest TUNE the link will key, whatever it is asked for.
 pub const TUNE_MAX: Duration = Duration::from_secs(60);
+/// How often [`RigLink::tune_alive`] passes a keep-alive on: well inside
+/// [`TUNE_ALIVE`].
+const ALIVE_EVERY: Duration = Duration::from_millis(200);
 
 enum Msg {
     /// Read every setting again now.
@@ -62,6 +65,9 @@ pub struct RigLink {
     tx: Option<Sender<Msg>>,
     status: Arc<Mutex<RigStatus>>,
     thread: Option<JoinHandle<()>>,
+    /// When the last keep-alive went: the panel asks every frame, the link
+    /// needs one a second, so most are not sent.
+    alive_sent: Mutex<Option<Instant>>,
 }
 
 impl RigLink {
@@ -82,7 +88,7 @@ impl RigLink {
             .name("rigcat".into())
             .spawn(move || worker(cfg, proto, rx, st))
             .ok();
-        RigLink { tx: Some(tx), status, thread }
+        RigLink { tx: Some(tx), status, thread, alive_sent: Mutex::new(None) }
     }
 
     pub fn status(&self) -> RigStatus {
@@ -121,8 +127,15 @@ impl RigLink {
         self.send(Msg::UsbAudio);
     }
 
+    /// Tell the link the caller still wants the TUNE. Sent at most every
+    /// [`ALIVE_EVERY`], however often it is called, so the keep-alives never
+    /// fill the queue ahead of a stop.
     pub fn tune_alive(&self) {
-        self.send(Msg::TuneAlive);
+        let mut last = self.alive_sent.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_none_or(|t| t.elapsed() >= ALIVE_EVERY) {
+            *last = Some(Instant::now());
+            self.send(Msg::TuneAlive);
+        }
     }
 
     /// Change the radio's settings (the dial, the mode, a menu): the frames
@@ -485,122 +498,135 @@ fn run<P: Read + Write>(
     let mut tune: Option<TuneState> = None;
     let mut last_tx: Option<Instant> = None;
     loop {
-        let msg = rx.recv_timeout(if tune.is_some() { Duration::from_millis(50) } else { POLL });
-        match msg {
-            Err(RecvTimeoutError::Disconnected) => {
-                if tune.is_some() {
-                    unkey(&mut rig, status, None);
-                }
-                return (false, rig.proto);
-            }
-            Ok(Msg::ReadSettings) => {
-                next_settings = Instant::now();
-                asked = true;
-            }
-            Ok(Msg::SetPower(code)) => {
-                let f = rig.proto.set_power(code);
-                if let Err(e) = rig.send(&f) {
-                    warn!("rigcat: set power: {e:?}");
-                }
-                // Read it back, so the panel shows what the radio took.
-                next_settings = Instant::now();
-                asked = true;
-            }
-            Ok(Msg::UsbAudio) => {
-                if let Some(f) = rig.proto.audio_input() {
-                    if let Err(e) = rig.send(&f) {
-                        warn!("rigcat: TX input: {e:?}");
+        // Every message waiting is handled before the round's reads, not one
+        // a round: a TUNE, its stop or a click never queues behind the
+        // keep-alives that come while a TUNE runs.
+        let mut msg =
+            rx.recv_timeout(if tune.is_some() { Duration::from_millis(50) } else { POLL });
+        loop {
+            match msg {
+                Err(RecvTimeoutError::Disconnected) => {
+                    if tune.is_some() {
+                        unkey(&mut rig, status, None);
                     }
+                    return (false, rig.proto);
+                }
+                Ok(Msg::ReadSettings) => {
                     next_settings = Instant::now();
                     asked = true;
                 }
-            }
-            Ok(Msg::TuneStart(max, keying)) if tune.is_none() => {
-                let key = match keying {
-                    Keying::Carrier => Ok(rig.proto.key_tune()),
-                    Keying::Audio => key_audio(&mut rig, status),
-                };
-                if let Err(why) = &key {
-                    info!("rigcat: TUNE not keyed: {why}");
-                    set(status, |s| s.tune_note = Some(why.clone()));
+                Ok(Msg::SetPower(code)) => {
+                    let f = rig.proto.set_power(code);
+                    if let Err(e) = rig.send(&f) {
+                        warn!("rigcat: set power: {e:?}");
+                    }
+                    // Read it back, so the panel shows what the radio took.
+                    next_settings = Instant::now();
+                    asked = true;
                 }
-                if let Ok(f) = key {
-                    let now = Instant::now();
-                    match rig.send(&f) {
-                        Ok(()) => {
-                            let tuning = Tuning { since: now, until: now + max, keying };
-                            info!("rigcat: TUNE ({keying:?}) keyed for at most {max:?}");
-                            tune = Some(TuneState { tuning, alive: now });
-                            set(status, |s| {
-                                s.tuning = Some(tuning);
-                                s.tune_note = None;
-                            });
+                Ok(Msg::UsbAudio) => {
+                    if let Some(f) = rig.proto.audio_input() {
+                        if let Err(e) = rig.send(&f) {
+                            warn!("rigcat: TX input: {e:?}");
                         }
-                        Err(e) => warn!("rigcat: TUNE: {e:?}"),
+                        next_settings = Instant::now();
+                        asked = true;
                     }
                 }
-            }
-            // One at a time.
-            Ok(Msg::TuneStart(..)) => {}
-            Ok(Msg::Set(frames)) => {
-                for f in frames {
-                    // SAFETY INTERLOCK (docs/safety-interlocks.md, #5): no
-                    // setting changes, and no stored CW message starts, while
-                    // the radio transmits or a TUNE of ours runs. Unkeying
-                    // frames are always let through.
-                    let busy = tune.is_some()
-                        || status.lock().unwrap_or_else(|e| e.into_inner()).transmitting();
-                    if busy && f.kind != FrameKind::Unkey {
-                        let what = String::from_utf8_lossy(&f.bytes).to_string();
-                        info!("rigcat: not sent while transmitting: {what}");
-                        set(status, |s| {
-                            s.set_note = Some("Not changed: the radio is transmitting.".into())
-                        });
-                        break;
+                Ok(Msg::TuneStart(max, keying)) if tune.is_none() => {
+                    let key = match keying {
+                        Keying::Carrier => Ok(rig.proto.key_tune()),
+                        Keying::Audio => key_audio(&mut rig, status),
+                    };
+                    if let Err(why) = &key {
+                        info!("rigcat: TUNE not keyed: {why}");
+                        set(status, |s| s.tune_note = Some(why.clone()));
                     }
-                    if !matches!(
-                        f.kind,
-                        FrameKind::SetSetting | FrameKind::KeyCw | FrameKind::Unkey
-                    ) {
-                        warn!("rigcat: Set carries a {:?} frame; not sent", f.kind);
-                        continue;
+                    if let Ok(f) = key {
+                        let now = Instant::now();
+                        match rig.send(&f) {
+                            Ok(()) => {
+                                let tuning = Tuning { since: now, until: now + max, keying };
+                                info!("rigcat: TUNE ({keying:?}) keyed for at most {max:?}");
+                                tune = Some(TuneState { tuning, alive: now });
+                                set(status, |s| {
+                                    s.tuning = Some(tuning);
+                                    s.tune_note = None;
+                                });
+                            }
+                            Err(e) => warn!("rigcat: TUNE: {e:?}"),
+                        }
                     }
-                    match rig.send(&f) {
-                        Ok(()) => set(status, |s| s.set_note = None),
-                        Err(e) => {
-                            warn!("rigcat: set: {e:?}");
+                }
+                // One at a time.
+                Ok(Msg::TuneStart(..)) => {}
+                Ok(Msg::Set(frames)) => {
+                    for f in frames {
+                        // SAFETY INTERLOCK (docs/safety-interlocks.md, #5): no
+                        // setting changes, and no stored CW message starts, while
+                        // the radio transmits or a TUNE of ours runs. Unkeying
+                        // frames are always let through.
+                        let busy = tune.is_some()
+                            || status.lock().unwrap_or_else(|e| e.into_inner()).transmitting();
+                        if busy && f.kind != FrameKind::Unkey {
+                            let what = String::from_utf8_lossy(&f.bytes).to_string();
+                            info!("rigcat: not sent while transmitting: {what}");
                             set(status, |s| {
-                                s.set_note =
-                                    Some(format!("Not sent: {}", String::from_utf8_lossy(&f.bytes)))
+                                s.set_note = Some("Not changed: the radio is transmitting.".into())
                             });
+                            break;
+                        }
+                        if !matches!(
+                            f.kind,
+                            FrameKind::SetSetting | FrameKind::KeyCw | FrameKind::Unkey
+                        ) {
+                            warn!("rigcat: Set carries a {:?} frame; not sent", f.kind);
                             continue;
                         }
-                    }
-                    // Read it back: the radio doesn't acknowledge a set, so
-                    // the panel shows what the read says it took.
-                    if let Some(rb) = read_back(rig.proto.as_ref(), &f) {
-                        let res = rig.query(&rb);
-                        let strays = std::mem::take(&mut rig.strays);
-                        set(status, |s| {
-                            for r in strays.iter().chain(res.as_ref().ok()) {
-                                rig.proto.apply(s, r);
+                        match rig.send(&f) {
+                            Ok(()) => set(status, |s| s.set_note = None),
+                            Err(e) => {
+                                warn!("rigcat: set: {e:?}");
+                                set(status, |s| {
+                                    s.set_note = Some(format!(
+                                        "Not sent: {}",
+                                        String::from_utf8_lossy(&f.bytes)
+                                    ))
+                                });
+                                continue;
                             }
-                        });
+                        }
+                        // Read it back: the radio doesn't acknowledge a set, so
+                        // the panel shows what the read says it took.
+                        if let Some(rb) = read_back(rig.proto.as_ref(), &f) {
+                            let res = rig.query(&rb);
+                            let strays = std::mem::take(&mut rig.strays);
+                            set(status, |s| {
+                                for r in strays.iter().chain(res.as_ref().ok()) {
+                                    rig.proto.apply(s, r);
+                                }
+                            });
+                        }
                     }
                 }
-            }
-            Ok(Msg::TuneAlive) => {
-                if let Some(t) = &mut tune {
-                    t.alive = Instant::now();
+                Ok(Msg::TuneAlive) => {
+                    if let Some(t) = &mut tune {
+                        t.alive = Instant::now();
+                    }
                 }
+                Ok(Msg::TuneStop(why)) => {
+                    // Sent even with no TUNE of ours running: unkeying is never
+                    // the wrong thing to do when asked.
+                    unkey(&mut rig, status, why);
+                    tune = None;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
             }
-            Ok(Msg::TuneStop(why)) => {
-                // Sent even with no TUNE of ours running: unkeying is never
-                // the wrong thing to do when asked.
-                unkey(&mut rig, status, why);
-                tune = None;
-            }
-            Err(RecvTimeoutError::Timeout) => {}
+            msg = match rx.try_recv() {
+                Ok(m) => Ok(m),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
+            };
         }
 
         // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): the TUNE carrier
@@ -700,8 +726,14 @@ fn run<P: Read + Write>(
             && (!busy || *force)
         {
             let items = rig.proto.settings();
-            let end = (*at + SWEEP_STEP).min(items.len());
-            for item in &items[*at..end] {
+            let mut end = (*at + SWEEP_STEP).min(items.len());
+            for (i, item) in items[*at..end].iter().enumerate() {
+                // Something asked for (a TUNE, its stop, a click) goes first:
+                // the read takes up again next round where it left off.
+                if !rx.is_empty() {
+                    end = *at + i;
+                    break;
+                }
                 let f = rig.proto.read(item);
                 let key = rig.proto.reply_key(&f).unwrap_or_default();
                 let body = ask(&mut rig, &f);
@@ -944,6 +976,29 @@ mod tests {
         let sent = h.join().unwrap();
         assert_eq!(sent.iter().filter(|c| *c == "TX2;").count(), 2);
         assert_eq!(sent.last().map(String::as_str), Some("RX;"));
+    }
+
+    /// AJ3G: TUNE was slow to unkey. A stop behind a full queue of
+    /// keep-alives was handled one message a round, seconds later.
+    #[test]
+    fn a_stop_behind_a_queue_of_keep_alives_unkeys_at_once() {
+        let (tx, st, h) = running();
+        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Carrier)).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert!(st.lock().unwrap().tuning.is_some());
+        for _ in 0..15 {
+            tx.send(Msg::TuneAlive).unwrap();
+        }
+        tx.send(Msg::TuneStop(None)).unwrap();
+        let t = Instant::now();
+        while st.lock().unwrap().tuning.is_some() {
+            assert!(t.elapsed() < Duration::from_millis(400), "still keyed");
+            thread::sleep(Duration::from_millis(5));
+        }
+        drop(tx);
+        let sent = h.join().unwrap();
+        let key = sent.iter().position(|c| c == "TX2;").unwrap();
+        assert!(sent[key..].contains(&"RX;".to_string()));
     }
 
     #[test]

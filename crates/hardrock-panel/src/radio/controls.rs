@@ -685,7 +685,7 @@ fn panel_display(ui: &mut Ui, th: &RigTheme, prefs: &mut RadioPrefs) {
         caption(
             ui,
             th,
-            "In transmit the radio's own menu 73 TX BACKLIGHT, when off, keeps the receive colour.",
+            "The panel's LCD takes the TX colour whenever the radio transmits. Menu 73 TX BACKLIGHT is the radio's own screen only.",
         );
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {

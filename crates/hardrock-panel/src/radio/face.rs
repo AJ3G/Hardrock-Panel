@@ -133,9 +133,11 @@ fn wheel_steps(ui: &Ui, resp: &Response) -> i64 {
 }
 
 /// The LCD's backlight now: the receive colour, or in transmit the transmit
-/// colour unless the radio's own menu 73 TX BACKLIGHT is off.
+/// colour. The panel's own choice, whatever the radio's menu 73 TX BACKLIGHT
+/// says for its own screen (AJ3G: set to red, it stayed blue with menu 73
+/// off).
 pub(crate) fn backlight(f: &Face<'_>, prefs: &RadioPrefs) -> Color32 {
-    let tx = f.s.transmitting() && f.s.value("BH") != Some("0");
+    let tx = f.s.transmitting();
     f.th.backlight(if tx { prefs.tx_light } else { prefs.rx_light })
 }
 

@@ -164,6 +164,8 @@ struct App {
     tone_error: Option<String>,
     /// Since when the radio has been seen transmitting.
     rig_keyed_since: Option<Instant>,
+    /// What says the station is transmitting, as last logged, and since when.
+    tx_sources: (String, Option<Instant>),
     render_state: Option<RenderState>,
     scope: scope::Scope,
     rx: rx::Rx,
@@ -255,6 +257,7 @@ impl App {
             tone: audio::Tone::default(),
             sounds: audio::output_devices(),
             tone_asked: None,
+            tx_sources: (String::new(), None),
             tone_error: None,
             rig_keyed_since: None,
         }
@@ -363,6 +366,26 @@ impl App {
             Some(why) => link.tune_stop(Some(why)),
             None => link.tune_alive(),
         }
+    }
+
+    /// Log each change in what says the station is transmitting, and how long
+    /// after the first the last let go: what holds the scope after an over.
+    fn log_tx_sources(&mut self, rig: Option<&RigStatus>, amp: &AmpStatus) {
+        let now = tx_sources(rig, amp);
+        if now == self.tx_sources.0 {
+            return;
+        }
+        let since = self.tx_sources.1.get_or_insert_with(Instant::now).elapsed();
+        if now.is_empty() {
+            tracing::info!(
+                "transmit: receive again {:.1} s after the first sign",
+                since.as_secs_f32()
+            );
+            self.tx_sources.1 = None;
+        } else {
+            tracing::info!("transmit: {now} (at {:.1} s)", since.as_secs_f32());
+        }
+        self.tx_sources.0 = now;
     }
 
     /// Act on the TUNE strip.
@@ -902,6 +925,7 @@ impl eframe::App for App {
         self.sync_xvtr(ctx, xvtr);
         let transmitting =
             rig.as_ref().is_some_and(|r| r.connected && r.transmitting()) || amp_keyed(&amp_raw);
+        self.log_tx_sources(rig.as_ref(), &amp_raw);
         self.run_receiver(ctx, &amp_raw, rig.as_ref(), transmitting, xvtr);
         self.keep_tune(&amp_raw, rig.as_ref());
         let ptt_missing = self.ptt_missing(&amp_raw, rig.as_ref());
@@ -1240,6 +1264,37 @@ fn tx_why(rig: Option<&RigStatus>, amp: &AmpStatus) -> String {
 fn amp_keyed(amp: &AmpStatus) -> bool {
     amp.connected
         && (amp.transmitting == Some(true) || amp.readings.as_ref().is_some_and(rf_present))
+}
+
+/// Everything that says the station is transmitting, in a few words: the
+/// scope holds and the controls lock while any of them does.
+fn tx_sources(rig: Option<&RigStatus>, amp: &AmpStatus) -> String {
+    let mut v = Vec::new();
+    if let Some(r) = rig.filter(|r| r.connected) {
+        if r.tuning.is_some() {
+            v.push("panel TUNE".to_string());
+        }
+        if let Some(w) = r.fwd.filter(|p| p.valid && p.w > 0.0) {
+            v.push(format!("radio FP {:.1} W", w.w));
+        }
+        if let Some(t) = r.tx_state.filter(|t| *t != 0) {
+            v.push(format!("radio GI {t}"));
+        }
+    }
+    if amp.connected {
+        if amp.transmitting == Some(true) {
+            v.push("amp TX light".into());
+        }
+        if let Some(a) = amp.readings {
+            if a.drive_w >= 0.1 {
+                v.push(format!("amp DRV {:.1} W", a.drive_w));
+            }
+            if a.fwd_w >= 1.0 {
+                v.push(format!("amp FWD {:.0} W", a.fwd_w));
+            }
+        }
+    }
+    v.join(", ")
 }
 
 /// The amplifier's drive limit while it is in line (PTT), or `None` in OFF.
