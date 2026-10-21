@@ -600,6 +600,8 @@ impl App {
             at,
             self.outside.wsjtx.as_ref(),
         );
+        // The scope's slot lines follow the decoder's slots (decision 51).
+        self.scope.decode_slots(self.decode.slots());
     }
 
     /// Make a change an outside program asked for, as the panel's own

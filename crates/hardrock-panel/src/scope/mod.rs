@@ -62,6 +62,7 @@ pub mod pointer;
 mod rows;
 pub mod scf;
 pub mod settings;
+pub mod slotlines;
 pub mod view;
 
 use std::collections::VecDeque;
@@ -74,6 +75,7 @@ use sdr::{SpectrumFrame, ZoomRequest};
 
 pub use digimodes::Digi;
 pub use settings::ScopeSettings;
+pub use slotlines::DecodeSlots;
 
 use gpu_run::{Ask, GpuRun, TraceGeom};
 use markers::{Exact, ExactPeak, Markers};
@@ -273,6 +275,8 @@ pub struct Scope {
     /// line until a time.
     resyncs_told: u32,
     notice: Option<(String, f64)>,
+    /// DECODE's runs, for the slot lines.
+    slot_lines: slotlines::SlotLines,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -342,6 +346,7 @@ impl Scope {
             samples_seen: 0,
             resyncs_told: 0,
             notice: None,
+            slot_lines: slotlines::SlotLines::default(),
         }
     }
 
@@ -446,6 +451,12 @@ impl Scope {
     /// frame the scope is drawn.
     pub fn scf_tap(&mut self, set_tap: &mut dyn FnMut(Option<scf::IqSink>)) {
         self.scf.run(self.settings.top == settings::TopView::Scf, set_tap);
+    }
+
+    /// Each frame: what DECODE is doing with slots (`None` when it is not
+    /// running a mode that has them), for the slot lines.
+    pub fn decode_slots(&mut self, slots: Option<DecodeSlots>) {
+        self.slot_lines.feed(slots, utc_now());
     }
 
     fn map(&self) -> FreqMap {

@@ -278,6 +278,10 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
             "The waterfall's levels follow the noise floor, apart from the spectrum's",
         );
         chrome::checkbox(ui, &mut sc.settings.wf_time, "UTC ticks");
+        chrome::checkbox(ui, &mut sc.settings.slot_lines, "Slot lines").on_hover_text(
+            "While DECODE runs a slotted mode (FT8, FT4, WSPR…): a green line where each \
+             slot's capture starts and a red one where it ends and the decoder takes it",
+        );
         ui.add(
             egui::Slider::new(&mut sc.settings.wf_contrast, 0.25..=4.0)
                 .logarithmic(true)

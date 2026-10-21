@@ -371,6 +371,14 @@ impl Decode {
         self.started_utc = None;
     }
 
+    /// The decoder's slots for the scope's slot lines (decision 51): the
+    /// mode's period and the first slot it takes whole, while a mode with
+    /// slots runs; `None` otherwise (keyboard modes, pictures, links).
+    pub(crate) fn slots(&self) -> Option<crate::scope::DecodeSlots> {
+        let (kind, _) = self.worker.as_ref()?;
+        slots_of(*kind, self.started_utc?)
+    }
+
     fn clear(&mut self) {
         self.rows.clear();
         self.text.clear();
@@ -757,6 +765,17 @@ fn send_wsjtx(u: &WsjtxUdp, mode: WsjtMode, d: &decoders::WsjtDecode, rf_hz: f64
 }
 
 /// `hh:mm:ss` UTC.
+/// A mode's slots, its decoder having started hearing at `started_utc`: the
+/// period, and the first slot the decoder takes whole, from the decoder's
+/// own timing ([`WsjtConfig::first_slot`]). `None` for a mode without slots.
+fn slots_of(kind: Kind, started_utc: f64) -> Option<crate::scope::DecodeSlots> {
+    let cfg = WsjtConfig::new(kind.wsjt()?);
+    Some(crate::scope::DecodeSlots {
+        period_s: cfg.mode.period_s(),
+        first_utc: cfg.first_slot(started_utc),
+    })
+}
+
 pub(crate) fn hms(utc: f64) -> String {
     let s = utc.rem_euclid(86_400.0) as u64;
     format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
@@ -1252,6 +1271,30 @@ mod tests {
         // The header's columns line up with the rows'.
         let h = header_text(Family::Wsjt, &mi);
         assert_eq!(h.find("Message"), t.find("K1ABC").map(|b| t[..b].chars().count()));
+    }
+
+    #[test]
+    fn slotted_modes_give_the_scope_their_decoders_slot_timing() {
+        // Started 0.4 s into the slot at 22:34:00 (an even minute) + 90 s.
+        let b = 1_700_000_040.0 + 90.0;
+        let t = b + 0.4;
+        let at = |k| slots_of(k, t).map(|s| (s.period_s, s.first_utc - b));
+        assert_eq!(at(Kind::Ft8), Some((15.0, 0.0)));
+        assert_eq!(at(Kind::Ft4), Some((7.5, 0.0)));
+        assert_eq!(at(Kind::Msk144), Some((15.0, 0.0)));
+        // Q65-30A joined 0.4 s in; JT65, JT9 and FST4-60 joined 30.4 s in, too
+        // late: their next minute.
+        assert_eq!(at(Kind::Q65), Some((30.0, 0.0)));
+        assert_eq!(at(Kind::Jt65), Some((60.0, 30.0)));
+        assert_eq!(at(Kind::Jt9), Some((60.0, 30.0)));
+        assert_eq!(at(Kind::Fst4), Some((60.0, 30.0)));
+        // WSPR: 90.4 s into its two minutes, so the next even minute.
+        assert_eq!(at(Kind::Wspr), Some((120.0, 30.0)));
+        // No slots, no lines.
+        for k in [Kind::Psk31, Kind::Rtty, Kind::Navtex, Kind::Olivia, Kind::Thor, Kind::Sstv] {
+            assert_eq!(slots_of(k, t), None, "{k:?}");
+        }
+        assert_eq!(slots_of(Kind::Hfdl, t), None);
     }
 
     #[test]

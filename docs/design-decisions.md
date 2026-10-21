@@ -609,3 +609,21 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 **Screens.** `screens/edges-before.png`, `screens/edges-after.png`, `screens/scope-docked-resized.png` beside this project's notes.
 
 **Where.** `chrome.rs` (`window_frame`, `window_edge`), `scopewin.rs`, `radio.rs` (`radio_window`), `main.rs` (`settings_window`).
+
+## 51. Slot lines on the waterfall: green where a capture starts, red where it ends (21 Oct 2026)
+
+**Why.** AJ3G: "Inside of Scope when Decode window start/stops. When its starts draw a Green Line across the Waterfall, and when it ends draw a RED line across Waterfall. Look at WJSTX approach, its close." WSJT-X's wide graph draws one line per T/R period at its boundary, with the UTC beside it, so a signal can be read against the slot it was sent in.
+
+**What the panel does.**
+- **When.** While DECODE runs a mode with slots (FT8, FT4, WSPR, JT65, JT9, FST4, Q65, MSK144). Keyboard modes, pictures and the I/Q links have no slots and get no lines.
+- **The decoder's own timing.** A line is drawn where the decoder's slot recorder starts and stops a capture, not where the mode is thought to: slots start on whole periods from 00:00 UTC (FT8 15 s, FT4 7.5 s, WSPR 2 min from the even minute, JT65/JT9/FST4-60 1 min, Q65-30A 30 s, MSK144 15 s), and a capture ends a whole period after it starts, when the recorder has the slot's last sample and hands it to the decoder (`WsjtConfig::capture`). WSPR's 110.6 s signal sits inside its 120 s capture; the red line is at 120 s, where the decoder takes the audio. The first slot is the one the decoder joined, if it joined within `max_late_s` (1 s; MSK144 any time), or else the next (`WsjtConfig::first_slot`), so the first green line is on the first slot actually decoded.
+- **The look.** A thin line the waterfall's full width, green (`START_INK`) just above a boundary where a capture starts and red (`END_INK`) just below it where one ends; decoding slot after slot, each boundary has the pair. Each is two pixels with one pixel of waterfall between: one pixel of each side by side read as a single yellow line on screen. The boundary's UTC is at the left, in the line's colour on a dimmed backing, where the UTC ticks are; a UTC tick that would sit on a slot label is left out. Labels closer than 12 pt are thinned; the lines are not.
+- **Placement.** By each waterfall row's own time, as the UTC ticks (which now use the same code: `slotlines::age_at`, `row_y`). So the lines scroll with the rows at every SPEED, stand still when the waterfall is paused, and over a transmission, when no rows are laid down, a boundary in the gap sits at the gap's edge.
+- **After DECODE stops or changes mode** the lines already drawn stay on their rows: the scope remembers the decoder's last 32 runs, each from its first slot to when it stopped. A slot cut short by a stop gets its green line and no red one.
+- **SPEED row:** "Slot lines", on by default, saved with the scope's settings.
+
+**Red.** Red is otherwise for warnings only (AJ3G's rule). These lines are the second named exception, after the waterfall palettes (`scope/palette.rs`): AJ3G asked for green and red by name, and here they mean "capture starts" and "capture ends", as WSJT-X users read them, not a warning.
+
+**Screens.** `screens/slot-lines.png`, demo band, DECODE on FT8.
+
+**Where.** `decoders/src/worker.rs` (`WsjtConfig::first_slot`, `capture`), `hardrock-panel/src/decode.rs` (`Decode::slots`, `slots_of`), `scope/slotlines.rs`, `scope/paint.rs` (`paint_waterfall`), `scope/settings.rs`, `scope/controls.rs`, `main.rs`.
