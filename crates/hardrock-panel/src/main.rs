@@ -642,6 +642,12 @@ impl App {
             mode: self.rx.mode,
             passband: self.rx.passband,
             transmitting,
+            // The display holds on the radio's own word when it has one;
+            // the amplifier's drive reading lingers after the radio unkeys.
+            on_air: match rig.filter(|r| r.connected) {
+                Some(r) => r.transmitting(),
+                None => transmitting,
+            },
         };
         let args = scopewin::Args {
             rx: &self.rx,

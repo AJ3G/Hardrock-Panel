@@ -182,6 +182,7 @@ impl eframe::App for Demo {
             mode: self.mode,
             passband: self.passband,
             transmitting: self.transmitting,
+            on_air: self.transmitting,
         };
         let out = egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))

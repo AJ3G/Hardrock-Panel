@@ -10,7 +10,7 @@
 //!
 //! // Every frame:
 //! let snap = pipeline.snapshot();
-//! let out = scope.ui(ui, &snap, ScopeRig { rx_hz, mode, passband, transmitting });
+//! let out = scope.ui(ui, &snap, ScopeRig { rx_hz, mode, passband, transmitting, on_air });
 //! for c in out.commands { pipeline.send(c) }          // FFT size, window, zoom FFT…
 //! if let Some(hz) = out.tune_to { /* receiver to hz (the radio's own frequency) */ }
 //! if let Some(pb) = out.passband { /* receiver passband */ }
@@ -97,6 +97,12 @@ pub struct ScopeRig {
     pub passband: (f32, f32),
     /// The radio is transmitting: the scope tunes nothing (interlock 9).
     pub transmitting: bool,
+    /// The radio itself says it is on the air: the display is held over it
+    /// (decision 40). Narrower than `transmitting`, which also waits for the
+    /// amplifier's drive reading to fall to nothing; that reading decays over
+    /// most of a second after the radio has unkeyed (AJ3G's log, 21 Oct
+    /// 2026), and held the scope that much longer.
+    pub on_air: bool,
 }
 
 /// What the operator asked for on the scope this frame.
@@ -154,7 +160,7 @@ pub const PIPELINE_HISTORY: usize = 16;
 /// How long after the radio says it has stopped transmitting the display
 /// stays held: its receiver's front end and AGC settle, and the read-back of
 /// the dial comes home, in about that.
-pub const TX_GUARD_SECS: f64 = 0.5;
+pub const TX_GUARD_SECS: f64 = 0.3;
 /// The longest the CPU spectrum is waited for after asking it to start
 /// again (decision 40).
 const RESET_WAIT_SECS: f64 = 2.0;
@@ -469,7 +475,7 @@ impl Scope {
         let now = ui.input(|i| i.time);
         let before = self.settings.clone();
 
-        self.hold_over_tx(snap, rig.transmitting, now);
+        self.hold_over_tx(snap, rig.on_air, now);
         let span = self.span(snap);
         let cur_view = view::view(span, self.want_view);
         let scf_on = self.settings.top == settings::TopView::Scf;
@@ -879,6 +885,7 @@ mod tests {
             mode: sdr::Mode::Usb,
             passband: (100.0, 2900.0),
             transmitting: true,
+            on_air: true,
         };
         let mut out = ScopeOut::default();
         sc.follow(span, &rig, 0.0, &mut out);
@@ -994,6 +1001,7 @@ mod tests {
                 mode: sdr::Mode::Usb,
                 passband: (100.0, 2900.0),
                 transmitting: tx,
+                on_air: tx,
             };
             let input = egui::RawInput {
                 time: Some(now),
@@ -1083,6 +1091,7 @@ mod tests {
                 mode: sdr::Mode::Usb,
                 passband: (100.0, 2900.0),
                 transmitting: tx,
+                on_air: tx,
             };
             let input = egui::RawInput {
                 time: Some(now),

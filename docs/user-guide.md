@@ -392,8 +392,8 @@ alone, and the top bar says so. Zoom, markers and the display still work.
 
 The display is also **held** while the radio transmits, as SDR Console does:
 the spectrum, waterfall and 3D surface keep what they showed before the over,
-and the top bar reads *IQ · HELD · TX*. Half a second after the radio says it
-has stopped, the scope starts again from what the receiver hears, with the
+and the top bar reads *IQ · HELD · TX*. A third of a second after the radio
+says it has stopped, the scope starts again from what the receiver hears, with the
 averages and peak hold started afresh, so nothing of your own transmission
 (or of whatever the radio's I/Q did meanwhile) lingers. If the ELAD's I/Q stays
 silent for 3 seconds once you are back on receive, the panel opens it again by
