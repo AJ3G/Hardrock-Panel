@@ -24,6 +24,8 @@ const SETTINGS_POLL: Duration = Duration::from_secs(10);
 /// first rounds after an over are the ones that see the radio back in
 /// receive, which everything held over the transmission waits for.
 const SETTINGS_AFTER_TX: Duration = Duration::from_secs(2);
+/// Settings read each round while a settings read is under way.
+const SWEEP_STEP: usize = 8;
 /// How long to wait for an answer.
 const ANSWER: Duration = Duration::from_millis(300);
 /// Missed answers in a row before the link is called lost and reopened.
@@ -477,6 +479,9 @@ fn run<P: Read + Write>(
     let mut next_dial = Instant::now();
     let mut next_settings = Instant::now();
     let (mut settings_once, mut asked) = (false, false);
+    // A settings read under way: the next item, the rows so far, and
+    // whether it goes on while the radio transmits.
+    let mut sweep: Option<(usize, Vec<SettingRow>, bool)> = None;
     let mut tune: Option<TuneState> = None;
     let mut last_tx: Option<Instant> = None;
     loop {
@@ -671,22 +676,32 @@ fn run<P: Read + Write>(
                 ask(&mut rig, &f);
             }
         }
-        // The settings take a dozen round trips. Read at once when the port
-        // opens and when asked; the read every few seconds waits while the
-        // radio transmits, when the power readings matter more, and for
+        // The settings are some seventy round trips. Read at once when the
+        // port opens and when asked; the read every few seconds waits while
+        // the radio transmits, when the power readings matter more, and for
         // [`SETTINGS_AFTER_TX`] after, so it never stands between the end of
-        // an over and the reads that see it.
+        // an over and the reads that see it. A few at a time each round, so
+        // a click (a band change, a mode) waits for a few reads at most
+        // rather than the whole list.
         if tune.is_some() || status.lock().unwrap_or_else(|e| e.into_inner()).transmitting() {
             last_tx = Some(Instant::now());
         }
         let busy = last_tx.is_some_and(|t| t.elapsed() < SETTINGS_AFTER_TX);
-        if Instant::now() >= next_settings && (!busy || !settings_once || asked) {
+        if sweep.is_none() && Instant::now() >= next_settings && (!busy || !settings_once || asked)
+        {
+            // The first read, and one asked for, go on even while busy.
+            let force = !settings_once || asked;
             settings_once = true;
             asked = false;
             next_settings = Instant::now() + SETTINGS_POLL;
+            sweep = Some((0, Vec::new(), force));
+        }
+        if let Some((at, rows, force)) = sweep.as_mut()
+            && (!busy || *force)
+        {
             let items = rig.proto.settings();
-            let mut rows = Vec::with_capacity(items.len());
-            for item in items {
+            let end = (*at + SWEEP_STEP).min(items.len());
+            for item in &items[*at..end] {
                 let f = rig.proto.read(item);
                 let key = rig.proto.reply_key(&f).unwrap_or_default();
                 let body = ask(&mut rig, &f);
@@ -698,10 +713,15 @@ fn run<P: Read + Write>(
                 };
                 rows.push(SettingRow { item: *item, value, raw });
             }
-            set(status, |s| {
-                s.settings = rows;
-                s.settings_read = Some(Instant::now());
-            });
+            *at = end;
+            if end >= items.len() {
+                let rows = std::mem::take(rows);
+                sweep = None;
+                set(status, |s| {
+                    s.settings = rows;
+                    s.settings_read = Some(Instant::now());
+                });
+            }
         }
         if answered {
             misses = 0;
@@ -989,6 +1009,27 @@ mod tests {
         drop(tx);
         let sent = h.join().unwrap();
         assert!(!sent.iter().any(|f| f.starts_with("FA0")), "{sent:?}");
+    }
+
+    /// A click doesn't wait behind the settings' seventy reads: it goes out
+    /// within a few of them.
+    #[test]
+    fn a_set_goes_out_during_the_settings_read() {
+        let d = FdmDuo::default();
+        let (tx, _st, h) = running_on(FakeDuo { quiet: true, ..Default::default() });
+        // The first settings read starts after the first round's wait.
+        thread::sleep(Duration::from_millis(400));
+        tx.send(Msg::Set(vec![d.set_freq(crate::Vfo::A, 7_074_000).unwrap()])).unwrap();
+        thread::sleep(Duration::from_millis(4000));
+        drop(tx);
+        let sent = h.join().unwrap();
+        let set = sent.iter().position(|f| f == "FA00007074000;").expect("sent");
+        let last = sent.iter().rposition(|f| f == "RI;").unwrap_or_else(|| panic!("{sent:?}"));
+        assert!(set < last, "the set waited for the whole settings read: {sent:?}");
+        let first = sent.iter().position(|f| f == "DT;").expect("the settings read started");
+        assert!(first < set, "{sent:?}");
+        let reads = sent[first..set].iter().filter(|f| f.ends_with(';') && f.len() <= 5).count();
+        assert!(reads <= 3 * SWEEP_STEP + 12, "{reads} reads before the set: {sent:?}");
     }
 
     /// The end of an over is seen within a round of power readings, not at
