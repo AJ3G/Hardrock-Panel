@@ -19,6 +19,11 @@ const POLL: Duration = Duration::from_millis(150);
 const DIAL_POLL: Duration = Duration::from_secs(1);
 /// How often the settings are read again on their own, between transmissions.
 const SETTINGS_POLL: Duration = Duration::from_secs(10);
+/// How long after the radio was last seen transmitting the settings wait
+/// before their own read. That read is a dozen round trips or more, and the
+/// first rounds after an over are the ones that see the radio back in
+/// receive, which everything held over the transmission waits for.
+const SETTINGS_AFTER_TX: Duration = Duration::from_secs(2);
 /// How long to wait for an answer.
 const ANSWER: Duration = Duration::from_millis(300);
 /// Missed answers in a row before the link is called lost and reopened.
@@ -473,6 +478,7 @@ fn run<P: Read + Write>(
     let mut next_settings = Instant::now();
     let (mut settings_once, mut asked) = (false, false);
     let mut tune: Option<TuneState> = None;
+    let mut last_tx: Option<Instant> = None;
     loop {
         let msg = rx.recv_timeout(if tune.is_some() { Duration::from_millis(50) } else { POLL });
         match msg {
@@ -647,7 +653,13 @@ fn run<P: Read + Write>(
                 });
             }
         }
-        if Instant::now() >= next_dial {
+        // While the radio says it transmits, the dial (with `GI`, which says
+        // receive or transmit) is read every round rather than once a second,
+        // so the end of an over is seen within one round instead of up to a
+        // second later: the scope, held over the transmission, waits for it.
+        let on_air =
+            status.lock().unwrap_or_else(|e| e.into_inner()).tx_state.is_some_and(|t| t != 0);
+        if Instant::now() >= next_dial || on_air {
             next_dial = Instant::now() + DIAL_POLL;
             for f in rig.proto.dial() {
                 ask(&mut rig, &f);
@@ -655,9 +667,14 @@ fn run<P: Read + Write>(
         }
         // The settings take a dozen round trips. Read at once when the port
         // opens and when asked; the read every few seconds waits while the
-        // radio transmits, when the power readings matter more.
-        let keyed = status.lock().unwrap_or_else(|e| e.into_inner()).keyed();
-        if Instant::now() >= next_settings && (!keyed || !settings_once || asked) {
+        // radio transmits, when the power readings matter more, and for
+        // [`SETTINGS_AFTER_TX`] after, so it never stands between the end of
+        // an over and the reads that see it.
+        if tune.is_some() || status.lock().unwrap_or_else(|e| e.into_inner()).transmitting() {
+            last_tx = Some(Instant::now());
+        }
+        let busy = last_tx.is_some_and(|t| t.elapsed() < SETTINGS_AFTER_TX);
+        if Instant::now() >= next_settings && (!busy || !settings_once || asked) {
             settings_once = true;
             asked = false;
             next_settings = Instant::now() + SETTINGS_POLL;
@@ -714,6 +731,9 @@ mod tests {
         on_air: bool,
         /// Receiving: no trusted forward power.
         quiet: bool,
+        /// When set, `GI` says transmitting while this is true (an over that
+        /// ends part way through a test).
+        air: Option<Arc<std::sync::atomic::AtomicBool>>,
     }
 
     impl Write for FakeDuo {
@@ -731,7 +751,15 @@ mod tests {
                     "MD;" => Some("MD2;"),
                     "TI;" if self.mic => Some("TI0;"),
                     "TI;" => Some("TI1;"),
-                    "GI;" if self.on_air => Some("GI0000012000000;"),
+                    "GI;"
+                        if self.on_air
+                            || self
+                                .air
+                                .as_ref()
+                                .is_some_and(|a| a.load(std::sync::atomic::Ordering::Relaxed)) =>
+                    {
+                        Some("GI0000012000000;")
+                    }
                     "GI;" => Some("GI0000002000000;"),
                     c if c.starts_with("FA0") || c.starts_with("MD") && c.len() == 4 => None,
                     c if c.starts_with("TP") || ["TX2;", "TX;", "TI1;", "RX;"].contains(&c) => None,
@@ -955,5 +983,36 @@ mod tests {
         drop(tx);
         let sent = h.join().unwrap();
         assert!(!sent.iter().any(|f| f.starts_with("FA0")), "{sent:?}");
+    }
+
+    /// The end of an over is seen within a round of power readings, not at
+    /// the next once-a-second dial read: the radio's `GI` is read every
+    /// round while it says it transmits, and the settings' own read waits
+    /// until a while after the over.
+    #[test]
+    fn the_end_of_an_over_is_seen_within_a_round() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let air = Arc::new(AtomicBool::new(true));
+        let duo = FakeDuo { quiet: true, air: Some(air.clone()), ..Default::default() };
+        let (tx, st, h) = running_on(duo);
+        // Long enough for the first settings read and a dial read to pass.
+        thread::sleep(Duration::from_millis(1300));
+        assert!(st.lock().unwrap().transmitting(), "GI says TX");
+        // Let the once-a-second dial read go by, then unkey just after it:
+        // the worst case before.
+        thread::sleep(Duration::from_millis(150));
+        air.store(false, Ordering::Relaxed);
+        let t = Instant::now();
+        while st.lock().unwrap().transmitting() && t.elapsed() < Duration::from_secs(3) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let took = t.elapsed();
+        assert!(!st.lock().unwrap().transmitting(), "still TX after {took:?}");
+        assert!(took < Duration::from_millis(400), "the end of the over took {took:?} to see");
+        drop(tx);
+        let sent = h.join().unwrap();
+        let gi: Vec<usize> =
+            sent.iter().enumerate().filter(|(_, f)| *f == "GI;").map(|(i, _)| i).collect();
+        assert!(gi.len() > 5, "GI read every round while on air: {}", gi.len());
     }
 }

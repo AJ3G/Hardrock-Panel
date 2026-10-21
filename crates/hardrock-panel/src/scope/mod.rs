@@ -227,6 +227,9 @@ pub struct Scope {
     history_sent: bool,
     zoom_sent: Option<Option<ZoomRequest>>,
     recentre_asked: Option<(f64, f64)>,
+    /// The receiver the zoomed view last followed: it follows again only
+    /// when the receiver moves from here, never after a pan or a zoom.
+    followed_rx: Option<f64>,
     cursor: String,
     /// When the newest waterfall row came, and the time between rows lately,
     /// for the smooth scroll.
@@ -312,6 +315,7 @@ impl Scope {
             history_sent: false,
             zoom_sent: None,
             recentre_asked: None,
+            followed_rx: None,
             cursor: String::new(),
             row_at: 0.0,
             row_interval: 1.0 / 60.0,
@@ -688,11 +692,15 @@ impl Scope {
                 }
             }
         }
-        let v = view::view(span, self.want_view);
-        if self.drag.is_none()
-            && let Some(k) = view::keep_in_view(span, v, rig.rx_hz)
-        {
-            self.want_view = Some(k);
+        // Follow only a receiver that moved (tuning, a mode snap, a click to
+        // tune); a view panned or zoomed away from it stays put. A move during
+        // a drag is followed once the button is up.
+        if self.drag.is_none() {
+            let v = view::view(span, self.want_view);
+            if let Some(k) = view::follow_rx(span, v, rig.rx_hz, self.followed_rx) {
+                self.want_view = Some(k);
+            }
+            self.followed_rx = Some(rig.rx_hz);
         }
     }
 
@@ -1017,5 +1025,88 @@ mod tests {
         assert!(c_now <= ceil.max(-40.0), "FIT dragged up to {c_now} (from {ceil})");
         assert!(f_now < f.noise_dbm, "FIT floor {f_now} over the noise {}", f.noise_dbm);
         p.send(Command::Stop);
+    }
+
+    /// How soon after the radio says it is back in receive the CPU scope has
+    /// a fresh spectrum and a fresh waterfall row (AJ3G's next-build item 6:
+    /// timed modes want it inside a second). Measured on a paced synthetic
+    /// stream keyed from 1 to 2 s, repainted every 15 ms.
+    #[test]
+    fn after_an_over_fresh_frames_and_rows_come_within_a_second() {
+        use sdr::{
+            Command, Pipeline, PipelineConfig, SynthSignal, SyntheticSource, TxEffects, TxSim,
+        };
+        use std::sync::atomic::Ordering as O;
+        let (rate, centre) = (192_000.0, 14.2e6);
+        let src =
+            SyntheticSource::new(rate, centre, -80.0, vec![SynthSignal::carrier(20e3, -50.0)])
+                .paced();
+        let fx = TxEffects { strong_dbfs: Some(0.0), ..Default::default() };
+        let sim = TxSim::new(src, 1.0, 2.0, fx);
+        let keyed = sim.keyed();
+        let settings = ScopeSettings {
+            fft_size: 16_384,
+            fps: 30.0,
+            avg: true,
+            peak: true,
+            fft_gpu: false,
+            ..ScopeSettings::default()
+        };
+        let mut sc = Scope::new(None, settings);
+        let p = Pipeline::spawn(
+            Box::new(sim),
+            PipelineConfig { spectrum: sc.spectrum_config(0.0), history: 16, ..Default::default() },
+        );
+        let ctx = egui::Context::default();
+        let start = std::time::Instant::now();
+        let (mut seen_tx, mut rx_at) = (false, None);
+        let (mut held, mut frame_at, mut row_at) = ((None, 0), None, None);
+        while start.elapsed().as_secs_f64() < 4.0 && row_at.is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            let now = start.elapsed().as_secs_f64();
+            let tx = keyed.load(O::Relaxed);
+            seen_tx |= tx;
+            let snap = p.snapshot();
+            let rig = ScopeRig {
+                rx_hz: centre + 20e3,
+                mode: sdr::Mode::Usb,
+                passband: (100.0, 2900.0),
+                transmitting: tx,
+            };
+            let input = egui::RawInput {
+                time: Some(now),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut out = None;
+            let mut full = ctx.run_ui(input, |ui| out = Some(sc.ui(ui, &snap, rig)));
+            full.textures_delta.clear();
+            for c in out.unwrap().commands {
+                p.send(c);
+            }
+            let seq = sc.main.as_ref().map(|f| f.seq);
+            if tx {
+                held = (seq, sc.rows.wf_head());
+            } else if seen_tx {
+                let t0 = *rx_at.get_or_insert(now);
+                if frame_at.is_none() && seq != held.0 {
+                    frame_at = Some(now - t0);
+                }
+                if row_at.is_none() && sc.rows.wf_head() != held.1 {
+                    row_at = Some(now - t0);
+                }
+            }
+        }
+        p.send(Command::Stop);
+        assert!(seen_tx, "the over happened");
+        let frame = frame_at.expect("a fresh frame after the over");
+        let row = row_at.expect("a fresh waterfall row after the over");
+        eprintln!("after the over: fresh spectrum in {frame:.3} s, waterfall row in {row:.3} s");
+        assert!(frame >= TX_GUARD_SECS - 0.05, "nothing fresh inside the guard: {frame}");
+        assert!(frame < 1.0, "fresh spectrum {frame} s after the over");
+        assert!(row < 1.0, "fresh waterfall row {row} s after the over");
     }
 }

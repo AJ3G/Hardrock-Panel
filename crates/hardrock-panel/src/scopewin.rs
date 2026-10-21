@@ -162,7 +162,18 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
         caption(ui, "· Sound");
         ui.add(egui::Slider::new(&mut s.volume, 0.0..=1.0).show_value(false))
             .on_hover_text("The receiver's volume");
-        chrome::checkbox(ui, &mut s.muted, "Mute");
+        // A MUTE key beside the slider, lit in the selected-chip blue while
+        // muted (a neutral state, so not yellow or red).
+        if chrome::chip(ui, s.muted, "MUTE")
+            .on_hover_text(if s.muted {
+                "The receiver is muted: click for sound again"
+            } else {
+                "Mute the receiver's sound"
+            })
+            .clicked()
+        {
+            s.muted = !s.muted;
+        }
         match (rx.audio_state(), &rx.audio_error) {
             (_, Some(e)) => {
                 ui.label(RichText::new(e).size(11.5).color(theme::ALERT()));

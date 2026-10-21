@@ -463,3 +463,14 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 
 **Where.** `scope/mod.rs` (`TxHold`, `hold_over_tx`, `span`), `scope/gpu_run.rs` (`resync`, `stalled`, a held epoch), `scope/shaders/spectrum.wgsl` (`finite`), `scope/paint.rs` (the top bar and status line), `rx.rs` (`watch_stream`, `DIAL_SETTLE`), `sdr/src/pipeline.rs` (`sanitise`, `ResetSpectrum`), `sdr/src/spectrum.rs`, `sdr/src/source.rs` (`TxSim`, `plausible_dial`), `examples/scope_demo.rs` (`--tx`), `tools/fake_duo.py` (`--key-at`, `--unkey-at`).
 
+
+## 41. A zoom follows the receiver only when it moves; a mode snap keeps the centre; the end of an over is seen within a round
+
+**Decided:** AJ3G, 21 Oct 2026, from testing build 3dd6b9d (NEXT-BUILD.md items 3, 4, 6 and 10).
+
+- **Zoom (item 3).** A zoomed view pans back to the receiver only when the receiver itself has moved since the view last followed it (tuning on the radio or the panel, a DECODE snap, a click to tune; `view::follow_rx`, `Scope::followed_rx`). A view the operator panned or zoomed (ctrl + wheel at the pointer) away from the receiver stays where it was put. Before, it jumped back on every repaint the receiver was off screen. A move during a drag is followed once the button is up.
+- **DECODE snap (item 4).** A mode click moves only the receiver when the mode's dial is already inside 0.45 of the span from the centre, the same rule as the scope's own recentre (`view::keeps_centre`, decision 22's fixed centre); the centre moves only when the dial is off towards an edge or on another band. Old waterfall rows are drawn where they were taken, so moving the centre left a strip they never covered. Nothing retunes while transmitting, as before (interlocks #9 and #10).
+- **After an over (item 6).** The radio link read `GI` (receive or transmit) once a second, and the settings' own read (a dozen round trips or more), deferred during the over, ran straight after it, so the panel could go on believing the radio transmitted for a second or more after it had stopped, and the scope, held over the transmission, waited that long. Now `GI` is read with every round of power readings (150 ms) while the radio says it transmits, and the settings wait until two seconds after the over (`SETTINGS_AFTER_TX`). On the pretend DUO in the tests the end of an over was seen after 0.8 s before and 0.06 s after. The scope itself takes 0.66 s from the end of an over to a fresh spectrum and waterfall row (the half-second guard of decision 40 and one FFT), measured on the CPU spectrum with a paced synthetic stream.
+- **MUTE (item 10).** A MUTE chip beside the SOUND slider in place of the round checkbox, lit in the selected-chip blue while muted (a neutral state, so not yellow or red).
+
+**Where.** `scope/view.rs` (`follow_rx`, `keeps_centre`), `scope/mod.rs` (`follow`, the timing test), `main.rs` (the DECODE snap), `scopewin.rs` (MUTE), `crates/rigcat/src/link.rs` (`run`, `SETTINGS_AFTER_TX`).

@@ -111,6 +111,15 @@ pub fn needs_recentre(span: Span, rx: f64) -> Option<f64> {
     ((rx - span.center).abs() > span.width * RECENTRE_AT).then(|| (rx / 1000.0).round() * 1000.0)
 }
 
+/// A jump of the receiver to `f` (a DECODE mode's calling frequency) can
+/// leave the centre where it is: `f` is already well inside the span, by the
+/// same [`RECENTRE_AT`] rule as [`needs_recentre`]. Moving the centre would
+/// leave a strip of the waterfall that the old rows never covered. False
+/// when the span is not known yet (nothing running), so the centre is set.
+pub fn keeps_centre(span: Span, f: f64) -> bool {
+    span.width > 0.0 && needs_recentre(span, f).is_none()
+}
+
 /// A zoomed view that has lost the receiver pans to put it back in the
 /// middle; `None` when the view can stay as it is.
 pub fn keep_in_view(span: Span, cur: View, rx: f64) -> Option<View> {
@@ -119,6 +128,19 @@ pub fn keep_in_view(span: Span, cur: View, rx: f64) -> Option<View> {
     }
     let w = cur.width();
     Some(view(span, Some(View { lo: rx - w / 2.0, hi: rx + w / 2.0 })))
+}
+
+/// How far (Hz) the receiver must move to count as moved, so rounding in the
+/// radio's reports never reads as a retune.
+pub const RX_MOVED_HZ: f64 = 0.5;
+
+/// [`keep_in_view`], but only when the receiver itself has moved since
+/// `last_rx` (tuning, a mode snap, a click to tune): a view the operator
+/// panned or zoomed away from the receiver stays where it was put.
+/// `last_rx` is `None` before the first frame, which counts as a move.
+pub fn follow_rx(span: Span, cur: View, rx: f64, last_rx: Option<f64>) -> Option<View> {
+    let moved = last_rx.is_none_or(|l| (rx - l).abs() > RX_MOVED_HZ);
+    if moved { keep_in_view(span, cur, rx) } else { None }
 }
 
 /// The frequency grid's spacing for a view `w` Hz wide: at most nine lines.
@@ -309,6 +331,18 @@ mod tests {
     }
 
     #[test]
+    fn a_mode_snap_keeps_the_centre_when_its_frequency_is_in_the_span() {
+        // FT8 to FT4 on 20 m: 14.080 is 6 kHz from 14.074, well inside.
+        assert!(keeps_centre(SPAN, 14_080_000.0));
+        assert!(keeps_centre(SPAN, SPAN.center + 86_000.0));
+        // Past 0.45 of the span, or another band: the centre moves.
+        assert!(!keeps_centre(SPAN, SPAN.center + 87_000.0));
+        assert!(!keeps_centre(SPAN, 7_074_000.0));
+        // Nothing running yet: set it.
+        assert!(!keeps_centre(Span { center: 14_074_000.0, width: 0.0 }, 14_074_000.0));
+    }
+
+    #[test]
     fn a_zoomed_view_follows_a_receiver_that_leaves_it() {
         let z = zoom_at(SPAN, view(SPAN, None), SPAN.center, 8.0);
         assert_eq!(keep_in_view(SPAN, z, SPAN.center), None);
@@ -317,6 +351,31 @@ mod tests {
         assert!((k.width() - z.width()).abs() < 1e-6);
         // The whole span never pans.
         assert_eq!(keep_in_view(SPAN, view(SPAN, None), 20e6), None);
+    }
+
+    #[test]
+    fn a_zoomed_view_follows_only_a_receiver_that_moves() {
+        let rx = SPAN.center;
+        let z = zoom_at(SPAN, view(SPAN, None), rx, 8.0);
+        // Panned away from a receiver that has not moved: the view stays.
+        let panned = pan(SPAN, z, -60_000.0);
+        assert!(!panned.contains(rx));
+        assert_eq!(follow_rx(SPAN, panned, rx, Some(rx)), None);
+        // Ctrl+wheel zoom at a pointer far from the receiver stays too.
+        let at = zoom_at(SPAN, z, z.lo + 10.0, 4.0);
+        let at = zoom_at(SPAN, pan(SPAN, at, -50_000.0), 14_130_000.0, 2.0);
+        assert!(!at.contains(rx));
+        assert_eq!(follow_rx(SPAN, at, rx, Some(rx)), None);
+        // A report a fraction of a hertz off is not a move.
+        assert_eq!(follow_rx(SPAN, panned, rx + 0.3, Some(rx)), None);
+        // The receiver tuned (or snapped) out of the view: it follows.
+        let k = follow_rx(SPAN, panned, rx + 1000.0, Some(rx)).unwrap();
+        assert!(k.contains(rx + 1000.0));
+        assert!((k.width() - panned.width()).abs() < 1e-6);
+        // The receiver moved but still on screen: nothing to do.
+        assert_eq!(follow_rx(SPAN, z, rx + 500.0, Some(rx)), None);
+        // The first frame counts as a move.
+        assert!(follow_rx(SPAN, panned, rx, None).is_some());
     }
 
     #[test]

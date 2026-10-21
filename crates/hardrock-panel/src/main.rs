@@ -732,8 +732,14 @@ impl App {
             let hz = map.radio(pick.dial as f64);
             self.rx.set_mode(d.sdr_mode(pick.dial), Some(pb), now);
             // The I/Q centre, and with the ELAD the DUO's VFO A, onto the
-            // dial; then the receiver.
-            self.rx.recentre(hz, now);
+            // dial, but only when the dial is not already well inside the
+            // span: SDR Console's fixed centre (decision 22) keeps the
+            // waterfall's rows lined up. Then the receiver. Both refuse while
+            // transmitting (interlocks #9 and #10).
+            let span = scope::view::Span { center: self.rx.centre(), width: self.rx.rate() };
+            if !scope::view::keeps_centre(span, hz) {
+                self.rx.recentre(hz, now);
+            }
             self.rx.tune(hz, transmitting);
             did.push(format!("receiver {:.0} to {:.0} Hz", pb.0, pb.1));
             let duo = self.rx.source() == rx::IqChoice::Elad && cat.is_some();
