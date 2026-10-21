@@ -410,6 +410,32 @@ window of its own, **DOCK** brings it back.
 The line above the list says how many blocks of audio or I/Q the decoder had
 to drop because it fell behind; it should stay at 0.
 
+For the WSJT modes:
+
+- **The slot timer.** A bar fills across the mode's period (15 s for FT8,
+  7.5 s for FT4, 2 minutes for WSPR), with the seconds into the slot and the
+  UTC from the PC's clock, and **1st** or **2nd** for an even or odd slot (as
+  WSJT-X's Tx even/1st). The light beside it is lit, **DECODING**, while the
+  slot just finished is decoded, then says how many it decoded.
+- **DIST and AZ.** Set **My Callsign** and **My Grid** under SETTINGS →
+  **Station** (4 or 6 characters, checked as you type; km or mi there too).
+  Each line then shows the distance and the great-circle bearing to the
+  station that sent it, from the grid in the message, or the grid it gave
+  earlier (a report or RR73 carries none).
+- **Copying.** Click a line to pick it, Ctrl+click to add or drop one,
+  Shift+click for a run; **COPY** (or Ctrl+C) copies the picked lines,
+  **COPY ALL** every line, with the column headings. Every decode is also
+  added to `ALL.TXT` beside the panel's saved settings (on Windows
+  `%APPDATA%\Hardrock Panel\data\ALL.TXT`), in WSJT-X's layout; hover over
+  the line above the list to see where.
+- **SPOTS.** **PSK Reporter** sends the FT8 and FT4 stations heard to
+  pskreporter.info, a batch every five minutes or so; **WSPRnet** sends each
+  WSPR slot's spots to wsprnet.org as it is decoded (or that you listened and
+  heard nothing). Both are off until ticked, and greyed until your callsign
+  and grid are set. The box says what was last sent and when ("PSK Reporter:
+  12 spots sent 01:10 UTC"), or what went wrong. Clearing a tick sends
+  nothing more, not even what was waiting.
+
 ## Outside programs
 
 Under SETTINGS, *Outside programs*, all off to start and taken with APPLY:

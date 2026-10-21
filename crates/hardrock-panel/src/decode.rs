@@ -13,8 +13,13 @@
 //!
 //! Every decoder runs on threads of its own behind a queue that drops rather
 //! than waits; the window shows how many blocks each has dropped.
+//!
+//! For the WSJT modes the window also has the slot timer and decode light
+//! ([`crate::slotclock`]), DIST and AZ to each station from SETTINGS →
+//! Station's grid ([`crate::station`]), lines to select and copy, the running
+//! `ALL.TXT` ([`crate::decodelog`]) and the SPOTS box ([`crate::spots`]).
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,9 +33,12 @@ use eframe::egui::{self, RichText};
 use links::WsjtxUdp;
 use serde::{Deserialize, Serialize};
 
+use crate::decodelog::{self, DecodeLog};
 use crate::rx::{self, Rx};
 use crate::scope::digimodes::{self, Digi};
-use crate::{chrome, theme};
+use crate::spots::{self, SpotSettings, Spots, pskreporter, wsprnet};
+use crate::station::{self, Heard, StationSettings};
+use crate::{chrome, slotclock, theme};
 
 /// Every mode the window offers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +223,8 @@ pub(crate) struct DecodeSettings {
     pub ioc_288: bool,
     /// Picking a mode takes the radio and the receiver to it (decision 39).
     pub snap: bool,
+    /// SPOTS' ticks.
+    pub spots: SpotSettings,
 }
 
 impl Default for DecodeSettings {
@@ -227,6 +237,7 @@ impl Default for DecodeSettings {
             lpm: 120.0,
             ioc_288: false,
             snap: true,
+            spots: SpotSettings::default(),
         }
     }
 }
@@ -264,6 +275,8 @@ impl DecodeSettings {
 /// One line in the decodes list.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Row {
+    /// Unique this run, for the selection.
+    pub id: u64,
     pub utc: f64,
     pub snr: Option<f32>,
     pub dt: Option<f32>,
@@ -271,6 +284,9 @@ pub(crate) struct Row {
     /// True RF, Hz.
     pub rf_hz: Option<f64>,
     pub text: String,
+    /// Who sent it, and the grid it gave (WSJT modes).
+    pub call: Option<String>,
+    pub grid: Option<String>,
 }
 
 enum Worker {
@@ -315,6 +331,16 @@ pub(crate) struct Decode {
     last_slot: Option<(i64, usize, u32)>,
     /// What the last snap did (or why it didn't).
     pub note: Option<(String, bool)>,
+    /// When the WSJT decoder started, for the decode light.
+    started_utc: Option<f64>,
+    /// Every station heard with a grid.
+    pub heard: Heard,
+    log: DecodeLog,
+    spots: Spots,
+    /// The rows picked, by id, and the last one clicked.
+    selected: HashSet<u64>,
+    anchor: Option<u64>,
+    next_id: u64,
 }
 
 /// Where the receiver is, for the RF of each decode.
@@ -341,6 +367,7 @@ impl Decode {
         taps.set_audio("decode", None);
         taps.set_iq("decode", None);
         self.worker = None;
+        self.started_utc = None;
     }
 
     fn clear(&mut self) {
@@ -350,6 +377,8 @@ impl Decode {
         self.tex = None;
         self.notes.clear();
         self.last_slot = None;
+        self.selected.clear();
+        self.anchor = None;
     }
 
     /// Once a frame: start, retune or stop the decoder as asked, and take
@@ -357,10 +386,13 @@ impl Decode {
     pub(crate) fn frame(
         &mut self,
         s: &DecodeSettings,
+        st: &StationSettings,
         rx: &Rx,
         at: Where,
         wsjtx: Option<&WsjtxUdp>,
     ) {
+        // The uploaders follow their ticks whether or not anything decodes.
+        self.spots.frame(&s.spots, me(st).as_ref());
         let taps = &rx.taps;
         if !s.running || !rx.active() {
             if self.worker.is_some() {
@@ -375,7 +407,7 @@ impl Decode {
         if !same {
             self.stop(taps);
             self.clear();
-            self.worker = self.spawn(s, rx, at, taps).map(|w| (s.kind, w));
+            self.worker = self.spawn(s, st, rx, at, taps).map(|w| (s.kind, w));
         }
         // Retune what can be retuned in place.
         match self.worker.as_mut() {
@@ -411,11 +443,22 @@ impl Decode {
         self.take(at, wsjtx);
     }
 
-    fn spawn(&mut self, s: &DecodeSettings, rx: &Rx, at: Where, taps: &rx::Taps) -> Option<Worker> {
+    fn spawn(
+        &mut self,
+        s: &DecodeSettings,
+        st: &StationSettings,
+        rx: &Rx,
+        at: Where,
+        taps: &rx::Taps,
+    ) -> Option<Worker> {
         match s.kind.family() {
             Family::Wsjt => {
                 let mode = s.kind.wsjt()?;
-                let w = Arc::new(WsjtDecoder::spawn(WsjtConfig::new(mode)));
+                let mut cfg = WsjtConfig::new(mode);
+                // Hashed messages naming the operator resolve from the start.
+                cfg.my_calls.extend(st.call());
+                let w = Arc::new(WsjtDecoder::spawn(cfg));
+                self.started_utc = Some(decoders::slot::utc_now());
                 let f = w.clone();
                 taps.set_audio("decode", Some(Box::new(move |a, utc| f.push(a, utc))));
                 Some(Worker::Wsjt(w, mode))
@@ -463,39 +506,10 @@ impl Decode {
         let Some((_, w)) = &self.worker else { return };
         match w {
             Worker::Wsjt(w, mode) => {
-                for slot in w.results().try_iter() {
-                    if !slot.live {
-                        self.last_slot = Some((slot.slot_utc, slot.decodes.len(), slot.decode_ms));
-                    }
-                    for d in &slot.decodes {
-                        let rf = at.rf_of_audio(d.audio_hz as f64);
-                        let row = Row {
-                            utc: d.slot_utc as f64,
-                            snr: Some(d.snr_db),
-                            dt: Some(d.dt_s),
-                            audio_hz: Some(d.audio_hz),
-                            rf_hz: Some(rf),
-                            text: d.message.clone(),
-                        };
-                        // MSK144 reports a message again when it is heard
-                        // better: that updates its line.
-                        if *mode == WsjtMode::Msk144 && update_row(&mut self.rows, &row) {
-                            continue;
-                        }
-                        push_row(&mut self.rows, row);
-                        if let Some(u) = wsjtx {
-                            send_wsjtx(u, *mode, d, rf);
-                        }
-                    }
-                    if let Some(u) = wsjtx {
-                        u.status(&links::StatusInfo {
-                            dial_hz: (at.dial_hz + at.xvtr_hz).max(0.0) as u64,
-                            mode: mode.label().into(),
-                            decoding: true,
-                            tr_period_s: mode.period_s() as u32,
-                            ..links::StatusInfo::default()
-                        });
-                    }
+                let mode = *mode;
+                let slots: Vec<_> = w.results().try_iter().collect();
+                for slot in slots {
+                    self.wsjt_slot(&slot, mode, at, wsjtx);
                 }
             }
             Worker::Text(w, _) => {
@@ -550,19 +564,128 @@ impl Decode {
                     match e {
                         LinkEvent::Decoded(d) => push_row(
                             &mut self.rows,
+                            &mut self.next_id,
                             Row {
+                                id: 0,
                                 utc: d.utc,
                                 snr: d.snr_db,
                                 dt: None,
                                 audio_hz: None,
                                 rf_hz: Some(d.rf_hz as f64),
                                 text: d.summary.clone(),
+                                call: None,
+                                grid: None,
                             },
                         ),
                         LinkEvent::Refused(why) => self.error = Some(why),
                     }
                 }
             }
+        }
+    }
+
+    /// One WSJT slot: its rows, the stations' grids, the decode log, the
+    /// outside programs and the spots.
+    fn wsjt_slot(
+        &mut self,
+        slot: &decoders::WsjtSlot,
+        mode: WsjtMode,
+        at: Where,
+        wsjtx: Option<&WsjtxUdp>,
+    ) {
+        // MSK144's live reports during a slot leave the slot's figure alone.
+        if !slot.live {
+            self.last_slot = Some((slot.slot_utc, slot.decodes.len(), slot.decode_ms));
+        }
+        let dial = at.dial_hz + at.xvtr_hz;
+        let mut lines = Vec::new();
+        let mut psk = Vec::new();
+        let mut wspr = Vec::new();
+        for d in &slot.decodes {
+            let rf = at.rf_of_audio(d.audio_hz as f64);
+            let (call, grid) = match &d.wspr {
+                Some(w) => (
+                    station::is_callsign(&w.callsign).then(|| w.callsign.clone()),
+                    (!w.grid.is_empty()).then(|| w.grid.clone()),
+                ),
+                None => station::sender_of(&d.message),
+            };
+            if let (Some(c), Some(g)) = (&call, &grid) {
+                self.heard.note(c, g, d.slot_utc as f64);
+            }
+            let row = Row {
+                id: 0,
+                utc: d.slot_utc as f64,
+                snr: Some(d.snr_db),
+                dt: Some(d.dt_s),
+                audio_hz: Some(d.audio_hz),
+                rf_hz: Some(rf),
+                text: d.message.clone(),
+                call: call.clone(),
+                grid: grid.clone(),
+            };
+            // MSK144 reports a message again when it is heard better: that
+            // updates its line, and it is logged and sent only the first time.
+            if mode == WsjtMode::Msk144 && update_row(&mut self.rows, &row) {
+                continue;
+            }
+            lines.push(decodelog::all_txt_line(
+                d.slot_utc,
+                dial,
+                mode.label(),
+                d.snr_db,
+                d.dt_s,
+                d.audio_hz,
+                &d.message,
+            ));
+            match (&d.wspr, mode) {
+                (Some(w), WsjtMode::Wspr) => wspr.push(wsprnet::Spot {
+                    call: w.callsign.clone(),
+                    grid: w.grid.clone(),
+                    snr_db: d.snr_db.round() as i32,
+                    dt_s: d.dt_s,
+                    drift_hz: w.drift_hz.round() as i32,
+                    freq_hz: rf,
+                    power_dbm: w.power_dbm,
+                }),
+                (_, WsjtMode::Ft8 | WsjtMode::Ft4) => {
+                    if let Some(c) = &call {
+                        let known = self.heard.get(c).map(|h| h.grid.clone());
+                        psk.push(pskreporter::Report {
+                            call: c.clone(),
+                            grid: grid.clone().or(known).unwrap_or_default(),
+                            freq_hz: rf.max(0.0).round() as u64,
+                            snr_db: d.snr_db.round().clamp(-128.0, 127.0) as i8,
+                            mode: mode.label().into(),
+                            utc: d.slot_utc.max(0) as u32,
+                        });
+                    }
+                }
+                _ => {}
+            }
+            push_row(&mut self.rows, &mut self.next_id, row);
+            if let Some(u) = wsjtx {
+                send_wsjtx(u, mode, d, rf);
+            }
+        }
+        self.log.append(&lines);
+        match mode {
+            WsjtMode::Ft8 | WsjtMode::Ft4 => self.spots.ft_slot(psk),
+            WsjtMode::Wspr => self.spots.wspr_slot(wsprnet::Slot {
+                utc: slot.slot_utc,
+                dial_hz: dial,
+                spots: wspr,
+            }),
+            _ => {}
+        }
+        if let Some(u) = wsjtx {
+            u.status(&links::StatusInfo {
+                dial_hz: dial.max(0.0) as u64,
+                mode: mode.label().into(),
+                decoding: true,
+                tr_period_s: mode.period_s() as u32,
+                ..links::StatusInfo::default()
+            });
         }
     }
 }
@@ -578,7 +701,9 @@ fn link_config(mode: LinkMode, rx: &Rx, at: Where) -> LinkConfig {
     LinkConfig::new(mode, rx.rate(), tuning)
 }
 
-fn push_row(rows: &mut VecDeque<Row>, r: Row) {
+fn push_row(rows: &mut VecDeque<Row>, next_id: &mut u64, mut r: Row) {
+    *next_id += 1;
+    r.id = *next_id;
     rows.push_front(r);
     rows.truncate(ROWS);
 }
@@ -587,11 +712,16 @@ fn push_row(rows: &mut VecDeque<Row>, r: Row) {
 fn update_row(rows: &mut VecDeque<Row>, r: &Row) -> bool {
     match rows.iter_mut().find(|x| x.utc == r.utc && x.text == r.text) {
         Some(x) => {
-            *x = r.clone();
+            *x = Row { id: x.id, ..r.clone() };
             true
         }
         None => false,
     }
+}
+
+/// The operator, if both callsign and grid are set.
+fn me(st: &StationSettings) -> Option<spots::Me> {
+    Some(spots::Me { call: st.call()?, grid: st.grid()? })
 }
 
 fn send_wsjtx(u: &WsjtxUdp, mode: WsjtMode, d: &decoders::WsjtDecode, rf_hz: f64) {
@@ -641,12 +771,14 @@ pub(crate) struct DecodeOut {
 
 /// Draw the window, over the panel or popped out into one of its own (as
 /// RADIO and SCOPE do). Clears `open` when it is closed.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn window(
     ctx: &egui::Context,
     open: &mut bool,
     popped: bool,
     d: &mut Decode,
     s: &mut DecodeSettings,
+    st: &StationSettings,
     rx: &Rx,
     wsjtx_on: bool,
 ) -> DecodeOut {
@@ -663,7 +795,7 @@ pub(crate) fn window(
                     .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
                     .show(ui, |ui| {
                         chrome::window_body_bg(ui);
-                        body(ui, true, d, s, rx, wsjtx_on, &mut out);
+                        body(ui, true, d, s, st, rx, wsjtx_on, &mut out);
                     });
                 ui.ctx().input(|i| i.viewport().close_requested())
             },
@@ -682,17 +814,19 @@ pub(crate) fn window(
             .default_size([640.0, 560.0])
             .show(ctx, |ui| {
                 chrome::window_body_bg(ui);
-                body(ui, false, d, s, rx, wsjtx_on, &mut out);
+                body(ui, false, d, s, st, rx, wsjtx_on, &mut out);
             });
     }
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn body(
     ui: &mut egui::Ui,
     popped: bool,
     d: &mut Decode,
     s: &mut DecodeSettings,
+    st: &StationSettings,
     rx: &Rx,
     wsjtx_on: bool,
     out: &mut DecodeOut,
@@ -786,12 +920,42 @@ fn body(
                     }
                 }
             }
-            Family::Wsjt | Family::Link if chrome::chip(ui, false, "Clear").clicked() => {
-                d.rows.clear();
+            Family::Wsjt | Family::Link => {
+                if chrome::chip(ui, false, "Clear").clicked() {
+                    d.rows.clear();
+                    d.selected.clear();
+                }
+                let n = d.selected.len();
+                let copy = ui
+                    .add_enabled_ui(n > 0, |ui| chrome::chip(ui, false, format!("COPY {n}")))
+                    .inner
+                    .on_hover_text(
+                        "Copy the lines picked (click, Ctrl+click, Shift+click); Ctrl+C too",
+                    )
+                    .clicked();
+                if copy {
+                    ui.ctx().copy_text(copy_text(d, s.kind.family(), st, true));
+                }
+                let all = chrome::chip(ui, false, "COPY ALL")
+                    .on_hover_text("Copy every line shown, newest first")
+                    .clicked();
+                if all {
+                    ui.ctx().copy_text(copy_text(d, s.kind.family(), st, false));
+                }
             }
             _ => {}
         }
     });
+    if s.kind.family() == Family::Wsjt
+        && let Some(mode) = s.kind.wsjt()
+    {
+        let started = d.worker.is_some().then_some(d.started_utc).flatten();
+        let last = d.last_slot.map(|(slot, n, _)| (slot, n));
+        let light =
+            slotclock::light(decoders::slot::utc_now(), mode.period_s(), started, 1.0, last);
+        slotclock::row(ui, decoders::slot::utc_now(), mode.period_s(), light);
+        spots::spots_box(ui, &mut s.spots, &d.spots, me(st).as_ref());
+    }
 
     // Where it listens, and what it has dropped.
     let src = match s.kind.family() {
@@ -808,8 +972,17 @@ fn body(
     if wsjtx_on && s.kind.family() == Family::Wsjt {
         line.push_str(" · sent as WSJT-X UDP");
     }
+    let log_path = d.log.path().map(|p| p.display().to_string());
     let col = if dropped > 0 { theme::YELLOW() } else { theme::TEXT() };
-    ui.label(RichText::new(line).size(11.5).color(col));
+    let r = ui.label(RichText::new(line).size(11.5).color(col));
+    if s.kind.family() == Family::Wsjt
+        && let Some(p) = log_path
+    {
+        r.on_hover_text(format!("Every decode is also added to {p}, as WSJT-X's ALL.TXT"));
+    }
+    if let Some(e) = &d.log.error {
+        ui.label(RichText::new(e).size(11.5).color(theme::YELLOW()));
+    }
     if let Some(e) = &d.error {
         ui.label(RichText::new(e).size(11.5).color(theme::YELLOW()));
     }
@@ -820,7 +993,7 @@ fn body(
     ui.separator();
 
     match s.kind.family() {
-        Family::Wsjt | Family::Link => rows(ui, d, s.kind.family()),
+        Family::Wsjt | Family::Link => rows(ui, d, s.kind.family(), st),
         Family::Text => {
             egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).show(ui, |ui| {
                 ui.label(RichText::new(&d.text).monospace().size(13.0));
@@ -830,35 +1003,150 @@ fn body(
     }
 }
 
-fn rows(ui: &mut egui::Ui, d: &Decode, fam: Family) {
-    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        egui::Grid::new("decode-rows").striped(true).spacing([10.0, 2.0]).show(ui, |ui| {
-            let heads: &[&str] = if fam == Family::Wsjt {
-                &["UTC", "SNR", "DT", "AF Hz", "RF MHz", "Message"]
-            } else {
-                &["UTC", "SNR", "RF MHz", "Message"]
-            };
-            for h in heads {
-                caption(ui, h);
-            }
-            ui.end_row();
-            for r in &d.rows {
-                let mono = |t: String| RichText::new(t).monospace().size(12.5);
-                ui.label(mono(hms(r.utc)));
-                ui.label(mono(r.snr.map_or("—".into(), |v| format!("{v:+.0}"))));
-                if fam == Family::Wsjt {
-                    ui.label(mono(r.dt.map_or("—".into(), |v| format!("{v:+.1}"))));
-                    ui.label(mono(r.audio_hz.map_or("—".into(), |v| format!("{v:.0}"))));
-                }
-                ui.label(mono(r.rf_hz.map_or("—".into(), |v| format!("{:.6}", v / 1e6))));
-                ui.label(mono(r.text.clone()));
-                ui.end_row();
-            }
-        });
-        if d.rows.is_empty() {
-            ui.label(RichText::new("Nothing decoded yet.").weak());
+/// A row's distance and bearing from the operator: from the grid it gave,
+/// else the one its sender gave before.
+fn dist_az(r: &Row, heard: &Heard, me: Option<station::LatLon>) -> Option<(f64, f64)> {
+    let me = me?;
+    let there = match &r.grid {
+        Some(g) => station::grid_to_latlon(g),
+        None => r.call.as_ref().and_then(|c| heard.get(c)).map(|h| h.pos),
+    }?;
+    Some((station::distance_km(me, there), station::bearing_deg(me, there)))
+}
+
+/// One row as text, in the window's columns.
+fn row_text(r: &Row, fam: Family, heard: &Heard, st: &StationSettings) -> String {
+    let snr = r.snr.map_or("—".into(), |v| format!("{v:+.0}"));
+    let rf = r.rf_hz.map_or("—".into(), |v| format!("{:.6}", v / 1e6));
+    if fam != Family::Wsjt {
+        return format!("{}  {snr:>4}  {rf:>11}  {}", hms(r.utc), r.text);
+    }
+    let dt = r.dt.map_or("—".into(), |v| format!("{v:+.1}"));
+    let af = r.audio_hz.map_or("—".into(), |v| format!("{v:.0}"));
+    let (dist, az) = match dist_az(r, heard, st.pos()) {
+        Some((km, az)) => {
+            (format!("{:.0}", st.dist_unit.of_km(km)), format!("{:03.0}", az.round() % 360.0))
         }
-    });
+        None => ("—".into(), "—".into()),
+    };
+    format!("{}  {snr:>4}  {dt:>5}  {af:>5}  {rf:>11}  {dist:>7}  {az:>3}  {}", hms(r.utc), r.text)
+}
+
+/// The header, in the same columns.
+fn header_text(fam: Family, st: &StationSettings) -> String {
+    if fam != Family::Wsjt {
+        return format!("{:8}  {:>4}  {:>11}  Message", "UTC", "SNR", "RF MHz");
+    }
+    format!(
+        "{:8}  {:>4}  {:>5}  {:>5}  {:>11}  {:>7}  {:>3}  Message",
+        "UTC",
+        "SNR",
+        "DT",
+        "AF Hz",
+        "RF MHz",
+        format!("DIST {}", st.dist_unit.label()),
+        "AZ"
+    )
+}
+
+/// The lines to copy: the picked ones, or all, newest first, under the header.
+fn copy_text(d: &Decode, fam: Family, st: &StationSettings, picked: bool) -> String {
+    let mut out = header_text(fam, st);
+    out.push('\n');
+    for r in d.rows.iter().filter(|r| !picked || d.selected.contains(&r.id)) {
+        out.push_str(&row_text(r, fam, &d.heard, st));
+        out.push('\n');
+    }
+    out
+}
+
+fn rows(ui: &mut egui::Ui, d: &mut Decode, fam: Family, st: &StationSettings) {
+    let font = egui::FontId::monospace(12.5);
+    // Ctrl+C copies the picked lines, when no text field has the keys.
+    let copy = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)))
+        && ui.memory(|m| m.focused().is_none());
+    if copy && !d.selected.is_empty() {
+        ui.ctx().copy_text(copy_text(d, fam, st, true));
+    }
+    ui.label(
+        RichText::new(header_text(fam, st)).font(font.clone()).color(theme::CYAN_DIM()).strong(),
+    );
+    let line_h = ui.fonts_mut(|f| f.row_height(&font)) + 2.0;
+    let mut click: Option<(u64, egui::Modifiers)> = None;
+    egui::ScrollArea::vertical().auto_shrink(false).show_rows(
+        ui,
+        line_h,
+        d.rows.len(),
+        |ui, range| {
+            for (i, r) in d.rows.iter().enumerate().skip(range.start).take(range.len()) {
+                let w = ui.available_width();
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(w, line_h), egui::Sense::click());
+                let picked = d.selected.contains(&r.id);
+                let bg = if picked {
+                    Some(theme::FILL_ACTIVE())
+                } else if resp.hovered() {
+                    Some(theme::ROW_HOVER())
+                } else if i % 2 == 1 {
+                    Some(theme::ROW_BG())
+                } else {
+                    None
+                };
+                if let Some(bg) = bg {
+                    ui.painter().rect_filled(rect, 0.0, bg);
+                }
+                let col = if picked { theme::TEXT_STRONG() } else { theme::TEXT() };
+                ui.painter().text(
+                    rect.left_center() + egui::vec2(2.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    row_text(r, fam, &d.heard, st),
+                    font.clone(),
+                    col,
+                );
+                if resp.clicked() {
+                    click = Some((r.id, ui.input(|i| i.modifiers)));
+                }
+            }
+            if d.rows.is_empty() {
+                ui.label(RichText::new("Nothing decoded yet.").weak());
+            }
+        },
+    );
+    if let Some((id, m)) = click {
+        let order: Vec<u64> = d.rows.iter().map(|r| r.id).collect();
+        pick(&mut d.selected, &mut d.anchor, &order, id, m.command, m.shift);
+    }
+}
+
+/// A click on row `id`: alone picks only it (or, if it was the only one,
+/// none); with Ctrl toggles it; with Shift picks the run from the last click.
+fn pick(
+    sel: &mut HashSet<u64>,
+    anchor: &mut Option<u64>,
+    order: &[u64],
+    id: u64,
+    ctrl: bool,
+    shift: bool,
+) {
+    let at = |x: u64| order.iter().position(|&o| o == x);
+    if shift && let (Some(a), Some(b)) = (anchor.and_then(at), at(id)) {
+        if !ctrl {
+            sel.clear();
+        }
+        sel.extend(&order[a.min(b)..=a.max(b)]);
+        return;
+    }
+    if ctrl {
+        if !sel.remove(&id) {
+            sel.insert(id);
+        }
+    } else if sel.len() == 1 && sel.contains(&id) {
+        sel.clear();
+    } else {
+        sel.clear();
+        sel.insert(id);
+    }
+    *anchor = Some(id);
 }
 
 fn picture(ui: &mut egui::Ui, d: &mut Decode) {
@@ -922,6 +1210,54 @@ mod tests {
         assert_eq!(xv.rf_of_audio(1000.0), 144_075_000.0);
         let lsb = Where { lsb: true, ..usb };
         assert_eq!(lsb.rf_of_audio(1500.0), 14_072_500.0);
+    }
+
+    #[test]
+    fn lines_are_picked_as_in_a_list() {
+        let order = [5, 4, 3, 2, 1];
+        let (mut sel, mut anchor) = (HashSet::new(), None);
+        pick(&mut sel, &mut anchor, &order, 4, false, false);
+        assert_eq!(sel, HashSet::from([4]));
+        pick(&mut sel, &mut anchor, &order, 2, false, true);
+        assert_eq!(sel, HashSet::from([4, 3, 2]));
+        pick(&mut sel, &mut anchor, &order, 3, true, false);
+        assert_eq!(sel, HashSet::from([4, 2]));
+        pick(&mut sel, &mut anchor, &order, 1, false, false);
+        assert_eq!(sel, HashSet::from([1]));
+        pick(&mut sel, &mut anchor, &order, 1, false, false);
+        assert!(sel.is_empty());
+    }
+
+    #[test]
+    fn a_line_shows_its_distance_from_the_grid_heard_before() {
+        let st = StationSettings { grid: "FN31pr".into(), ..Default::default() };
+        let mut heard = Heard::default();
+        heard.note("DL1ABC", "JO65", 0.0);
+        let row = |text: &str| {
+            let (call, grid) = station::sender_of(text);
+            Row {
+                id: 1,
+                utc: 3600.0,
+                snr: Some(-12.0),
+                dt: Some(0.2),
+                audio_hz: Some(1234.0),
+                rf_hz: Some(14_075_234.0),
+                text: text.into(),
+                call,
+                grid,
+            }
+        };
+        let t = row_text(&row("K1ABC DL1ABC RR73"), Family::Wsjt, &heard, &st);
+        assert_eq!(t, "01:00:00   -12   +0.2   1234    14.075234     6064  044  K1ABC DL1ABC RR73");
+        let mi = StationSettings { dist_unit: station::DistUnit::Mi, ..st.clone() };
+        let t = row_text(&row("CQ DL1ABC JO65"), Family::Wsjt, &Heard::default(), &mi);
+        assert!(t.contains("  3768  044  "), "{t}");
+        // Nowhere to measure from, or to.
+        let t = row_text(&row("K1ABC W9XYZ -05"), Family::Wsjt, &heard, &st);
+        assert!(t.contains("        —    —  K1ABC"), "{t}");
+        // The header's columns line up with the rows'.
+        let h = header_text(Family::Wsjt, &mi);
+        assert_eq!(h.find("Message"), t.find("K1ABC").map(|b| t[..b].chars().count()));
     }
 
     #[test]
