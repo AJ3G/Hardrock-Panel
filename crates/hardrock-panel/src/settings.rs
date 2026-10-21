@@ -427,3 +427,81 @@ pub(crate) fn settings_dsp(ui: &mut egui::Ui, d: &mut crate::rx::DspSettings) {
         }
     });
 }
+
+/// SETTINGS → Station: the operator's callsign and grid, for DECODE's DIST and
+/// AZ, the hashed callsigns and SPOTS, and how distances are shown. Taken at
+/// once, and kept.
+pub(crate) fn settings_station(ui: &mut egui::Ui, st: &mut crate::station::StationSettings) {
+    use crate::station::{DistUnit, GridCheck, grid_check};
+    ui.label(RichText::new("Station").size(14.0).strong().color(theme::CYAN()));
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(
+            "Your callsign and Maidenhead grid (4 or 6 characters, FN31 or FN31pr). DECODE \
+             measures each station's distance and bearing from your grid, and SPOTS reports \
+             what you hear under your callsign. Taken at once. Nothing is sent anywhere \
+             unless you tick it under DECODE's SPOTS.",
+        )
+        .weak(),
+    );
+    ui.add_space(6.0);
+    egui::Grid::new("station-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+        ui.label("My Callsign");
+        ui.horizontal(|ui| {
+            let r = chrome::field(
+                ui,
+                egui::TextEdit::singleline(&mut st.callsign).desired_width(120.0).char_limit(13),
+            );
+            if r.changed() {
+                st.callsign = st.callsign.to_ascii_uppercase();
+            }
+            if !st.callsign.trim().is_empty() && st.call().is_none() {
+                ui.label(RichText::new("Not a callsign").color(theme::YELLOW()));
+            }
+        });
+        ui.end_row();
+
+        ui.label("My Grid");
+        ui.horizontal(|ui| {
+            chrome::field(
+                ui,
+                egui::TextEdit::singleline(&mut st.grid).desired_width(120.0).char_limit(6),
+            );
+            let (text, col) = match grid_check(&st.grid) {
+                GridCheck::Empty => (String::new(), theme::TEXT()),
+                GridCheck::Partial => ("4 or 6 characters".to_string(), theme::TEXT()),
+                GridCheck::Valid => {
+                    let p = st.pos().expect("a valid grid has a place");
+                    (
+                        format!(
+                            "{:.3}° {}, {:.3}° {}",
+                            p.lat.abs(),
+                            if p.lat < 0.0 { "S" } else { "N" },
+                            p.lon.abs(),
+                            if p.lon < 0.0 { "W" } else { "E" }
+                        ),
+                        theme::CYAN(),
+                    )
+                }
+                GridCheck::Invalid => (
+                    "Not a grid: two letters A–R, two digits, then two letters A–X".to_string(),
+                    theme::YELLOW(),
+                ),
+            };
+            if !text.is_empty() {
+                ui.label(RichText::new(text).color(col));
+            }
+        });
+        ui.end_row();
+
+        ui.label("Distances in");
+        ui.horizontal(|ui| {
+            for u in DistUnit::ALL {
+                if chrome::chip(ui, st.dist_unit == u, u.label()).clicked() {
+                    st.dist_unit = u;
+                }
+            }
+        });
+        ui.end_row();
+    });
+}

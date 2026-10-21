@@ -41,6 +41,7 @@ mod theme;
 
 mod audio;
 mod decode;
+mod decodelog;
 mod outside;
 mod panel;
 mod radio;
@@ -50,6 +51,9 @@ mod rx;
 mod scope;
 mod scopewin;
 mod settings;
+mod slotclock;
+mod spots;
+mod station;
 mod tune;
 
 use eframe::egui::{self, RichText};
@@ -98,6 +102,8 @@ struct Saved {
     decode_popped: bool,
     /// TCI, rigctld and WSJT-X UDP (decision 25).
     outside: outside::OutsideSettings,
+    /// SETTINGS → Station: callsign, grid, distance unit.
+    station: station::StationSettings,
 }
 
 impl Default for Saved {
@@ -117,6 +123,7 @@ impl Default for Saved {
             decode: decode::DecodeSettings::default(),
             decode_popped: false,
             outside: outside::OutsideSettings::default(),
+            station: station::StationSettings::default(),
         }
     }
 }
@@ -556,7 +563,13 @@ impl App {
             xvtr_hz: xvtr as f64,
             ppm: self.scope.settings().ppm,
         };
-        self.decode.frame(&self.saved.decode, &self.rx, at, self.outside.wsjtx.as_ref());
+        self.decode.frame(
+            &self.saved.decode,
+            &self.saved.station,
+            &self.rx,
+            at,
+            self.outside.wsjtx.as_ref(),
+        );
     }
 
     /// Make a change an outside program asked for, as the panel's own
@@ -793,6 +806,10 @@ impl App {
                             self.elad_devices = elad_iq::list();
                         }
                     });
+                    ui.add_space(6.0);
+                    settings::settings_station(ui, &mut self.saved.station);
+                    ui.add_space(10.0);
+                    ui.separator();
                     ui.add_space(6.0);
                     settings::settings_amp_tab(
                         ui,
@@ -1047,6 +1064,7 @@ impl eframe::App for App {
                 self.saved.decode_popped,
                 &mut self.decode,
                 &mut self.saved.decode,
+                &self.saved.station,
                 &self.rx,
                 self.outside.wsjtx.is_some(),
             );
