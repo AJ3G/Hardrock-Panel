@@ -568,3 +568,12 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 **What the panel does.** No RUN or STOP. The decoder runs while the DECODE window is open, docked or popped out, as WSJT-X always decodes; closing the window stops it, and with it the spots it sends. The settings file's `running` is still read but is set each frame from the window.
 
 **Also.** Each WSJT slot goes in the log at info level: the audio's RMS, how late the slot was joined, and how many it decoded in how long, so a slot with nothing decoded can be told from a slot with no audio.
+
+## 48. RADIO reads the S-meter every round and shows the filter, the receive settings and REF (21 Oct 2026)
+
+**Why.** AJ3G: the S-meter on RADIO was slow (it was read with the settings, every 10 s), the filter width wasn't shown on SCOPE or RADIO, and the DUO's 10 MHz reference indicator didn't come through.
+
+**What the panel does.** `SM0;` is read with the power readings every round (150 ms) while receiving, and `RF;` with the dial every second. The LCD's first row starts with the filter width (FIL 2.40k); a second row shows AGC or MAN GAIN, NB, NR, NOTCH, SQL, the split TX frequency and REF 10M. The scope's RX label carries the passband width (BW 2.60 kHz), as does the passband itself when there is room.
+
+**REF.** No CAT command and no documented USB field reports the reference input. SETTINGS has a "10 MHz reference connected" tick that lights REF 10M. The dial read-back's undocumented last byte read 0x30 on AJ3G's radio with a reference and 0x10 in earlier notes without; every change of it (but the dial-turning bit) now goes in the ELAD log, so a bench test with the reference pulled can show whether bit 0x20 is the reference. If it is, it replaces the tick.
+

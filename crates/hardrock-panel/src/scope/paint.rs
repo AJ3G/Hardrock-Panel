@@ -240,7 +240,8 @@ fn paint_spectrum(
     let (wa, wb) = (pa.min(pb), pa.max(pb));
     let wg = p.layout_no_wrap(bw_text(cx.rig.passband), mono(10.0), accent());
     if wb - wa >= wg.size().x + 8.0 && wb > all.left() && wa < all.right() {
-        let cxp = (0.5 * (wa + wb)).clamp(all.left() + 0.5 * wg.size().x, all.right() - 0.5 * wg.size().x);
+        let cxp = (0.5 * (wa + wb))
+            .clamp(all.left() + 0.5 * wg.size().x, all.right() - 0.5 * wg.size().x);
         p.galley(pos2(cxp - 0.5 * wg.size().x, all.top() + 22.0), wg, accent());
     }
     let edge_drag = matches!(sc.drag.map(|d| d.kind), Some(DragKind::Edge(_)));

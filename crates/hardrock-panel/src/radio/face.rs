@@ -199,7 +199,7 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
     annunciators(ui, f, prefs, pos2(inner.left(), y), inner.width());
     y += z(14.0 + 4.0);
     // The receive settings the radio's own display shows.
-    receive_row(ui, f, pos2(inner.left(), y), inner.width());
+    receive_row(ui, f, prefs, pos2(inner.left(), y), inner.width());
     y += z(14.0 + 6.0);
 
     // The dial.
@@ -492,15 +492,15 @@ fn annunciators(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, at: Pos2, wid
 /// The LCD's second row: AGC, noise blanker and reduction, notch, squelch,
 /// and in split the frequency the radio transmits on. Read only; the RX
 /// pop-out sets them. Each is read with the settings (every 10 s).
-fn receive_row(ui: &mut Ui, f: &mut Face<'_>, at: Pos2, width: f32) {
+fn receive_row(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, at: Pos2, width: f32) {
     let s = f.s;
     let rb = |cmd: &str| logic::find(f.p, cmd).and_then(|c| logic::readback(c, s));
-    let on = |cmd: &str| rb(cmd).is_some_and(|v| v.trim().trim_start_matches('0') != "");
+    let on = |cmd: &str| rb(cmd).is_some_and(|v| !v.trim().trim_start_matches('0').is_empty());
     let agc = match rb("GC") {
         Some("1") => "MAN GAIN",
         _ => "AGC",
     };
-    let tx_on = (s.split == Some(true)).then(|| s.freq_b_hz).flatten().map(|hz| {
+    let tx_on = s.freq_b_hz.filter(|_| s.split == Some(true)).map(|hz| {
         let khz = hz as f64 / 1e3;
         format!("TX {khz:.3}")
     });
@@ -511,6 +511,8 @@ fn receive_row(ui: &mut Ui, f: &mut Face<'_>, at: Pos2, width: f32) {
         ("NOTCH".into(), on("NO")),
         ("SQL".into(), on("SQ")),
         (tx_on.clone().unwrap_or_else(|| "TX ----".into()), tx_on.is_some()),
+        // As marked in SETTINGS: the radio doesn't report it.
+        ("REF 10M".into(), prefs.ref_10mhz),
     ];
     let ink = f.th.lcd_ink;
     let font = label_font(11.0);

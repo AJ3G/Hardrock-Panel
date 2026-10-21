@@ -176,6 +176,19 @@ pub(crate) fn set_xvtr_hz(ctx: &egui::Context, hz: i64) {
     });
 }
 
+/// Whether the operator marked a 10 MHz reference as connected.
+pub(crate) fn ref_10mhz(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|d| d.get_persisted::<RadioPrefs>(prefs_id())).is_some_and(|p| p.ref_10mhz)
+}
+
+pub(crate) fn set_ref_10mhz(ctx: &egui::Context, on: bool) {
+    ctx.data_mut(|d| {
+        let mut p: RadioPrefs = d.get_persisted(prefs_id()).unwrap_or_default();
+        p.ref_10mhz = on;
+        d.insert_persisted(prefs_id(), p);
+    });
+}
+
 fn ui_id() -> egui::Id {
     egui::Id::new("radio-window-ui")
 }

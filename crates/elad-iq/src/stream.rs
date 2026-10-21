@@ -219,6 +219,7 @@ fn pump(
     let mut last_tune_poll = Instant::now() - TUNE_POLL;
     let mut tune_poll_failures = 0u32;
     let mut said_tune_poll_failed = false;
+    let mut last_tune_status: Option<u8> = None;
     let mut said_tune_answered = false;
 
     for _ in 0..IN_FLIGHT {
@@ -278,6 +279,20 @@ fn pump(
                         ));
                     }
                     tune_poll_failures = 0;
+                    // The read-back's last byte is not documented: 0x10 and
+                    // 0x11 (dial turning) were seen without a 10 MHz
+                    // reference, 0x30 with one. Every change but the dial
+                    // bit goes in the report, for the bench test that will
+                    // say whether 0x20 is the reference.
+                    let st = t.status & !0x01;
+                    if last_tune_status != Some(st) {
+                        if let Some(was) = last_tune_status {
+                            trace.note(format!(
+                                "dial read-back status 0x{st:02x} (was 0x{was:02x})"
+                            ));
+                        }
+                        last_tune_status = Some(st);
+                    }
                 }
                 Ok(None) => {}
                 // Not fatal and not worth a line per failure: the samples are

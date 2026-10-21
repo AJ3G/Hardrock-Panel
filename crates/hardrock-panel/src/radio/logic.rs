@@ -236,6 +236,10 @@ pub(crate) struct RadioPrefs {
     /// The ten stored CW messages as last stored from here (the radio has no
     /// way to read them back).
     pub cw_msgs: Vec<String>,
+    /// A 10 MHz reference is connected to the DUO's REF IN, as the operator
+    /// says (the radio reports it over neither CAT nor USB as far as is
+    /// known): lights REF on the LCD.
+    pub ref_10mhz: bool,
 }
 
 impl Default for RadioPrefs {
@@ -246,6 +250,7 @@ impl Default for RadioPrefs {
             tx_light: 1,
             xvtr_hz: 0,
             cw_msgs: vec![String::new(); 10],
+            ref_10mhz: false,
         }
     }
 }

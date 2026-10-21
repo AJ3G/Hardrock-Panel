@@ -822,6 +822,17 @@ impl App {
                     });
                     ui.add_space(6.0);
                     settings::settings_station(ui, &mut self.saved.station);
+                    ui.add_space(6.0);
+                    let mut on = radio::ref_10mhz(ctx);
+                    if chrome::checkbox(ui, &mut on, "10 MHz reference connected to the DUO")
+                        .on_hover_text(
+                            "Lights REF on the RADIO display. The DUO doesn't report its \
+                             reference input, so this is your word for it.",
+                        )
+                        .changed()
+                    {
+                        radio::set_ref_10mhz(ctx, on);
+                    }
                     ui.add_space(10.0);
                     ui.separator();
                     ui.add_space(6.0);

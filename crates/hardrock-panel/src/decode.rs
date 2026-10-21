@@ -458,7 +458,11 @@ impl Decode {
                 let mut cfg = WsjtConfig::new(mode);
                 // Hashed messages naming the operator resolve from the start.
                 cfg.my_calls.extend(st.call());
-                tracing::info!("{} decoder started, receiver at {:.0} Hz", mode.label(), at.dial_hz);
+                tracing::info!(
+                    "{} decoder started, receiver at {:.0} Hz",
+                    mode.label(),
+                    at.dial_hz
+                );
                 let w = Arc::new(WsjtDecoder::spawn(cfg));
                 self.started_utc = Some(decoders::slot::utc_now());
                 let f = w.clone();
@@ -879,66 +883,62 @@ fn body(
             }
         });
     }
-    ui.horizontal_wrapped(|ui| {
-        match s.kind.family() {
-            Family::Text => {
-                if s.kind != Kind::Navtex {
-                    caption(ui, "Audio");
-                    ui.add(
-                        egui::DragValue::new(&mut s.audio_hz)
-                            .range(300.0..=3000.0)
-                            .speed(5.0)
-                            .suffix(" Hz"),
-                    );
-                }
-                if matches!(s.kind, Kind::Rtty | Kind::Navtex) {
-                    chrome::checkbox(ui, &mut s.reverse, "Reverse");
-                }
-                if chrome::chip(ui, false, "Clear").clicked() {
-                    d.text.clear();
-                }
+    ui.horizontal_wrapped(|ui| match s.kind.family() {
+        Family::Text => {
+            if s.kind != Kind::Navtex {
+                caption(ui, "Audio");
+                ui.add(
+                    egui::DragValue::new(&mut s.audio_hz)
+                        .range(300.0..=3000.0)
+                        .speed(5.0)
+                        .suffix(" Hz"),
+                );
             }
-            Family::Picture if s.kind == Kind::Wefax => {
-                for l in Lpm::ALL {
-                    if chrome::chip(ui, s.lpm == l.value(), l.label()).clicked() {
-                        s.lpm = l.value();
-                    }
-                }
-                chrome::checkbox(ui, &mut s.ioc_288, "IOC 288");
-                if let Some((_, Worker::Picture(w, _))) = &d.worker {
-                    if chrome::chip(ui, false, "Start now").clicked() {
-                        w.command(ImageCmd::Start);
-                    }
-                    if chrome::chip(ui, false, "Stop").clicked() {
-                        w.command(ImageCmd::Stop);
-                    }
-                }
+            if matches!(s.kind, Kind::Rtty | Kind::Navtex) {
+                chrome::checkbox(ui, &mut s.reverse, "Reverse");
             }
-            Family::Wsjt | Family::Link => {
-                if chrome::chip(ui, false, "Clear").clicked() {
-                    d.rows.clear();
-                    d.selected.clear();
-                }
-                let n = d.selected.len();
-                let copy = ui
-                    .add_enabled_ui(n > 0, |ui| chrome::chip(ui, false, format!("COPY {n}")))
-                    .inner
-                    .on_hover_text(
-                        "Copy the lines picked (click, Ctrl+click, Shift+click); Ctrl+C too",
-                    )
-                    .clicked();
-                if copy {
-                    ui.ctx().copy_text(copy_text(d, s.kind.family(), st, true));
-                }
-                let all = chrome::chip(ui, false, "COPY ALL")
-                    .on_hover_text("Copy every line shown, newest first")
-                    .clicked();
-                if all {
-                    ui.ctx().copy_text(copy_text(d, s.kind.family(), st, false));
-                }
+            if chrome::chip(ui, false, "Clear").clicked() {
+                d.text.clear();
             }
-            _ => {}
         }
+        Family::Picture if s.kind == Kind::Wefax => {
+            for l in Lpm::ALL {
+                if chrome::chip(ui, s.lpm == l.value(), l.label()).clicked() {
+                    s.lpm = l.value();
+                }
+            }
+            chrome::checkbox(ui, &mut s.ioc_288, "IOC 288");
+            if let Some((_, Worker::Picture(w, _))) = &d.worker {
+                if chrome::chip(ui, false, "Start now").clicked() {
+                    w.command(ImageCmd::Start);
+                }
+                if chrome::chip(ui, false, "Stop").clicked() {
+                    w.command(ImageCmd::Stop);
+                }
+            }
+        }
+        Family::Wsjt | Family::Link => {
+            if chrome::chip(ui, false, "Clear").clicked() {
+                d.rows.clear();
+                d.selected.clear();
+            }
+            let n = d.selected.len();
+            let copy = ui
+                .add_enabled_ui(n > 0, |ui| chrome::chip(ui, false, format!("COPY {n}")))
+                .inner
+                .on_hover_text("Copy the lines picked (click, Ctrl+click, Shift+click); Ctrl+C too")
+                .clicked();
+            if copy {
+                ui.ctx().copy_text(copy_text(d, s.kind.family(), st, true));
+            }
+            let all = chrome::chip(ui, false, "COPY ALL")
+                .on_hover_text("Copy every line shown, newest first")
+                .clicked();
+            if all {
+                ui.ctx().copy_text(copy_text(d, s.kind.family(), st, false));
+            }
+        }
+        _ => {}
     });
     if s.kind.family() == Family::Wsjt
         && let Some(mode) = s.kind.wsjt()
@@ -1288,7 +1288,8 @@ mod tests {
         rx.start(&rs, &scope, rx::RadioNow { link: None, rig: None, transmitting: false });
         assert!(rx.active());
         let s = DecodeSettings { kind: Kind::Ft8, running: true, ..Default::default() };
-        let st = StationSettings { callsign: "AJ3G".into(), grid: "FN20".into(), ..Default::default() };
+        let st =
+            StationSettings { callsign: "AJ3G".into(), grid: "FN20".into(), ..Default::default() };
         let at = Where { dial_hz: 14_074_000.0, lsb: false, xvtr_hz: 0.0, ppm: 0.0 };
         let mut d = Decode::default();
         d.frame(&s, &st, &rx, at, None);

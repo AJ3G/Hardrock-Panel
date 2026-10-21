@@ -1131,7 +1131,12 @@ mod tests {
         assert!(d.reply_key(&d.key_tune()).is_none());
         assert_eq!(d.key_audio(), Some(Frame::new("TX;", FrameKind::KeyAudio)));
         assert!(d.reply_key(&d.key_audio().unwrap()).is_none());
-        for f in TELEMETRY.iter().chain(METER.iter()).chain(DIAL.iter()).chain(SETTINGS.iter().map(|i| &i.cmd)) {
+        for f in TELEMETRY
+            .iter()
+            .chain(METER.iter())
+            .chain(DIAL.iter())
+            .chain(SETTINGS.iter().map(|i| &i.cmd))
+        {
             assert!(is_read(f));
             // A READ ends at its command letters (SM carries its fixed 0).
             assert!(f.len() <= 4 && f.ends_with(';'), "{f}");
