@@ -18,9 +18,14 @@ pub const DEFAULT_BAUD: u32 = 38_400;
 /// Read while transmitting and between: forward power, reflected power, SWR.
 pub const TELEMETRY: [&str; 3] = ["FP;", "RP;", "WR;"];
 
-/// Read once a second: the dial, VFO B, the mode, and `GI`, which carries
-/// receive or transmit, the VFO, split and RIT in one answer.
-pub const DIAL: [&str; 4] = ["FA;", "FB;", "MD;", "GI;"];
+/// Read with the telemetry while receiving: the S-meter, so RADIO's meter
+/// moves with the band rather than once a settings read (10 s).
+pub const METER: [&str; 1] = ["SM0;"];
+
+/// Read once a second: the dial, VFO B, the mode, `GI`, which carries
+/// receive or transmit, the VFO, split and RIT in one answer, and the
+/// receive filter, so a filter changed on the radio shows within a second.
+pub const DIAL: [&str; 5] = ["FA;", "FB;", "MD;", "GI;", "RF;"];
 
 /// Asked to see whether the radio is there at all.
 pub const PING: &str = "FA;";
@@ -574,6 +579,7 @@ pub fn is_cw_send(frame: &str) -> bool {
 /// Whether `frame` is one of the READ frames above.
 pub fn is_read(frame: &str) -> bool {
     TELEMETRY.contains(&frame)
+        || METER.contains(&frame)
         || DIAL.contains(&frame)
         || all_settings().iter().any(|i| i.cmd == frame)
 }
@@ -836,6 +842,10 @@ impl Protocol for FdmDuo {
 
     fn telemetry(&self) -> Vec<Frame> {
         TELEMETRY.iter().map(|f| Frame::read(*f)).collect()
+    }
+
+    fn meter(&self) -> Vec<Frame> {
+        METER.iter().map(|f| Frame::read(*f)).collect()
     }
 
     fn dial(&self) -> Vec<Frame> {
@@ -1121,7 +1131,7 @@ mod tests {
         assert!(d.reply_key(&d.key_tune()).is_none());
         assert_eq!(d.key_audio(), Some(Frame::new("TX;", FrameKind::KeyAudio)));
         assert!(d.reply_key(&d.key_audio().unwrap()).is_none());
-        for f in TELEMETRY.iter().chain(DIAL.iter()).chain(SETTINGS.iter().map(|i| &i.cmd)) {
+        for f in TELEMETRY.iter().chain(METER.iter()).chain(DIAL.iter()).chain(SETTINGS.iter().map(|i| &i.cmd)) {
             assert!(is_read(f));
             // A READ ends at its command letters (SM carries its fixed 0).
             assert!(f.len() <= 4 && f.ends_with(';'), "{f}");

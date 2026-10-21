@@ -243,6 +243,10 @@ pub trait Protocol: Send {
     fn ping(&self) -> Frame;
     /// Forward power, reflected power and SWR, read several times a second.
     fn telemetry(&self) -> Vec<Frame>;
+    /// The receive S-meter, read with the telemetry while receiving.
+    fn meter(&self) -> Vec<Frame> {
+        Vec::new()
+    }
     /// The dial and mode, read once a second.
     fn dial(&self) -> Vec<Frame>;
     /// Every setting the radio answers a READ for.

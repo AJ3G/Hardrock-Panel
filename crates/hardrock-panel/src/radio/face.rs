@@ -177,7 +177,7 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
     let k =
         ((width - 2.0 * pad - mode_w - DH * th.skew) / units).clamp(0.5 * zoom(), 1.25 * zoom());
     let digits_h = (DH + 24.0) * k;
-    let height = 2.0 * pad + z(14.0 + 6.0) + digits_h + z(6.0 + 14.0 + 6.0 + 18.0);
+    let height = 2.0 * pad + z(14.0 + 4.0 + 14.0 + 6.0) + digits_h + z(6.0 + 14.0 + 6.0 + 18.0);
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     let p = ui.painter_at(rect.expand(2.0));
     let bl = backlight(f, prefs);
@@ -197,6 +197,9 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
 
     // Annunciators. Some are keys: click to change.
     annunciators(ui, f, prefs, pos2(inner.left(), y), inner.width());
+    y += z(14.0 + 4.0);
+    // The receive settings the radio's own display shows.
+    receive_row(ui, f, pos2(inner.left(), y), inner.width());
     y += z(14.0 + 6.0);
 
     // The dial.
@@ -431,8 +434,11 @@ fn annunciators(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, at: Pos2, wid
         _ => "VFO A",
     };
     let tx = s.transmitting();
+    // The receive filter's width, always (blank until the radio answers).
+    let fil = logic::filter_hz(f.p, s).map_or("FIL ----".to_string(), logic::filter_text);
     // (text, lit, the control it changes)
-    let items: [(&str, bool, Option<&str>); 11] = [
+    let items: [(&str, bool, Option<&str>); 12] = [
+        (&fil, v("RF").is_some(), None),
         ("LP", v("LP") == Some("1"), Some("LP")),
         ("ATT", v("AT") == Some("1"), Some("AT")),
         (ant, v("AN").is_some(), Some("AN")),
@@ -477,6 +483,44 @@ fn annunciators(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, at: Pos2, wid
                 _ => "Where the radio takes transmit audio from (menu 32): click to choose",
             };
             resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hover);
+        }
+        ui.painter().galley(r.min, g, ink.gamma_multiply(a));
+        x = r.right() + z(10.0);
+    }
+}
+
+/// The LCD's second row: AGC, noise blanker and reduction, notch, squelch,
+/// and in split the frequency the radio transmits on. Read only; the RX
+/// pop-out sets them. Each is read with the settings (every 10 s).
+fn receive_row(ui: &mut Ui, f: &mut Face<'_>, at: Pos2, width: f32) {
+    let s = f.s;
+    let rb = |cmd: &str| logic::find(f.p, cmd).and_then(|c| logic::readback(c, s));
+    let on = |cmd: &str| rb(cmd).is_some_and(|v| v.trim().trim_start_matches('0') != "");
+    let agc = match rb("GC") {
+        Some("1") => "MAN GAIN",
+        _ => "AGC",
+    };
+    let tx_on = (s.split == Some(true)).then(|| s.freq_b_hz).flatten().map(|hz| {
+        let khz = hz as f64 / 1e3;
+        format!("TX {khz:.3}")
+    });
+    let items: Vec<(String, bool)> = vec![
+        (agc.to_string(), rb("GC").is_some()),
+        ("NB".into(), on("NB")),
+        ("NR".into(), on("NR")),
+        ("NOTCH".into(), on("NO")),
+        ("SQL".into(), on("SQ")),
+        (tx_on.clone().unwrap_or_else(|| "TX ----".into()), tx_on.is_some()),
+    ];
+    let ink = f.th.lcd_ink;
+    let font = label_font(11.0);
+    let mut x = at.x;
+    for (text, lit) in items {
+        let a = if lit { 0.92 } else { 0.14 };
+        let g = ui.painter().layout_no_wrap(text, font.clone(), ink.gamma_multiply(a));
+        let r = Rect::from_min_size(pos2(x, at.y), vec2(g.size().x, z(14.0)));
+        if r.right() > at.x + width {
+            break;
         }
         ui.painter().galley(r.min, g, ink.gamma_multiply(a));
         x = r.right() + z(10.0);

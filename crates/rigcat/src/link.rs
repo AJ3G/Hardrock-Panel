@@ -659,6 +659,12 @@ fn run<P: Read + Write>(
         // second later: the scope, held over the transmission, waits for it.
         let on_air =
             status.lock().unwrap_or_else(|e| e.into_inner()).tx_state.is_some_and(|t| t != 0);
+        // Receiving, the S-meter every round, as the radio's own bar moves.
+        if !on_air && tune.is_none() {
+            for f in rig.proto.meter() {
+                ask(&mut rig, &f);
+            }
+        }
         if Instant::now() >= next_dial || on_air {
             next_dial = Instant::now() + DIAL_POLL;
             for f in rig.proto.dial() {

@@ -424,6 +424,19 @@ pub(crate) fn rit_hz(s: &RigStatus) -> Option<i32> {
     s.value("RV")?.trim().trim_start_matches('+').parse().ok()
 }
 
+/// The receive filter's width in Hz, from the radio's `RF` answer in words
+/// ("2800 Hz (USB)").
+pub(crate) fn filter_hz(p: &dyn Protocol, s: &RigStatus) -> Option<u32> {
+    let body = s.value("RF")?.to_string();
+    let t = p.describe(&Reply { key: "RF".into(), body })?;
+    t.split_once(" Hz")?.0.trim().parse().ok()
+}
+
+/// A filter width as the LCD shows it: "FIL 2.80k", "FIL 500".
+pub(crate) fn filter_text(hz: u32) -> String {
+    if hz >= 1000 { format!("FIL {:.2}k", hz as f32 / 1000.0) } else { format!("FIL {hz}") }
+}
+
 /// The receive level in dBm, from the radio's own S-meter answer in words.
 pub(crate) fn s_dbm(p: &dyn Protocol, s: &RigStatus) -> Option<f32> {
     let body = s.value("SM")?.to_string();
@@ -689,6 +702,17 @@ mod tests {
         s.fwd = Some(rigcat::Watts { w: 5.0, valid: true });
         assert!(locked(&s).is_some());
         assert!(locked(&RigStatus::default()).unwrap().contains("connected"));
+    }
+
+    #[test]
+    fn the_lcd_shows_the_filter_width() {
+        let p = rigcat::RigModel::FdmDuo.protocol();
+        let mut s = RigStatus::default();
+        assert_eq!(filter_hz(&*p, &s), None);
+        s.values.insert("RF".into(), "112".into());
+        assert_eq!(filter_hz(&*p, &s), Some(2800));
+        assert_eq!(filter_text(2800), "FIL 2.80k");
+        assert_eq!(filter_text(500), "FIL 500");
     }
 
     #[test]

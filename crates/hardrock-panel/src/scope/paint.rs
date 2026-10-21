@@ -57,6 +57,13 @@ fn dim() -> Color32 {
 fn accent() -> Color32 {
     theme::scope().accent
 }
+/// A receiver passband's width, as the radio's filter is named: "2.80 kHz",
+/// "500 Hz".
+pub(crate) fn bw_text(pb: (f32, f32)) -> String {
+    let w = (pb.1 - pb.0).abs();
+    if w >= 1000.0 { format!("BW {:.2} kHz", w / 1000.0) } else { format!("BW {w:.0} Hz") }
+}
+
 fn mono(size: f32) -> FontId {
     FontId::monospace(size)
 }
@@ -228,6 +235,14 @@ fn paint_spectrum(
         0.0,
         accent().gamma_multiply(0.18),
     );
+    // Its width, always, inside it when there is room (the RX label above
+    // carries it too).
+    let (wa, wb) = (pa.min(pb), pa.max(pb));
+    let wg = p.layout_no_wrap(bw_text(cx.rig.passband), mono(10.0), accent());
+    if wb - wa >= wg.size().x + 8.0 && wb > all.left() && wa < all.right() {
+        let cxp = (0.5 * (wa + wb)).clamp(all.left() + 0.5 * wg.size().x, all.right() - 0.5 * wg.size().x);
+        p.galley(pos2(cxp - 0.5 * wg.size().x, all.top() + 22.0), wg, accent());
+    }
     let edge_drag = matches!(sc.drag.map(|d| d.kind), Some(DragKind::Edge(_)));
     for ex in [pa, pb] {
         p.vline(ex, all.y_range(), Stroke::new(if edge_drag { 2.0 } else { 1.0 }, accent()));
@@ -373,8 +388,12 @@ fn paint_spectrum(
     let scale = sc.settings.scale;
     let lvl = level_text(snap.level_dbm, scale);
     let snr = sc.snr(snap, &cx.rig).map_or(String::new(), |s| format!(" · SNR {s:.0} dB"));
-    let lab =
-        format!("RX {} {} · {lvl}{snr}", view::fmt_freq(cx.map.shown(rx)), cx.rig.mode.label());
+    let bw = bw_text(cx.rig.passband);
+    let lab = format!(
+        "RX {} {} · {bw} · {lvl}{snr}",
+        view::fmt_freq(cx.map.shown(rx)),
+        cx.rig.mode.label()
+    );
     let galley = p.layout_no_wrap(lab, mono(10.5), ink());
     let lx = if xv + 8.0 + galley.size().x > all.right() {
         xv - 8.0 - galley.size().x
@@ -1323,6 +1342,13 @@ impl Scope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_passband_width_reads_as_a_filter() {
+        assert_eq!(bw_text((200.0, 3000.0)), "BW 2.80 kHz");
+        assert_eq!(bw_text((-250.0, 250.0)), "BW 500 Hz");
+        assert_eq!(bw_text((-1270.0, 4250.0)), "BW 5.52 kHz");
+    }
 
     #[test]
     fn utc_ticks_are_spaced_to_be_read() {
