@@ -522,3 +522,42 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 **Not confirmed.** That WSPRnet takes a `version` as long as "Hardrock Panel 0.1.0" (the box shows how many it says it added, so a refusal would show), and that PSK Reporter shows the panel's reports (PSK Reporter has a test port, 14739, for a first try). Neither can be tried from the build machine.
 
 **Where.** `slotclock.rs`, `station.rs`, `decodelog.rs`, `spots/mod.rs`, `spots/pskreporter.rs`, `spots/wsprnet.rs`, `decode.rs`, `settings.rs` (`settings_station`), `main.rs` (`Saved::station`).
+
+## 45. The AMP buttons go out ahead of the next read, and show as asked until read back
+
+**Decided:** AJ3G, 21 Oct 2026, from "AMP buttons respond slowly, slower than the SDRoxide panel" (NEXT-BUILD #5). The shape by the integrator.
+
+**What the link does.**
+- **One read at a time.** The link's loop makes one query (`Read`) and looks at the panel's channel before every one, so a click waits behind at most one read: up to the 400 ms reply timeout when the amplifier skips an answer, tens of milliseconds when it doesn't. Before, the channel was looked at once a round, and a round was the status, the temperature and four tuner reads, each up to 400 ms.
+- **Spread.** The status frame stays every 250 ms; the temperature and the tuner's three queries (`HRTT`, `HRTB`, `HRTMP`, and `HRTR` after a tune) are separate reads fitted between status frames. Straight after a status frame one other due read goes first (`next_read`), so a run of unanswered status reads can't shut the others out.
+- **After a click** the status is read next, to confirm it, and the tuner again after its relays settle (300 ms).
+- **Interlocks #1 and #4** keep their status read just before a relay or OFF-to-PTT command, except that a frame the amplifier answered within 100 ms and showing it clear stands in for it (`FRESH`, docs/safety-interlocks.md). The band-follow read of #3 is always its own.
+
+**What the panel shows.** A click on PTT/OFF, ANT, DN/UP or ON/BYP shows at once as asked, in the neutral blue (`AmpStatus::pending`, set by `AmpLink::action` on the panel's own thread): the PTT key reads PTT in blue until the amplifier reads PTT (then green), ANT the antenna asked for, the band the one stepped to. The first read that shows it confirms it. A refused click goes back at once; one still read in its old state after a second (`PENDING_HOLD`) goes back to what the amplifier reads. The interlocks go by the readings, never by what is pending. TUNE and the C/F tile show only what is read back.
+
+**Measured** (`a_click_goes_out_without_waiting_for_a_round_of_reads`, a simulated HR500 answering after 25 ms, 400 ms reply timeout, 16 clicks of each at scattered moments):
+
+| amplifier | before: mean / worst | after: mean / worst |
+|---|---|---|
+| answers everything, PTT/OFF | 16 / 48 ms | 6 / 25 ms |
+| answers everything, ANT | 29 / 74 ms | 14 / 26 ms |
+| skips `HRTP` and the tuner reads, PTT/OFF | 1191 / 1552 ms | 228 / 385 ms |
+| skips `HRTP` and the tuner reads, ANT | 1184 / 1551 ms | 250 / 419 ms |
+
+**Where.** `crates/hardrock/src/link.rs` (`run`, `Read`, `next_read`, `act`, `Clear`, `queue`), `crates/hardrock/src/types.rs` (`AmpStatus::pending`, `AmpAction::control`), `panel.rs` (`keys`, `Shown::band`), `panel/tft.rs`.
+
+## 46. The RADIO window grows with its window; the AMP panel keeps its proportions
+
+**Decided:** AJ3G, 21 Oct 2026: "Radio Panel and Amp Panel do not scale when window is expanded" (NEXT-BUILD #9). The shape by the integrator.
+
+**What was wrong.** The radio window was drawn at fixed sizes: popped out, its face stopped at 760 points wide and its text never grew; docked, it was 560 wide and could not be resized. The AMP panel did scale to its window, but by whichever of width and height is tighter: in a wide window (a maximised landscape screen) the height decides, so it grew little while its boxes stretched across the whole width, which read as small text in a strip rather than as the panel grown.
+
+**What the panel does.**
+- **Radio window.** Drawn for a scale of 1 and scaled as a whole: every size it sets itself goes through `radio::zoom::z`, and the `Ui`'s style (text sizes, spacing, padding, slider and box widths) is scaled for the widgets that take their sizes from it (`zoom::scaled`). The text is laid out at the size it is shown, never a zoomed picture of it, so it stays sharp. Popped out it fits the window's width and height both (`panel::fit_scaled`, the AMP panel's fit, now shared), centred, between 0.75 and 3 times; smaller than that it scrolls. Docked, its width can be dragged and it scales with it, its height following. MENU and the confirmation questions are windows of their own and keep their size. The TUNE strip in the main window is unchanged.
+- **AMP panel.** Still fits width and height both, but its boxes stretch at most 1.3 times its own proportions (`MAX_STRETCH`); wider than that it keeps that width, centred. That partly reverses AJ3G's 18 Oct choice for the SDRoxide pop-out (boxes spanning the whole window) in very wide windows only; the constant is the one place to change it.
+- **Not done.** In a window much wider than it is tall the AMP panel cannot grow past what its height allows without a second, side-by-side layout (meters on the left, tuner and keys on the right). Not built.
+
+**Screens.** `screens/scale-before-*.png` and `screens/scale-after-*.png` beside this project's notes.
+
+**Where.** `radio/zoom.rs`, `radio.rs` (`fitted`, `radio_window`), `radio/face.rs`, `radio/controls.rs`, `tune.rs` (`tune_strip`), `panel.rs` (`fit_panel`, `fit_scaled`, `fit_scale`).
+

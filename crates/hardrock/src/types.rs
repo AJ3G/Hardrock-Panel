@@ -404,6 +404,23 @@ pub enum AmpAction {
     SetCelsius(bool),
 }
 
+impl AmpAction {
+    /// Which control the action is for, when the panel shows it as asked
+    /// before the amplifier is read back doing it (see
+    /// [`AmpStatus::pending`]): PTT/OFF, the antenna, the band, the tuner in
+    /// or out. `None` for TUNE and the temperature scale, which show only
+    /// what the amplifier reads back.
+    pub fn control(self) -> Option<u8> {
+        match self {
+            AmpAction::SetPtt(_) => Some(0),
+            AmpAction::SetAntenna(_) => Some(1),
+            AmpAction::SetBand(_) | AmpAction::BandUp | AmpAction::BandDown => Some(2),
+            AmpAction::SetAtu(_) => Some(3),
+            AmpAction::Tune | AmpAction::SetCelsius(_) => None,
+        }
+    }
+}
+
 /// One `HRST` report.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AmpReadings {
@@ -472,6 +489,14 @@ pub struct AmpStatus {
     /// The amplifier's own TX light: keyed by its PTT input. `None` on
     /// firmware that sends no lights.
     pub transmitting: Option<bool>,
+    /// Buttons clicked that the amplifier hasn't yet been read back doing,
+    /// at most one for each control (see [`AmpAction::control`]). The panel
+    /// draws each control as asked, in its neutral blue, until a reading
+    /// confirms it or the link drops it: refused, or still not shown after
+    /// a second, when the control goes back to what the amplifier reads.
+    /// Nothing that guards the amplifier reads this; the interlocks go by
+    /// `readings`.
+    pub pending: Vec<AmpAction>,
 }
 
 /// The band names `HRBN` codes stand for, 1 = 10 m … 10 = 160 m.

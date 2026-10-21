@@ -1025,6 +1025,10 @@ impl eframe::App for App {
             for &a in &out.actions {
                 link.action(a);
             }
+            // Drawn again straight away, to show the click as asked.
+            if !out.actions.is_empty() {
+                ctx.request_repaint();
+            }
         }
         self.watch_band(&st, &out.actions);
         if out.settings {

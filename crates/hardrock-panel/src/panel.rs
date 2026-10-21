@@ -679,19 +679,57 @@ fn corner_mark(p: &egui::Painter, rect: egui::Rect, s: f32, col: Color32) {
 }
 
 /// The panel in a window of its own: scaled to fit the window's width and
-/// height both, and centred across it. The docked window has no height to
-/// fit; its height follows its width.
+/// height both. The docked window has no height to fit; its height follows
+/// its width.
+///
+/// In a window wider than the panel's proportions the boxes and rows span
+/// up to [`MAX_STRETCH`] times the panel's own width, the text, dials and
+/// drawing at the scale the height allows centred in them (AJ3G, 18 Oct);
+/// wider than that, the panel keeps that width and is centred, so that it
+/// still reads as the panel grown rather than as a strip of small text
+/// across the screen (AJ3G, 21 Oct 2026: "Amp Panel do[es] not scale when
+/// window is expanded").
 pub(crate) fn fit_panel(
     ui: &mut egui::Ui,
     panel: impl FnOnce(&mut egui::Ui, f32) -> PanelOut,
 ) -> PanelOut {
-    // The panel's height at scale 1, measured as it was last drawn. It isn't
-    // exactly proportional to the scale (some spacing is fixed), so the scale
-    // is worked out from it only while the window's size is changing and for
-    // a few frames after, then held. Re-fitting every frame chased its own
-    // measurement and made the panel shake (AJ3G, 18 Oct).
-    let nat_id = egui::Id::new("sdroxide-amp-natural-height");
-    let fit_id = egui::Id::new("sdroxide-amp-fit");
+    fit_scaled(ui, "sdroxide-amp", 720.0, (MIN_SCALE, MAX_SCALE), |ui, s| {
+        let w = ui.available_width().min(720.0 * s * MAX_STRETCH);
+        let left = ui.max_rect().left() + (ui.available_width() - w) / 2.0;
+        let rect = Rect::from_min_size(
+            Pos2::new(left, ui.cursor().top()),
+            Vec2::new(w, ui.available_height()),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| panel(ui, s),
+        )
+        .inner
+    })
+}
+
+/// How much wider than its own proportions the panel's boxes may stretch in
+/// a wide window.
+const MAX_STRETCH: f32 = 1.3;
+
+/// Draw `contents` at the scale that fits the room there is: `base_w` wide
+/// at scale 1, and as tall as it measured last time it was drawn, within
+/// `range`. Scrolls only once the room is too small for the smallest scale.
+/// `key` keeps each window's measurement apart.
+pub(crate) fn fit_scaled<R>(
+    ui: &mut egui::Ui,
+    key: &'static str,
+    base_w: f32,
+    range: (f32, f32),
+    contents: impl FnOnce(&mut egui::Ui, f32) -> R,
+) -> R {
+    // The contents' height at scale 1, measured as they were last drawn.
+    // They aren't exactly proportional to the scale (some spacing is fixed),
+    // so the scale is worked out from it only while the window's size is
+    // changing and for a few frames after, then held. Re-fitting every frame
+    // chased its own measurement and made the panel shake (AJ3G, 18 Oct).
+    let nat_id = egui::Id::new((key, "natural-height"));
+    let fit_id = egui::Id::new((key, "fit"));
     let natural: f32 = ui.data(|d| d.get_temp(nat_id)).unwrap_or(600.0);
     let avail = ui.available_size();
     let prev: Option<Fit> = ui.data(|d| d.get_temp(fit_id));
@@ -700,19 +738,22 @@ pub(crate) fn fit_panel(
         Some(f) if f.settle == 0 => f.s,
         // A little short of a full fit, so rounding never tips it into a
         // scroll bar.
-        _ => ((avail.x / 720.0).min(avail.y * 0.98 / natural)).clamp(MIN_SCALE, MAX_SCALE),
+        _ => fit_scale(avail, base_w, natural, range),
     };
     let settle = same.map_or(FIT_SETTLE, |f| f.settle.saturating_sub(1));
     ui.data_mut(|d| d.insert_temp(fit_id, Fit { avail, s, settle }));
-    // The boxes and rows span the whole window; the text, dials and drawing
-    // are at the scale the height allows, centred in them (AJ3G, 18 Oct).
-    // Scrolls only once the window is too small for the smallest scale.
-    let out = egui::ScrollArea::vertical().show(ui, |ui| panel(ui, s));
+    let out = egui::ScrollArea::vertical().id_salt(key).show(ui, |ui| contents(ui, s));
     let h = out.content_size.y;
     if h > 1.0 && settle > 0 {
         ui.data_mut(|d| d.insert_temp(nat_id, h / s));
     }
     out.inner
+}
+
+/// The scale at which contents `base_w` wide and `natural` tall at scale 1
+/// fit `avail`, a little short so rounding never tips it into a scroll bar.
+fn fit_scale(avail: Vec2, base_w: f32, natural: f32, (lo, hi): (f32, f32)) -> f32 {
+    (avail.x / base_w).min(avail.y * 0.98 / natural.max(1.0)).clamp(lo, hi)
 }
 
 /// The popped-out panel's fit, kept from frame to frame: the size it was
@@ -855,6 +896,22 @@ impl Shown<'_> {
         self.live.then(|| self.st.alerts.shown(&self.limits, g, &self.r))
     }
 
+    /// The band to show, and whether it is one just asked for that the
+    /// amplifier hasn't been read back on yet (drawn in blue).
+    fn band(&self) -> (Option<u8>, bool) {
+        let asked = self.st.pending.iter().find_map(|a| match *a {
+            AmpAction::SetBand(c) => Some(c),
+            // Not yet taken by the link: where the step will go.
+            AmpAction::BandUp => Some(self.r.band.map_or(5, |c| c.saturating_sub(1).max(1))),
+            AmpAction::BandDown => Some(self.r.band.map_or(5, |c| (c + 1).min(10))),
+            _ => None,
+        });
+        match asked {
+            Some(c) => (Some(c), true),
+            None => (self.r.band, false),
+        }
+    }
+
     /// A reading's value and full scale, on the power range when it has one.
     fn read(&self, m: AmpMeter) -> (f32, f32, Zones, Option<PowerRange>) {
         let (value, full, zones) = m.read(&self.r, &self.limits);
@@ -988,12 +1045,13 @@ fn panel_look(
         if chip(ui, &keys.dn).clicked() {
             actions.push(keys.dn.action);
         }
+        let (band, asked) = sh.band();
         ui.add_enabled_ui(live, |ui| {
             ui.label(
-                RichText::new(r.band.map_or("UNK", amp_band_label))
+                RichText::new(band.map_or("UNK", amp_band_label))
                     .size(15.0 * s)
                     .strong()
-                    .color(theme::YELLOW()),
+                    .color(if asked { theme::CYAN() } else { theme::YELLOW() }),
             )
         });
         if chip(ui, &keys.up).clicked() {
@@ -1120,11 +1178,26 @@ fn keys(sh: &Shown) -> Keys {
     // the radio drives harder than the amplifier's drive limit, as a 100 W
     // radio running barefoot through the bypassed amp does. The link checks
     // again before sending.
-    let overdriven = ptt_overdriven(&r, &limits);
+    // A click not yet read back shows as asked, in the neutral blue, so the
+    // button answers at once (AJ3G, 21 Oct 2026); the next click toggles
+    // what it shows. The interlocks still go by the readings: shown OFF
+    // while the amplifier reads PTT, the key is greyed overdriven as if it
+    // read OFF.
+    let asked = |c: u8| st.pending.iter().copied().find(|a| a.control() == Some(c));
+    let shown_ptt = match asked(0) {
+        Some(AmpAction::SetPtt(on)) => on,
+        _ => r.ptt,
+    };
+    let overdriven = ptt_overdriven(&r, &limits)
+        || ptt_overdriven(&AmpReadings { ptt: shown_ptt, ..r }, &limits);
     // Green when keyed with the radio, the program's neutral blue in standby:
     // lit either way so the state can be told at a glance, but never yellow
     // or red, which only ever mean a warning (AJ3G).
-    let (mode, tone) = if r.ptt { ("PTT", Tone::Green) } else { ("OFF", Tone::Blue) };
+    let (mode, tone) = match (shown_ptt, asked(0).is_some()) {
+        (true, false) => ("PTT", Tone::Green),
+        (true, true) => ("PTT", Tone::Blue),
+        (false, _) => ("OFF", Tone::Blue),
+    };
     let ptt = Key {
         text: mode.into(),
         lit: true,
@@ -1139,7 +1212,7 @@ fn keys(sh: &Shown) -> Keys {
         } else {
             off_line()
         },
-        action: AmpAction::SetPtt(!r.ptt),
+        action: AmpAction::SetPtt(!shown_ptt),
     };
     // SAFETY INTERLOCK (docs/safety-interlocks.md, #2): antenna, band and
     // tuner switch relays in the RF path, which must not be switched with RF
@@ -1157,11 +1230,19 @@ fn keys(sh: &Shown) -> Keys {
         action,
     };
     let ant = (st.model.antennas() > 1).then(|| {
-        relay(
-            format!("ANT {}", r.antenna.max(1)),
-            "Switch antenna jack",
-            AmpAction::SetAntenna(if r.antenna == 2 { 1 } else { 2 }),
-        )
+        let (n, pending) = match asked(1) {
+            Some(AmpAction::SetAntenna(n)) => (n, true),
+            _ => (r.antenna, false),
+        };
+        Key {
+            lit: pending,
+            tone: if pending { Tone::Blue } else { Tone::Plain },
+            ..relay(
+                format!("ANT {}", n.max(1)),
+                "Switch antenna jack",
+                AmpAction::SetAntenna(if n == 2 { 1 } else { 2 }),
+            )
+        }
     });
     let dn = relay("DN".into(), "Band down", AmpAction::BandDown);
     let up = relay("UP".into(), "Band up", AmpAction::BandUp);
@@ -1188,15 +1269,19 @@ fn keys(sh: &Shown) -> Keys {
         }
     });
     let atu = st.atu.as_ref().map(|atu| {
-        let (text, tone) = if atu.active { ("ON", Tone::Green) } else { ("BYP", Tone::Blue) };
+        let (active, pending) = match asked(3) {
+            Some(AmpAction::SetAtu(on)) => (on, true),
+            _ => (atu.active, false),
+        };
+        let (text, tone) = match (active, pending) {
+            (true, false) => ("ON", Tone::Green),
+            (true, true) => ("ON", Tone::Blue),
+            (false, _) => ("BYP", Tone::Blue),
+        };
         Key {
             lit: true,
             tone,
-            ..relay(
-                text.into(),
-                "Put the tuner in line, or bypass it",
-                AmpAction::SetAtu(!atu.active),
-            )
+            ..relay(text.into(), "Put the tuner in line, or bypass it", AmpAction::SetAtu(!active))
         }
     });
     Keys { ptt, ant, dn, up, tune, atu }
@@ -2277,6 +2362,64 @@ mod tests {
         // In line already, PTT to OFF is always allowed.
         let st = status(AmpReadings { ptt: true, drive_w: 9.0, ..Default::default() });
         assert!(keys(&shown(&st)).ptt.enabled);
+    }
+
+    #[test]
+    fn a_window_fits_by_its_width_or_its_height_whichever_is_tighter() {
+        let r = (MIN_SCALE, MAX_SCALE);
+        // 720 wide and 600 tall at scale 1.
+        assert!((fit_scale(Vec2::new(1440.0, 2000.0), 720.0, 600.0, r) - 2.0).abs() < 1e-3);
+        // A wide window: the height decides, a little short of a full fit.
+        assert!((fit_scale(Vec2::new(1900.0, 600.0), 720.0, 600.0, r) - 0.98).abs() < 1e-3);
+        // Never below the smallest scale (it scrolls) or past the largest.
+        assert_eq!(fit_scale(Vec2::new(200.0, 200.0), 720.0, 600.0, r), MIN_SCALE);
+        assert_eq!(fit_scale(Vec2::new(9000.0, 9000.0), 720.0, 600.0, r), MAX_SCALE);
+    }
+
+    #[test]
+    fn a_click_shows_as_asked_in_blue_until_read_back() {
+        let mut st =
+            status(AmpReadings { ptt: false, antenna: 1, band: Some(7), ..Default::default() });
+        st.pending = vec![
+            AmpAction::SetPtt(true),
+            AmpAction::SetAntenna(2),
+            AmpAction::BandUp,
+            AmpAction::SetAtu(false),
+        ];
+        let sh = shown(&st);
+        let k = keys(&sh);
+        // Shown as asked, in the neutral blue, never green before it is read.
+        assert_eq!((k.ptt.text.as_str(), k.ptt.tone), ("PTT", Tone::Blue));
+        assert_eq!(k.ptt.action, AmpAction::SetPtt(false));
+        let ant = k.ant.unwrap();
+        assert_eq!((ant.text.as_str(), ant.tone, ant.lit), ("ANT 2", Tone::Blue, true));
+        assert_eq!(ant.action, AmpAction::SetAntenna(1));
+        assert_eq!(sh.band(), (Some(6), true));
+        let atu = k.atu.unwrap();
+        assert_eq!((atu.text.as_str(), atu.action), ("BYP", AmpAction::SetAtu(true)));
+        // Read back: shown as read, PTT green again.
+        let st = status(AmpReadings { ptt: true, antenna: 2, band: Some(6), ..Default::default() });
+        let k = keys(&shown(&st));
+        assert_eq!(k.ptt.tone, Tone::Green);
+        assert_eq!(k.ant.unwrap().tone, Tone::Plain);
+        assert_eq!(shown(&st).band(), (Some(6), false));
+    }
+
+    #[test]
+    fn a_pending_off_never_lets_ptt_through_overdriven() {
+        // SAFETY INTERLOCK #4: in line with 9 W of drive, OFF clicked and not
+        // yet read back. The key now offers PTT again, and is greyed as if
+        // the amplifier read OFF.
+        let mut st = status(AmpReadings { ptt: true, drive_w: 9.0, ..Default::default() });
+        st.pending = vec![AmpAction::SetPtt(false)];
+        let k = keys(&shown(&st));
+        assert_eq!(k.ptt.action, AmpAction::SetPtt(true));
+        assert!(!k.ptt.enabled);
+        // And a pending relay click is still greyed with RF on it (#2).
+        let mut st =
+            status(AmpReadings { ptt: true, fwd_w: 400.0, drive_w: 6.0, ..Default::default() });
+        st.pending = vec![AmpAction::SetAntenna(2)];
+        assert!(!keys(&shown(&st)).ant.unwrap().enabled);
     }
 
     #[test]

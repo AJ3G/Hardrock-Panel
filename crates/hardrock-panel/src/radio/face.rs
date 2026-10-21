@@ -12,15 +12,17 @@ use eframe::egui::{
 
 use super::logic::{self, RadioPrefs};
 use super::rigtheme::RigTheme;
+use super::zoom::{k as zoom, z};
 use super::{Face, Pop};
 
-/// The case lettering's font.
+/// The case lettering's font, `size` at scale 1 (see [`super::zoom`]).
 pub(crate) fn label_font(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("chakra-bold".into()))
+    FontId::new(z(size), FontFamily::Name("chakra-bold".into()))
 }
 
+/// The LCD's and the readouts' figures, `size` at scale 1.
 pub(crate) fn data_font(size: f32) -> FontId {
-    FontId::monospace(size)
+    FontId::monospace(z(size))
 }
 
 /// A key cap: a rounded key that lights in the status blue when it is on.
@@ -29,7 +31,7 @@ pub(crate) fn cap(ui: &mut Ui, th: &RigTheme, lit: bool, text: &str) -> Response
     let font = label_font(12.5);
     let ink = if lit { th.cap_lit_ink } else { th.cap_ink };
     let galley = ui.painter().layout_no_wrap(text.to_string(), font, ink);
-    let size = vec2(galley.size().x + 22.0, 26.0);
+    let size = vec2(galley.size().x + z(22.0), z(26.0));
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
@@ -37,7 +39,7 @@ pub(crate) fn cap(ui: &mut Ui, th: &RigTheme, lit: bool, text: &str) -> Response
         let r = if down { rect.translate(vec2(0.0, 1.0)) } else { rect };
         let cr = CornerRadius::same(5);
         if lit {
-            p.rect_filled(r.expand(3.0), CornerRadius::same(8), th.cap_lit.gamma_multiply(0.25));
+            p.rect_filled(r.expand(z(3.0)), CornerRadius::same(8), th.cap_lit.gamma_multiply(0.25));
             p.rect_filled(r, cr, th.cap_lit);
         } else {
             let hover = resp.hovered() && ui.is_enabled();
@@ -170,16 +172,17 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
     let n = logic::digit_count(xvtr);
     let dots = (0..n - 1).filter(|i| (n - 1 - i).is_multiple_of(3)).count();
     let units = n as f32 * (DW + GAP) - GAP + dots as f32 * GAP;
-    let pad = 16.0; // bezel and padding, each side
-    let mode_w = 70.0;
-    let k = ((width - 2.0 * pad - mode_w - DH * th.skew) / units).clamp(0.5, 1.25);
+    let pad = z(16.0); // bezel and padding, each side
+    let mode_w = z(70.0);
+    let k =
+        ((width - 2.0 * pad - mode_w - DH * th.skew) / units).clamp(0.5 * zoom(), 1.25 * zoom());
     let digits_h = (DH + 24.0) * k;
-    let height = 2.0 * pad + 14.0 + 6.0 + digits_h + 6.0 + 14.0 + 6.0 + 18.0;
+    let height = 2.0 * pad + z(14.0 + 6.0) + digits_h + z(6.0 + 14.0 + 6.0 + 18.0);
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     let p = ui.painter_at(rect.expand(2.0));
     let bl = backlight(f, prefs);
     p.rect_filled(rect, CornerRadius::same(6), th.bezel);
-    let glass = rect.shrink(6.0);
+    let glass = rect.shrink(z(6.0));
     gradient(
         &p,
         glass,
@@ -188,13 +191,13 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
     );
     let ink = th.lcd_ink;
     let ghost = ink.gamma_multiply(th.lcd_ghost);
-    let inner = glass.shrink(pad - 6.0);
+    let inner = glass.shrink(pad - z(6.0));
     let locked = f.lock.is_some();
     let mut y = inner.top();
 
     // Annunciators. Some are keys: click to change.
     annunciators(ui, f, prefs, pos2(inner.left(), y), inner.width());
-    y += 14.0 + 6.0;
+    y += z(14.0 + 6.0);
 
     // The dial.
     let rb = logic::dial_hz(f.s);
@@ -204,7 +207,7 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
         None => vec![None; n],
     };
     let top = y + 12.0 * k;
-    let mut x = inner.left() + 2.0;
+    let mut x = inner.left() + z(2.0);
     for (i, d) in ds.iter().enumerate() {
         let pl = logic::place(i, n);
         let dr = Rect::from_min_size(pos2(x - 3.0 * k, y), vec2((DW + 6.0) * k, digits_h));
@@ -221,9 +224,9 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
                 let c = ink.gamma_multiply(a);
                 p.add(Shape::convex_polygon(
                     vec![
-                        pos2(cx - 6.0, y + 9.0 * k),
+                        pos2(cx - z(6.0), y + 9.0 * k),
                         pos2(cx, y + 2.0 * k),
-                        pos2(cx + 6.0, y + 9.0 * k),
+                        pos2(cx + z(6.0), y + 9.0 * k),
                     ],
                     c,
                     Stroke::NONE,
@@ -231,8 +234,8 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
                 let b = y + digits_h;
                 p.add(Shape::convex_polygon(
                     vec![
-                        pos2(cx - 6.0, b - 9.0 * k),
-                        pos2(cx + 6.0, b - 9.0 * k),
+                        pos2(cx - z(6.0), b - 9.0 * k),
+                        pos2(cx + z(6.0), b - 9.0 * k),
                         pos2(cx, b - 2.0 * k),
                     ],
                     c,
@@ -279,8 +282,8 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
     let text =
         if f.st.digi.is_some() && mode == "USB" { "USB-D".to_string() } else { mode.to_string() };
     let mr = Rect::from_min_size(
-        pos2(inner.right() - mode_w + 6.0, y + digits_h - 30.0),
-        vec2(mode_w - 6.0, 24.0),
+        pos2(inner.right() - mode_w + z(6.0), y + digits_h - z(30.0)),
+        vec2(mode_w - z(6.0), z(24.0)),
     );
     let r = ui.interact(
         mr,
@@ -302,7 +305,7 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
     if !locked {
         r.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Change mode");
     }
-    y += digits_h + 6.0;
+    y += digits_h + z(6.0);
 
     // The segment meter: S in receive, forward power in transmit.
     let tx = f.s.transmitting();
@@ -320,15 +323,16 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
         }
     };
     let font = label_font(11.5);
-    p.text(pos2(inner.left(), y + 7.0), egui::Align2::LEFT_CENTER, key, font.clone(), ink);
-    p.text(pos2(inner.right(), y + 7.0), egui::Align2::RIGHT_CENTER, &val, font, ink);
-    let (l, r) = (inner.left() + 34.0, inner.right() - 62.0);
+    p.text(pos2(inner.left(), y + z(7.0)), egui::Align2::LEFT_CENTER, key, font.clone(), ink);
+    p.text(pos2(inner.right(), y + z(7.0)), egui::Align2::RIGHT_CENTER, &val, font, ink);
+    let (l, r) = (inner.left() + z(34.0), inner.right() - z(62.0));
     let sw = (r - l) / nseg as f32;
     for i in 0..nseg {
-        let sr = Rect::from_min_size(pos2(l + i as f32 * sw, y + 1.0), vec2(sw - 2.0, 12.0));
+        let sr =
+            Rect::from_min_size(pos2(l + i as f32 * sw, y + z(1.0)), vec2(sw - z(2.0), z(12.0)));
         p.rect_filled(sr, 1.0, if i < lit.min(nseg) { ink.gamma_multiply(0.9) } else { ghost });
     }
-    y += 14.0 + 6.0;
+    y += z(14.0 + 6.0);
 
     // The text line: power setting or TX, RIT, level or SWR.
     let mono = data_font(15.0);
@@ -340,12 +344,12 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
     } else {
         format!("TX PWR {}", f.s.power().map_or("—", |p| p.label))
     };
-    p.text(pos2(inner.left(), y + 9.0), egui::Align2::LEFT_CENTER, left, mono.clone(), ink);
+    p.text(pos2(inner.left(), y + z(9.0)), egui::Align2::LEFT_CENTER, left, mono.clone(), ink);
     if f.s.rit_on == Some(true) {
         let rit =
             logic::rit_hz(f.s).map_or("RIT".into(), |h| format!("RIT {:+.2}", h as f32 / 1000.0));
         p.text(
-            pos2(inner.center().x, y + 9.0),
+            pos2(inner.center().x, y + z(9.0)),
             egui::Align2::CENTER_CENTER,
             rit,
             mono.clone(),
@@ -357,7 +361,7 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
     } else {
         logic::s_dbm(f.p, f.s).map_or(String::new(), |d| format!("{d:.0} dBm"))
     };
-    p.text(pos2(inner.right(), y + 9.0), egui::Align2::RIGHT_CENTER, right, mono, ink);
+    p.text(pos2(inner.right(), y + z(9.0)), egui::Align2::RIGHT_CENTER, right, mono, ink);
 }
 
 /// The arrow keys and typed digits, with the pointer on the dial.
@@ -447,7 +451,7 @@ fn annunciators(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, at: Pos2, wid
     for (text, lit, cmd) in items {
         let a = if lit { 0.92 } else { 0.14 };
         let g = ui.painter().layout_no_wrap(text.to_string(), font.clone(), ink.gamma_multiply(a));
-        let r = Rect::from_min_size(pos2(x, at.y), vec2(g.size().x, 14.0));
+        let r = Rect::from_min_size(pos2(x, at.y), vec2(g.size().x, z(14.0)));
         if r.right() > at.x + width {
             break;
         }
@@ -475,7 +479,7 @@ fn annunciators(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, at: Pos2, wid
             resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hover);
         }
         ui.painter().galley(r.min, g, ink.gamma_multiply(a));
-        x = r.right() + 10.0;
+        x = r.right() + z(10.0);
     }
 }
 
@@ -497,10 +501,10 @@ fn annunciator_click(f: &mut Face<'_>, cmd: &'static str) {
 /// The knobs beside the LCD. The wheel over the big one tunes by the digit
 /// last picked (100 Hz until one is).
 pub(crate) fn knobs(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs) {
-    let (rect, resp) = ui.allocate_exact_size(vec2(104.0, 150.0), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(vec2(z(104.0), z(150.0)), Sense::hover());
     let p = ui.painter_at(rect);
     let knob = |c: Pos2, r: f32| {
-        p.circle_filled(c + vec2(0.0, 3.0), r + 1.0, Color32::from_black_alpha(140));
+        p.circle_filled(c + vec2(0.0, z(3.0)), r + z(1.0), Color32::from_black_alpha(140));
         let (dark, light) =
             (Color32::from_rgb(0x1c, 0x1e, 0x21), Color32::from_rgb(0x4d, 0x52, 0x59));
         p.circle_filled(c, r, dark);
@@ -513,22 +517,22 @@ pub(crate) fn knobs(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs) {
         p.circle_stroke(c, r, Stroke::new(1.0, Color32::from_gray(10)));
         p.line_segment(
             [c - vec2(0.0, r * 0.92), c - vec2(0.0, r * 0.74)],
-            Stroke::new(2.0, f.th.label),
+            Stroke::new(z(2.0), f.th.label),
         );
     };
-    let big = pos2(rect.center().x, rect.top() + 48.0);
-    knob(big, 46.0);
+    let big = pos2(rect.center().x, rect.top() + z(48.0));
+    knob(big, z(46.0));
     let (l, r) = (
-        pos2(rect.left() + 26.0, rect.top() + 118.0),
-        pos2(rect.right() - 26.0, rect.top() + 118.0),
+        pos2(rect.left() + z(26.0), rect.top() + z(118.0)),
+        pos2(rect.right() - z(26.0), rect.top() + z(118.0)),
     );
-    knob(l, 20.0);
-    knob(r, 20.0);
+    knob(l, z(20.0));
+    knob(r, z(20.0));
     let font = label_font(10.5);
-    p.text(l + vec2(0.0, 26.0), egui::Align2::CENTER_CENTER, "E1", font.clone(), f.th.dim);
-    p.text(r + vec2(0.0, 26.0), egui::Align2::CENTER_CENTER, "E2", font, f.th.dim);
+    p.text(l + vec2(0.0, z(26.0)), egui::Align2::CENTER_CENTER, "E1", font.clone(), f.th.dim);
+    p.text(r + vec2(0.0, z(26.0)), egui::Align2::CENTER_CENTER, "E2", font, f.th.dim);
     if f.lock.is_none() && logic::dial_hz(f.s).is_some() {
-        let over = resp.hover_pos().is_some_and(|q| q.distance(big) <= 46.0);
+        let over = resp.hover_pos().is_some_and(|q| q.distance(big) <= z(46.0));
         let hover = if over { resp.clone() } else { resp.clone().with_new_rect(Rect::NOTHING) };
         let w = if over { wheel_steps(ui, &hover) } else { 0 };
         if w != 0 {

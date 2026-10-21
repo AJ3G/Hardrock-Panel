@@ -14,6 +14,7 @@ use rigcat::{Control, Group, Kind, Reply, Vfo};
 use super::face::{cap, caption, data_font, label_font};
 use super::logic::{self, RadioPrefs};
 use super::rigtheme::RigTheme;
+use super::zoom::{z, zi};
 use super::{Confirm, Face, MenuFilter, Pop};
 use crate::chrome::{self, StyledCombo};
 
@@ -23,14 +24,14 @@ fn popout_frame(th: &RigTheme) -> egui::Frame {
         .fill(th.screen)
         .stroke(Stroke::new(1.0, th.case_line))
         .corner_radius(CornerRadius::same(6))
-        .inner_margin(egui::Margin::symmetric(10, 8))
+        .inner_margin(egui::Margin::symmetric(zi(10.0), zi(8.0)))
 }
 
 /// MODE, BAND, F INPUT, the four pop-outs and MENU.
 pub(crate) fn keys(ui: &mut Ui, f: &mut Face<'_>) {
     let th = f.th;
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        ui.spacing_mut().item_spacing = egui::vec2(z(6.0), z(6.0));
         let face_locked = f.lock.is_some();
         for (pop, text, hover) in [
             (Pop::Mode, "MODE", "The radio's mode, and the data modes"),
@@ -52,7 +53,7 @@ pub(crate) fn keys(ui: &mut Ui, f: &mut Face<'_>) {
                 f.st.toggle(pop);
             }
         }
-        ui.add_space(6.0);
+        ui.add_space(z(6.0));
         for (pop, text, hover) in [
             (Pop::Rx, "RX", "The radio's own receiver and audio"),
             (Pop::Cw, "CW", "The keyer, the CW decoder and the ten stored messages"),
@@ -67,7 +68,7 @@ pub(crate) fn keys(ui: &mut Ui, f: &mut Face<'_>) {
                 f.st.toggle(pop);
             }
         }
-        ui.add_space(6.0);
+        ui.add_space(z(6.0));
         let r = cap(ui, th, f.st.menu, "MENU").on_hover_text(
             "Every menu of the radio's with a CAT command, and the panel's own display settings",
         );
@@ -89,10 +90,10 @@ pub(crate) fn keys(ui: &mut Ui, f: &mut Face<'_>) {
 /// The open pop-out, if any.
 pub(crate) fn popout(ui: &mut Ui, f: &mut Face<'_>, prefs: &mut RadioPrefs) {
     let Some(pop) = f.st.pop else { return };
-    ui.add_space(4.0);
+    ui.add_space(z(4.0));
     popout_frame(f.th).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        ui.spacing_mut().item_spacing = egui::vec2(z(6.0), z(6.0));
         match pop {
             Pop::Mode => mode_pop(ui, f),
             Pop::Band => band_pop(ui, f, prefs),
@@ -211,7 +212,7 @@ fn freq_pop(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs) {
         let r = ui.add(
             egui::TextEdit::singleline(&mut f.st.entry)
                 .font(data_font(15.0))
-                .desired_width(110.0)
+                .desired_width(z(110.0))
                 .hint_text(if prefs.xvtr_hz == 0 { "14.074 or 7074" } else { "144.174" }),
         );
         if f.st.focus_entry {
@@ -271,7 +272,7 @@ fn group_pop(
         Some(c) => c.iter().filter_map(|c| logic::find(f.p, c)).collect(),
         None => f.p.controls().iter().filter(|c| c.group == group).collect(),
     };
-    egui::Grid::new(("radio-pop", group as u8)).num_columns(2).spacing([12.0, 5.0]).show(
+    egui::Grid::new(("radio-pop", group as u8)).num_columns(2).spacing([z(12.0), z(5.0)]).show(
         ui,
         |ui| {
             for c in list {
@@ -360,7 +361,7 @@ pub(crate) fn control(ui: &mut Ui, f: &mut Face<'_>, c: &'static Control) {
             let now: Option<i32> = rb.as_deref().and_then(|v| v.trim().parse().ok());
             let mut v = f.st.drags.get(c.cmd).copied().unwrap_or(now.unwrap_or(lo) as f64);
             ui.horizontal(|ui| {
-                ui.spacing_mut().slider_width = 150.0;
+                ui.spacing_mut().slider_width = z(150.0);
                 let r = chrome::slider_vertical(
                     ui,
                     egui::Slider::new(&mut v, lo as f64..=hi as f64)
@@ -393,8 +394,9 @@ pub(crate) fn control(ui: &mut Ui, f: &mut Face<'_>, c: &'static Control) {
                     .cloned()
                     .unwrap_or_else(|| rb.clone().unwrap_or_default().trim_end().to_string());
             ui.horizontal(|ui| {
-                let r = ui
-                    .add(egui::TextEdit::singleline(&mut buf).char_limit(len).desired_width(160.0));
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut buf).char_limit(len).desired_width(z(160.0)),
+                );
                 let go = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if go || cap(ui, f.th, false, "SET").clicked() {
                     f.send_control(c, &buf);
@@ -415,7 +417,7 @@ fn cw_messages(ui: &mut Ui, f: &mut Face<'_>, prefs: &mut RadioPrefs) {
     if f.p.cw_send(1).is_none() {
         return;
     }
-    ui.add_space(4.0);
+    ui.add_space(z(4.0));
     ui.horizontal(|ui| {
         ui.label(RichText::new("STORED MESSAGES").font(label_font(12.0)).color(th.label));
         // Stopping is an unkey: always let through.
@@ -434,13 +436,13 @@ fn cw_messages(ui: &mut Ui, f: &mut Face<'_>, prefs: &mut RadioPrefs) {
     // keyed at the full power setting (interlock #6), and never while
     // already transmitting (#5).
     let send_block = f.lock.or(f.carrier_blocked.as_deref());
-    egui::Grid::new("radio-cw-msgs").num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
+    egui::Grid::new("radio-cw-msgs").num_columns(4).spacing([z(8.0), z(4.0)]).show(ui, |ui| {
         for n in 1..=10u8 {
             ui.label(RichText::new(n.to_string()).font(data_font(13.0)).color(th.dim));
             let text = &mut prefs.cw_msgs[n as usize - 1];
             ui.add_enabled_ui(f.lock.is_none(), |ui| {
                 ui.add_sized(
-                    [240.0, 22.0],
+                    [z(240.0), z(22.0)],
                     egui::TextEdit::singleline(text).char_limit(32).font(data_font(13.0)),
                 );
             });
@@ -515,7 +517,7 @@ pub(crate) fn vfo_row(ui: &mut Ui, f: &mut Face<'_>) {
     let lock = f.lock;
     ui.add_enabled_ui(lock.is_none(), |ui| {
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            ui.spacing_mut().item_spacing = egui::vec2(z(6.0), z(6.0));
             let b = logic::rx_vfo(f.s) == Vfo::B;
             if cap(ui, th, false, if b { "B/A" } else { "A/B" })
                 .on_hover_text("Receive on the other VFO")
@@ -530,7 +532,7 @@ pub(crate) fn vfo_row(ui: &mut Ui, f: &mut Face<'_>) {
             if cap(ui, th, split, "SPLIT").on_hover_text("Transmit on VFO B").clicked() {
                 f.push(f.p.set_split(!split));
             }
-            ui.add_space(6.0);
+            ui.add_space(z(6.0));
             let rit = f.s.rit_on == Some(true);
             if cap(ui, th, rit, "RIT").on_hover_text("Receiver offset on or off").clicked() {
                 f.push(f.p.set_rit_on(!rit));
@@ -570,25 +572,25 @@ pub(crate) fn readouts(ui: &mut Ui, f: &Face<'_>) {
         [("FWD · FP", w(s.fwd)), ("RFL · RP", w(s.rfl)), ("SWR · WR", swr), ("TX IN · 32", input)];
     let width = ui.available_width();
     let cw = (width - 3.0) / 4.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 40.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, z(40.0)), egui::Sense::hover());
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(4), th.case_line);
     for (i, (k, v)) in cells.iter().enumerate() {
         let r = egui::Rect::from_min_size(
             rect.min + egui::vec2(i as f32 * (cw + 1.0), 0.0),
-            egui::vec2(cw, 40.0),
+            egui::vec2(cw, z(40.0)),
         )
         .shrink(1.0);
         p.rect_filled(r, 0.0, th.screen);
         p.text(
-            r.left_top() + egui::vec2(8.0, 5.0),
+            r.left_top() + egui::vec2(z(8.0), z(5.0)),
             egui::Align2::LEFT_TOP,
             *k,
             label_font(10.5),
             th.dim,
         );
         p.text(
-            r.left_top() + egui::vec2(8.0, 19.0),
+            r.left_top() + egui::vec2(z(8.0), z(19.0)),
             egui::Align2::LEFT_TOP,
             v,
             data_font(14.0),

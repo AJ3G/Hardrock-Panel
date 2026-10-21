@@ -10,7 +10,9 @@ Before removing or loosening any of these, read why it is there.
 - **Blocks:** antenna change, band set, band up/down, and tuner in/out (ON/BYP), whoever asks: the panel's buttons or anything else that sends the command through the link.
 - **When:** the amplifier says it is transmitting (status digit d1), or shows drive (0.1 W or more) or output (1 W or more), or does not answer the status query asked just before the command.
 - **Why:** each of these switches a relay in the RF path. Switching one with RF on it opens or changes the load under power. On AJ3G's HR500 (17 Oct 2026) switching the tuner in or out while transmitting made the amp raise its RFL flag at once. The reflected power spike stresses the VRF2944 output devices, and arcing pits the relay contacts. The amp often skips its status reply mid-transmission, so no answer counts as "not safe": the command is dropped and a warning is logged.
-- **What the operator sees:** nothing changes; unkey and click again.
+- **What the operator sees:** the button shows what was clicked, in blue, until the next read; refused, it goes back at once to what the amplifier reads. Unkey and click again.
+- **The status read:** a status frame the amplifier answered no more than 100 ms before the click (`FRESH`), showing no transmission, no drive and no output, stands in for the read; a click any later, or one after a frame that showed RF, gets a read of its own. 100 ms is shorter than a transmission can start and show on the amplifier's meters. Without it a click straight after a poll waited for a second status frame for nothing. Tested by `a_relay_click_straight_after_a_clear_status_goes_without_another_read` and `a_relay_click_with_no_answer_to_its_status_read_is_refused`.
+- **Changed:** AJ3G, 21 Oct 2026, with the faster AMP buttons (decision 45): the 100 ms status above. Before, every relay click read the status first.
 
 ## 2. Relay buttons greyed while transmitting (panel)
 
@@ -35,6 +37,8 @@ Before removing or loosening any of these, read why it is there.
 - **When:** the drive reads over the amplifier's drive limit: its own yellow DRV level, 8 W on the HR500 (from the operating manual's indicator table; it trips at 12 W). The HR50's 6 W is scaled from the HR500's and untested. The link checks the amplifier's status just before sending; no answer refuses the command, as in #1.
 - **Why:** in OFF (bypass) the radio's own power goes straight through to the tuner, so an operator can run a 100 W radio barefoot through the bypassed amp (AJ3G, 18 Oct 2026). Switching to PTT with that still applied would drive the amplifier far past its trip level and can damage the VRF2944 output devices.
 - **What the operator sees:** the PTT/OFF button greys while the drive is over the limit, and hovering says "Lower the drive first", with the drive and the limit. In bypass the DRV reading and tile stay green whatever they read, ATU in or not (AJ3G), because high drive there is not a fault.
+- **The status read:** as in #1, a status frame answered no more than 100 ms before the click with the drive under the limit stands in for the read; one over the limit is always read again. Tested by `going_in_line_takes_a_fresh_status_only_when_the_drive_was_under_the_limit`.
+- **While a click is pending:** OFF clicked and not yet read back, the button offers PTT again and is greyed overdriven exactly as if the amplifier read OFF (`a_pending_off_never_lets_ptt_through_overdriven`).
 
 ## 5. The radio link sends only listed frames, each as its own kind, and changes nothing while the radio transmits
 

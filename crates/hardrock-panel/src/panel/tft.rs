@@ -654,7 +654,7 @@ fn status_bar(ui: &mut Ui, sh: &Shown, view: &AmpMeters, th: &AmpTheme) {
     let mut items: Vec<String> = Vec::new();
     if sh.live {
         items.push(if r.ptt { "PTT mode".into() } else { "OFF · bypass".into() });
-        items.push(r.band.map_or("No band", amp_band_label).to_string());
+        items.push(sh.band().0.map_or("No band", amp_band_label).to_string());
         if sh.st.model.antennas() > 1 {
             items.push(format!("ANT {}", r.antenna.max(1)));
         }
