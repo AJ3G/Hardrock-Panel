@@ -16,6 +16,7 @@ use super::markers::{fmt_delta, fmt_tenth};
 use super::pointer::{self, Drag, DragKind, Grab, drag_edge, grab_at, wheel_zoom};
 use super::rows::Upload;
 use super::settings::{Scale, TopView};
+use super::slotlines;
 use super::view::{self, FreqMap, Span, View, grid_lines, grid_step};
 use super::{Scope, ScopeOut, ScopeRig};
 use crate::theme;
@@ -770,8 +771,8 @@ fn mode_ink(k: digimodes::Kind) -> Color32 {
     }
 }
 
-/// The waterfall on the GPU, with the receiver, the markers, the UTC ticks
-/// and the colour bar over it.
+/// The waterfall on the GPU, with the receiver, the markers, the slot lines,
+/// the UTC ticks and the colour bar over it.
 fn paint_waterfall(
     sc: &mut Scope,
     ui: &mut egui::Ui,
@@ -872,35 +873,82 @@ fn paint_waterfall(
         ));
     }
 
-    // UTC time ticks, from each row's own time.
-    if sc.settings.wf_time {
-        let rows_per_s = (1.0 / sc.row_interval.max(1e-3)) as f32;
-        let every = tick_interval(rows_per_s, px_per_row / ppp, 70.0);
-        let mut last: Option<i64> = None;
-        let n = rows_vis.ceil() as u32;
-        for age in 0..n {
-            let Some(t) = sc.rows.wf_time(age) else { break };
-            let slot = (t / every).floor() as i64;
-            if let Some(l) = last
-                && l != slot
-            {
-                let yy = rect.top() + (age as f32 - (1.0 - scroll_frac)) * px_per_row / ppp;
-                if yy > rect.top() + 6.0 && yy < rect.bottom() - 4.0 {
-                    p.hline(
-                        rect.left()..=rect.left() + 10.0,
-                        yy,
-                        Stroke::new(1.0, ink().gamma_multiply(0.7)),
-                    );
-                    p.text(
-                        pos2(rect.left() + 13.0, yy),
-                        Align2::LEFT_CENTER,
-                        fmt_utc(l as f64 * every + every),
-                        mono(9.5),
-                        ink().gamma_multiply(0.8),
-                    );
-                }
+    // Each visible row's time, newest first, for the slot lines and the
+    // UTC ticks: both are placed where the rows cross their time.
+    let pts_per_row = px_per_row / ppp;
+    let times: Vec<f64> =
+        (0..rows_vis.ceil() as u32 + 1).map_while(|age| sc.rows.wf_time(age)).collect();
+    let y_of = |t: f64| {
+        let age = slotlines::age_at(&times, t)?;
+        let y = slotlines::row_y(rect.top(), age, scroll_frac, pts_per_row);
+        // On a whole pixel, so a line is one pixel wide.
+        let y = (y * ppp).round() / ppp;
+        (y > rect.top() + 6.0 && y < rect.bottom() - 4.0).then_some(y)
+    };
+    let label_x = rect.left() + 13.0;
+
+    // The decoder's slot lines (decision 51): green where a capture starts,
+    // red where one ends, across the whole width, with the UTC at the left.
+    let mut labels: Vec<f32> = Vec::new();
+    if sc.settings.slot_lines
+        && let (Some(&newest), Some(&oldest)) = (times.first(), times.last())
+    {
+        let px = 1.0 / ppp;
+        for m in sc.slot_lines.marks(oldest, newest) {
+            let Some(y) = y_of(m.utc) else { continue };
+            // The newer slot is above the boundary, the older below: its
+            // start's green over it, the old one's end's red under it, each
+            // two pixels with one of the waterfall between, so the pair
+            // reads as green and red and not as one yellow line.
+            let band = |y0: f32| Rect::from_x_y_ranges(rect.x_range(), y0..=y0 + 2.0 * px);
+            if m.start {
+                p.rect_filled(band(y - 3.0 * px), 0.0, slotlines::START_INK);
             }
-            last = Some(slot);
+            if m.end {
+                p.rect_filled(band(y), 0.0, slotlines::END_INK);
+            }
+            if labels.last().is_none_or(|&l| y - l >= 12.0) {
+                let ink = if m.start { slotlines::START_INK } else { slotlines::END_INK };
+                let g = p.layout_no_wrap(fmt_utc(m.utc), mono(9.5), ink);
+                let at = pos2(label_x, y - 4.0 * px - g.size().y);
+                p.rect_filled(
+                    Rect::from_min_size(at - vec2(2.0, 0.0), g.size() + vec2(4.0, 0.0)),
+                    1.0,
+                    ground().gamma_multiply(0.75),
+                );
+                p.galley(at, g, ink);
+                labels.push(y);
+            }
+        }
+    }
+
+    // UTC time ticks, from each row's own time, where no slot line's label
+    // is.
+    if sc.settings.wf_time
+        && let (Some(&newest), Some(&oldest)) = (times.first(), times.last())
+    {
+        let rows_per_s = (1.0 / sc.row_interval.max(1e-3)) as f32;
+        let every = tick_interval(rows_per_s, pts_per_row, 70.0);
+        let mut k = (newest / every).floor();
+        while k * every > oldest {
+            let t = k * every;
+            k -= 1.0;
+            let Some(yy) = y_of(t) else { continue };
+            if labels.iter().any(|&l| (l - yy).abs() < 12.0) {
+                continue;
+            }
+            p.hline(
+                rect.left()..=rect.left() + 10.0,
+                yy,
+                Stroke::new(1.0, ink().gamma_multiply(0.7)),
+            );
+            p.text(
+                pos2(label_x, yy),
+                Align2::LEFT_CENTER,
+                fmt_utc(t),
+                mono(9.5),
+                ink().gamma_multiply(0.8),
+            );
         }
     }
 

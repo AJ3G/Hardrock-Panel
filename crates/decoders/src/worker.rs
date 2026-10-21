@@ -24,7 +24,7 @@ use crate::modem::sstv::SstvRx;
 use crate::modem::thor::ThorRx;
 use crate::modem::wefax::{Ioc, Lpm, WefaxRx};
 use crate::resample::Resampler;
-use crate::slot::{Slot, SlotRecorder};
+use crate::slot::{Slot, SlotRecorder, slot_start};
 use crate::wsjt::{self, Msk144Live, WsjtDecode, WsjtMode, WsjtSession};
 
 /// Blocks a worker holds before it starts dropping them. At the panel's
@@ -100,6 +100,23 @@ impl WsjtConfig {
     pub fn new(mode: WsjtMode) -> Self {
         let max_late_s = if mode == WsjtMode::Msk144 { mode.period_s() } else { 1.0 };
         WsjtConfig { mode, input_rate: sdr::AUDIO_RATE, my_calls: Vec::new(), max_late_s }
+    }
+
+    /// The UTC start of the first slot the decoder takes whole when its audio
+    /// starts at `first_utc`: the slot it joined, if it joined no later than
+    /// [`Self::max_late_s`], or else the next one.
+    pub fn first_slot(&self, first_utc: f64) -> f64 {
+        let p = self.mode.period_s();
+        let start = slot_start(first_utc, p);
+        if first_utc - start <= self.max_late_s { start } else { start + p }
+    }
+
+    /// When the slot starting at `slot_utc` is captured: from its start until
+    /// a whole period later, when the slot thread has its last sample and
+    /// hands it to the decoder. The recorder keeps the whole period whatever
+    /// the mode sends in it (WSPR's 110.6 s signal sits in a 120 s capture).
+    pub fn capture(&self, slot_utc: f64) -> (f64, f64) {
+        (slot_utc, slot_utc + self.mode.period_s())
     }
 }
 
@@ -605,6 +622,46 @@ mod tests {
     use crate::modem::sstv::SstvTx;
     use crate::modem::types::SstvMode;
     use std::time::Duration;
+
+    #[test]
+    fn each_mode_captures_its_whole_period_from_its_slot_start() {
+        use crate::wsjt::{Fst4Period, Q65Mode};
+        // 98 s after an even minute (a WSPR slot's start).
+        let base = 1_700_000_160.0;
+        let t = base + 98.0;
+        for (mode, period, start) in [
+            (WsjtMode::Ft8, 15.0, base + 90.0),
+            (WsjtMode::Ft4, 7.5, base + 97.5),
+            (WsjtMode::Wspr, 120.0, base),
+            (WsjtMode::Jt65, 60.0, base + 60.0),
+            (WsjtMode::Jt9, 60.0, base + 60.0),
+            (WsjtMode::Fst4(Fst4Period::P60), 60.0, base + 60.0),
+            (WsjtMode::Q65(Q65Mode::A30), 30.0, base + 90.0),
+            (WsjtMode::Msk144, 15.0, base + 90.0),
+        ] {
+            let cfg = WsjtConfig::new(mode);
+            let s = slot_start(t, mode.period_s());
+            assert_eq!(s, start, "{}", mode.label());
+            assert_eq!(cfg.capture(s), (s, s + period), "{}", mode.label());
+        }
+    }
+
+    #[test]
+    fn the_first_slot_taken_is_the_one_joined_on_time() {
+        let ft8 = WsjtConfig::new(WsjtMode::Ft8);
+        let b = 1_700_000_010.0; // A 15 s boundary.
+        assert_eq!(ft8.first_slot(b + 0.6), b);
+        assert_eq!(ft8.first_slot(b + 1.0), b);
+        assert_eq!(ft8.first_slot(b + 1.1), b + 15.0, "too late: the next slot");
+        // WSPR the same, on the even minute.
+        let wspr = WsjtConfig::new(WsjtMode::Wspr);
+        let m = 1_700_000_040.0; // 22:34:00, an even minute.
+        assert_eq!(wspr.first_slot(m + 30.0), m + 120.0);
+        assert_eq!(wspr.first_slot(m + 0.2), m);
+        // MSK144's pings come any time: the slot joined is always taken.
+        let msk = WsjtConfig::new(WsjtMode::Msk144);
+        assert_eq!(msk.first_slot(b + 14.0), b);
+    }
 
     #[test]
     fn ft8_from_48k_audio_lands_in_its_slot_with_dt_near_zero() {

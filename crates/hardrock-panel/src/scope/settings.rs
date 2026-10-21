@@ -264,6 +264,9 @@ pub struct ScopeSettings {
     pub wf_brightness: f32,
     /// UTC time ticks down the waterfall's edge.
     pub wf_time: bool,
+    /// DECODE's slot lines across the waterfall: green where a slot's
+    /// capture starts, red where it ends (decision 51).
+    pub slot_lines: bool,
     /// The band plan strip under the spectrum.
     pub band_plan: bool,
     /// A transverter's (up/down converter's) local oscillator, Hz, signed:
@@ -310,6 +313,7 @@ impl Default for ScopeSettings {
             wf_contrast: 1.0,
             wf_brightness: 0.0,
             wf_time: true,
+            slot_lines: true,
             band_plan: true,
             transverter_hz: 0.0,
             ppm: 0.0,
