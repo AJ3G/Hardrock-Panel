@@ -60,11 +60,15 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.04045));
 }
 
+// The palette's own (sRGB) colour at t in 0..1.
+fn palette_raw(t: f32) -> vec3<f32> {
+    let i = clamp(i32(t * 255.0 + 0.5), 0, 255);
+    return textureLoad(lut_tex, vec2<i32>(i, 0), 0).rgb;
+}
+
 // The palette at t in 0..1, as the target wants it.
 fn palette(t: f32, srgb: bool) -> vec3<f32> {
-    let i = clamp(i32(t * 255.0 + 0.5), 0, 255);
-    let c = textureLoad(lut_tex, vec2<i32>(i, 0), 0).rgb;
-    return select(c, srgb_to_linear(c), srgb);
+    return target_colour(palette_raw(t), srgb);
 }
 
 fn target_colour(c: vec3<f32>, srgb: bool) -> vec3<f32> {

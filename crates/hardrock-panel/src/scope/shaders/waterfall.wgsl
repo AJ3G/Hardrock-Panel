@@ -18,7 +18,13 @@ struct Wf {
     scroll_frac: f32,
     contrast: f32,
     brightness: f32,
-    _pad: f32,
+    // Where on the palette a pixel with no history is painted (the noise
+    // floor's level), and how much dimmer than that colour.
+    empty_t: f32,
+    empty_shade: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: Wf;
@@ -42,7 +48,10 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let srgb = u.srgb > 0.5;
-    let empty = palette(0.0, srgb);
+    // No history here (never measured, or not filled yet): the noise floor's
+    // colour a shade dimmer, not the bottom of the palette, so a gap reads as
+    // a quiet band with nothing in it rather than as a black block.
+    let empty = target_colour(palette_raw(u.empty_t) * u.empty_shade, srgb);
     let age_f = in.uv.y * u.rows_vis + (1.0 - u.scroll_frac);
     if (age_f >= u.count) {
         return vec4<f32>(empty, 1.0);

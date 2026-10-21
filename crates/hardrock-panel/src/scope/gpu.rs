@@ -997,7 +997,7 @@ fn write(queue: &wgpu::Queue, tex: &wgpu::Texture, x: u32, y: u32, w: u32, data:
 }
 
 /// Floats in the waterfall's uniforms (see waterfall.wgsl).
-pub const WF_UNIFORMS: usize = 16;
+pub const WF_UNIFORMS: usize = 20;
 /// Floats in the surface's uniforms (see surface.wgsl).
 pub const S3_UNIFORMS: usize = 24;
 
@@ -1019,6 +1019,10 @@ pub struct WfParams {
     pub scroll_frac: f32,
     pub contrast: f32,
     pub brightness: f32,
+    /// Where on the palette a pixel with no history is painted
+    /// ([`super::levels::no_data_t`]), and how much dimmer than that colour.
+    pub empty_t: f32,
+    pub empty_shade: f32,
 }
 
 /// The 3D surface's settings for one repaint.
@@ -1167,6 +1171,10 @@ impl CallbackTrait for WaterfallPaint {
             p.scroll_frac,
             p.contrast,
             p.brightness,
+            p.empty_t,
+            p.empty_shade,
+            0.0,
+            0.0,
             0.0,
         ];
         queue.write_buffer(&r.wf_uni, 0, bytemuck::cast_slice(&u));

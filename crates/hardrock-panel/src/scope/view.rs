@@ -198,14 +198,51 @@ pub fn bin_range(frame_lo: f64, frame_span: f64, n: usize, lo: f64, hi: f64) -> 
     ((lo - frame_lo) * per, (hi - frame_lo) * per)
 }
 
-/// The band a waterfall or 3D row keeps: the view and a quarter of its width
-/// either side, so a pan shows history rather than an empty edge, kept inside
-/// what the frame actually holds.
+/// How much wider than the view a waterfall or 3D row's band is: half the
+/// view's width either side, as SDRoxide's slack viewport.
+pub const COVER_SLACK: f64 = 2.0;
+/// A held band is kept while the view stays this fraction of the band's width
+/// inside either edge (or the band is against the frame's edge there).
+const HOLD_MARGIN: f64 = 0.05;
+/// A held band is kept while it is this many times the view's width: past
+/// either end a zoom has changed enough that the rows should follow it.
+const HOLD_RES: std::ops::RangeInclusive<f64> = 1.15..=3.5;
+
+/// The band a waterfall or 3D row would keep for a fresh view: twice the
+/// view's width, centred on it and slid (not clipped) inside what the frame
+/// actually holds, so a pan either way shows history rather than an empty
+/// edge. At most the whole frame.
 pub fn coverage(frame: Span, v: View) -> View {
-    let m = v.width() * 0.25;
-    let lo = (v.lo - m).max(frame.lo());
-    let hi = (v.hi + m).min(frame.hi());
-    if hi > lo { View { lo, hi } } else { View { lo: frame.lo(), hi: frame.hi() } }
+    let w = (v.width() * COVER_SLACK).min(frame.width);
+    if w <= 0.0 || v.width() <= 0.0 {
+        return View { lo: frame.lo(), hi: frame.hi() };
+    }
+    let lo = (v.center() - w / 2.0).clamp(frame.lo(), (frame.hi() - w).max(frame.lo()));
+    View { lo, hi: lo + w }
+}
+
+/// The band a row keeps, given the band the rows were last laid down over:
+/// that one again while it is still good for the view (SDRoxide's
+/// `cfg_still_good`), so pans inside it never move it and every row taken
+/// meanwhile covers the same band; otherwise a fresh [`coverage`].
+pub fn held_coverage(frame: Span, v: View, held: Option<View>) -> View {
+    let fresh = coverage(frame, v);
+    let Some(h) = held else { return fresh };
+    // The frame moved off it (a recentre, another lane), or it is the whole
+    // frame anyway: nothing to hold.
+    let tol = 1.0;
+    if h.lo < frame.lo() - tol || h.hi > frame.hi() + tol || fresh.width() >= frame.width - tol {
+        return fresh;
+    }
+    let margin = h.width() * HOLD_MARGIN;
+    let lo_ok = v.lo >= h.lo + margin || h.lo <= frame.lo() + tol;
+    let hi_ok = v.hi <= h.hi - margin || h.hi >= frame.hi() - tol;
+    let res = h.width() / v.width().max(1.0);
+    if lo_ok && hi_ok && v.lo >= h.lo && v.hi <= h.hi && HOLD_RES.contains(&res) {
+        h
+    } else {
+        fresh
+    }
 }
 
 /// The radio's own frequency to what is shown, and back: a frequency
@@ -409,10 +446,59 @@ mod tests {
         // 1024 bins over 192 kHz starting at 13.978 MHz: 187.5 Hz each.
         let (a, b) = bin_range(13_978_000.0, 192_000.0, 1024, 14_074_000.0, 14_074_187.5);
         assert!((a - 512.0).abs() < 1e-9 && (b - 513.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rows_keep_half_the_view_either_side_inside_the_frame() {
         let cov = coverage(SPAN, View { lo: 14_070_000.0, hi: 14_078_000.0 });
-        assert_eq!((cov.lo, cov.hi), (14_068_000.0, 14_080_000.0));
+        assert_eq!((cov.lo, cov.hi), (14_066_000.0, 14_082_000.0));
         let cov = coverage(SPAN, view(SPAN, None));
         assert_eq!(cov, view(SPAN, None));
+        // Against an edge the band slides inside the frame and keeps its
+        // width rather than losing the half that would fall off.
+        let cov = coverage(SPAN, View { lo: SPAN.lo(), hi: SPAN.lo() + 10_000.0 });
+        assert_eq!((cov.lo, cov.hi), (SPAN.lo(), SPAN.lo() + 20_000.0));
+        // Half the span or wider: the whole span.
+        let cov = coverage(SPAN, View { lo: 14_000_000.0, hi: 14_100_000.0 });
+        assert_eq!(cov, view(SPAN, None));
+    }
+
+    #[test]
+    fn the_band_is_held_while_the_view_stays_inside_it() {
+        let v0 = View { lo: 14_070_000.0, hi: 14_078_000.0 };
+        let h = held_coverage(SPAN, v0, None);
+        assert_eq!((h.lo, h.hi), (14_066_000.0, 14_082_000.0));
+        // Pans of up to 3.2 kHz either way (to 5 % of the band from its
+        // edge) keep the very same band.
+        for d in [-3200.0, -1000.0, 0.0, 2000.0, 3200.0] {
+            let v = View { lo: v0.lo + d, hi: v0.hi + d };
+            assert_eq!(held_coverage(SPAN, v, Some(h)), h, "pan {d}");
+        }
+        // Further, a fresh band centred on the new view.
+        let v = View { lo: v0.lo + 3300.0, hi: v0.hi + 3300.0 };
+        let n = held_coverage(SPAN, v, Some(h));
+        assert_eq!((n.lo, n.hi), (14_069_300.0, 14_085_300.0));
+        // A small zoom in keeps it; one that makes it over 3.5 views wide,
+        // or a zoom out that leaves under 1.15, does not.
+        let z = View { lo: 14_071_000.0, hi: 14_077_000.0 };
+        assert_eq!(held_coverage(SPAN, z, Some(h)), h);
+        let z = View { lo: 14_073_000.0, hi: 14_075_000.0 };
+        assert_ne!(held_coverage(SPAN, z, Some(h)), h);
+        let z = View { lo: 14_067_000.0, hi: 14_081_000.0 };
+        assert_ne!(held_coverage(SPAN, z, Some(h)), h);
+        // A recentre that puts the band outside the frame drops it.
+        let moved = Span { center: SPAN.center + 100_000.0, ..SPAN };
+        let v = View { lo: moved.lo(), hi: moved.lo() + 8000.0 };
+        let n = held_coverage(moved, v, Some(h));
+        assert_eq!((n.lo, n.hi), (moved.lo(), moved.lo() + 16_000.0));
+        // Against the frame's edge, the view may reach the band's edge there.
+        let e =
+            held_coverage(SPAN, View { lo: SPAN.lo() + 2000.0, hi: SPAN.lo() + 10_000.0 }, None);
+        assert_eq!(e.lo, SPAN.lo());
+        let v = View { lo: SPAN.lo(), hi: SPAN.lo() + 8000.0 };
+        assert_eq!(held_coverage(SPAN, v, Some(e)), e);
+        // Not zoomed, the whole span, held or not.
+        assert_eq!(held_coverage(SPAN, view(SPAN, None), Some(h)), view(SPAN, None));
     }
 
     #[test]
