@@ -818,86 +818,93 @@ impl App {
         egui::Window::new("Settings")
             .open(&mut open)
             .frame(chrome::window_frame())
-            .resizable(false)
+            // Its edges and corner can be dragged (AJ3G, 21 Oct 2026); its
+            // size is kept from run to run with the other windows'.
+            .resizable(true)
             .collapsible(false)
             // Below the top bar, so it doesn't cover the SETTINGS chip.
             .default_pos([24.0, 48.0])
-            .default_width(460.0)
+            .default_size([484.0, (ctx.content_rect().height() - 72.0).max(320.0)])
+            .min_size([420.0, 240.0])
             .show(ctx, |ui| {
                 chrome::window_body_bg(ui);
-                // Both sections are taller than a small window: they scroll,
-                // with APPLY kept in view below them.
-                let room = (ctx.content_rect().height() - 150.0).max(200.0);
-                egui::ScrollArea::vertical().max_height(room).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if chrome::chip(ui, false, "REFRESH DEVICES")
-                            .on_hover_text(
-                                "Look again for serial ports, sound outputs and the ELAD's I/Q \
+                // The sections are taller than the window: they scroll, in
+                // all the room there is, with APPLY kept in view below them.
+                let foot = chrome::chip_height(ui, None) + 8.0 + 2.0 * ui.spacing().item_spacing.y;
+                let room = (ui.available_height() - foot).max(80.0);
+                egui::ScrollArea::vertical().max_height(room).auto_shrink([false, false]).show(
+                    ui,
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            if chrome::chip(ui, false, "REFRESH DEVICES")
+                                .on_hover_text(
+                                    "Look again for serial ports, sound outputs and the ELAD's I/Q \
                                  on USB, after plugging something in. The sound lists also \
                                  look again each time they open.",
+                                )
+                                .clicked()
+                            {
+                                self.ports = serial_ports();
+                                self.sounds = audio::output_devices();
+                                self.elad_devices = elad_iq::list();
+                            }
+                        });
+                        ui.add_space(6.0);
+                        settings::settings_station(ui, &mut self.saved.station);
+                        ui.add_space(6.0);
+                        let mut on = radio::ref_10mhz(ctx);
+                        if chrome::checkbox(ui, &mut on, "10 MHz reference connected to the DUO")
+                            .on_hover_text(
+                                "Lights REF on the RADIO display. The DUO doesn't report its \
+                             reference input, so this is your word for it.",
                             )
-                            .clicked()
+                            .changed()
                         {
-                            self.ports = serial_ports();
-                            self.sounds = audio::output_devices();
+                            radio::set_ref_10mhz(ctx, on);
+                        }
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        settings::settings_amp_tab(
+                            ui,
+                            &mut self.draft,
+                            &mut self.saved.swr_warn,
+                            st,
+                            &self.ports,
+                        );
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        settings::settings_radio_tab(
+                            ui,
+                            &mut self.draft_rig,
+                            &self.draft.serial.path,
+                            rig,
+                            &self.ports,
+                            &mut self.sounds,
+                            &mut self.saved.audio_out,
+                        );
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        if settings::settings_receiver_tab(
+                            ui,
+                            &mut self.draft_source,
+                            &mut self.saved.rx.audio_out,
+                            &mut self.sounds,
+                            &self.elad_devices,
+                            &self.rx,
+                        ) {
                             self.elad_devices = elad_iq::list();
                         }
-                    });
-                    ui.add_space(6.0);
-                    settings::settings_station(ui, &mut self.saved.station);
-                    ui.add_space(6.0);
-                    let mut on = radio::ref_10mhz(ctx);
-                    if chrome::checkbox(ui, &mut on, "10 MHz reference connected to the DUO")
-                        .on_hover_text(
-                            "Lights REF on the RADIO display. The DUO doesn't report its \
-                             reference input, so this is your word for it.",
-                        )
-                        .changed()
-                    {
-                        radio::set_ref_10mhz(ctx, on);
-                    }
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-                    settings::settings_amp_tab(
-                        ui,
-                        &mut self.draft,
-                        &mut self.saved.swr_warn,
-                        st,
-                        &self.ports,
-                    );
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-                    settings::settings_radio_tab(
-                        ui,
-                        &mut self.draft_rig,
-                        &self.draft.serial.path,
-                        rig,
-                        &self.ports,
-                        &mut self.sounds,
-                        &mut self.saved.audio_out,
-                    );
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-                    if settings::settings_receiver_tab(
-                        ui,
-                        &mut self.draft_source,
-                        &mut self.saved.rx.audio_out,
-                        &mut self.sounds,
-                        &self.elad_devices,
-                        &self.rx,
-                    ) {
-                        self.elad_devices = elad_iq::list();
-                    }
-                    settings::settings_dsp(ui, &mut self.saved.rx.dsp);
-                    self.rx.set_dsp(self.saved.rx.dsp);
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-                    outside::settings_section(ui, &mut self.draft_outside, &self.outside);
-                });
+                        settings::settings_dsp(ui, &mut self.saved.rx.dsp);
+                        self.rx.set_dsp(self.saved.rx.dsp);
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        outside::settings_section(ui, &mut self.draft_outside, &self.outside);
+                    },
+                );
                 ui.add_space(8.0);
                 apply = settings::apply_button(ui);
             });

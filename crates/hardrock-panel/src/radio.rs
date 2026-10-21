@@ -231,32 +231,27 @@ pub(crate) fn radio_window(
             *open = false;
         }
     } else {
-        // Its width can be dragged, and its contents scale with it; its
-        // height follows them, up to the main window's.
-        let room = (ctx.content_rect().height() - 120.0).max(240.0);
+        // Its edges and corner can be dragged both ways (AJ3G, 21 Oct 2026),
+        // and its face scales to fit the window's width and height both,
+        // keeping its proportions, as it does popped out.
+        let w = BODY_W + CASE_W + DOCK_MARGIN;
         egui::Window::new(title)
             .id(egui::Id::new("radio-window"))
             .open(open)
             .frame(chrome::window_frame())
-            .resizable([true, false])
+            .resizable(true)
             .collapsible(false)
             .default_pos([180.0, 48.0])
-            .default_width(BODY_W + CASE_W)
-            .min_width(MIN_SCALE * (BODY_W + CASE_W))
+            .default_size([w, DOCK_H])
+            .min_size([MIN_SCALE * (BODY_W + CASE_W) + DOCK_MARGIN, 240.0])
             .show(ctx, |ui| {
                 chrome::window_body_bg(ui);
-                egui::ScrollArea::vertical().max_height(room).min_scrolled_height(room).show(
-                    ui,
-                    |ui| {
-                        // From the room inside the scroll bar, rounded down: any
-                        // wider and the window would grow to it, and the scale
-                        // with it, every frame.
-                        let k = (ui.available_width().floor() - 1.0) / (BODY_W + CASE_W);
-                        zoom::scaled(ui, k.clamp(MIN_SCALE, MAX_SCALE), |ui| {
-                            radio_body(ui, false, st, &mut tune, &mut out, &mut prefs, &mut rui)
-                        })
-                    },
-                );
+                // A window is as big as its contents measure: the face is
+                // centred in all the room it was dragged to, not shrunk round.
+                ui.set_min_size(ui.available_size());
+                fitted(ui, "radio-docked", |ui| {
+                    radio_body(ui, false, st, &mut tune, &mut out, &mut prefs, &mut rui)
+                });
             });
     }
     ctx.data_mut(|d| {
@@ -274,6 +269,12 @@ const CASE_W: f32 = 32.0;
 /// smallest it scrolls.
 const MIN_SCALE: f32 = 0.75;
 const MAX_SCALE: f32 = 3.0;
+/// What the docked window adds to its contents' width: the frame's margin
+/// either side, and its edge.
+const DOCK_MARGIN: f32 = 26.0;
+/// The docked window's height when it is first opened: the face at scale 1
+/// and the window's title bar.
+const DOCK_H: f32 = 570.0;
 
 /// The radio's face scaled to fit the room there is, width and height both,
 /// and centred across it: it keeps its proportions, and its text is laid
