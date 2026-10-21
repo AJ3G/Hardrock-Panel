@@ -679,19 +679,57 @@ fn corner_mark(p: &egui::Painter, rect: egui::Rect, s: f32, col: Color32) {
 }
 
 /// The panel in a window of its own: scaled to fit the window's width and
-/// height both, and centred across it. The docked window has no height to
-/// fit; its height follows its width.
+/// height both. The docked window has no height to fit; its height follows
+/// its width.
+///
+/// In a window wider than the panel's proportions the boxes and rows span
+/// up to [`MAX_STRETCH`] times the panel's own width, the text, dials and
+/// drawing at the scale the height allows centred in them (AJ3G, 18 Oct);
+/// wider than that, the panel keeps that width and is centred, so that it
+/// still reads as the panel grown rather than as a strip of small text
+/// across the screen (AJ3G, 21 Oct 2026: "Amp Panel do[es] not scale when
+/// window is expanded").
 pub(crate) fn fit_panel(
     ui: &mut egui::Ui,
     panel: impl FnOnce(&mut egui::Ui, f32) -> PanelOut,
 ) -> PanelOut {
-    // The panel's height at scale 1, measured as it was last drawn. It isn't
-    // exactly proportional to the scale (some spacing is fixed), so the scale
-    // is worked out from it only while the window's size is changing and for
-    // a few frames after, then held. Re-fitting every frame chased its own
-    // measurement and made the panel shake (AJ3G, 18 Oct).
-    let nat_id = egui::Id::new("sdroxide-amp-natural-height");
-    let fit_id = egui::Id::new("sdroxide-amp-fit");
+    fit_scaled(ui, "sdroxide-amp", 720.0, (MIN_SCALE, MAX_SCALE), |ui, s| {
+        let w = ui.available_width().min(720.0 * s * MAX_STRETCH);
+        let left = ui.max_rect().left() + (ui.available_width() - w) / 2.0;
+        let rect = Rect::from_min_size(
+            Pos2::new(left, ui.cursor().top()),
+            Vec2::new(w, ui.available_height()),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| panel(ui, s),
+        )
+        .inner
+    })
+}
+
+/// How much wider than its own proportions the panel's boxes may stretch in
+/// a wide window.
+const MAX_STRETCH: f32 = 1.3;
+
+/// Draw `contents` at the scale that fits the room there is: `base_w` wide
+/// at scale 1, and as tall as it measured last time it was drawn, within
+/// `range`. Scrolls only once the room is too small for the smallest scale.
+/// `key` keeps each window's measurement apart.
+pub(crate) fn fit_scaled<R>(
+    ui: &mut egui::Ui,
+    key: &'static str,
+    base_w: f32,
+    range: (f32, f32),
+    contents: impl FnOnce(&mut egui::Ui, f32) -> R,
+) -> R {
+    // The contents' height at scale 1, measured as they were last drawn.
+    // They aren't exactly proportional to the scale (some spacing is fixed),
+    // so the scale is worked out from it only while the window's size is
+    // changing and for a few frames after, then held. Re-fitting every frame
+    // chased its own measurement and made the panel shake (AJ3G, 18 Oct).
+    let nat_id = egui::Id::new((key, "natural-height"));
+    let fit_id = egui::Id::new((key, "fit"));
     let natural: f32 = ui.data(|d| d.get_temp(nat_id)).unwrap_or(600.0);
     let avail = ui.available_size();
     let prev: Option<Fit> = ui.data(|d| d.get_temp(fit_id));
@@ -700,19 +738,22 @@ pub(crate) fn fit_panel(
         Some(f) if f.settle == 0 => f.s,
         // A little short of a full fit, so rounding never tips it into a
         // scroll bar.
-        _ => ((avail.x / 720.0).min(avail.y * 0.98 / natural)).clamp(MIN_SCALE, MAX_SCALE),
+        _ => fit_scale(avail, base_w, natural, range),
     };
     let settle = same.map_or(FIT_SETTLE, |f| f.settle.saturating_sub(1));
     ui.data_mut(|d| d.insert_temp(fit_id, Fit { avail, s, settle }));
-    // The boxes and rows span the whole window; the text, dials and drawing
-    // are at the scale the height allows, centred in them (AJ3G, 18 Oct).
-    // Scrolls only once the window is too small for the smallest scale.
-    let out = egui::ScrollArea::vertical().show(ui, |ui| panel(ui, s));
+    let out = egui::ScrollArea::vertical().id_salt(key).show(ui, |ui| contents(ui, s));
     let h = out.content_size.y;
     if h > 1.0 && settle > 0 {
         ui.data_mut(|d| d.insert_temp(nat_id, h / s));
     }
     out.inner
+}
+
+/// The scale at which contents `base_w` wide and `natural` tall at scale 1
+/// fit `avail`, a little short so rounding never tips it into a scroll bar.
+fn fit_scale(avail: Vec2, base_w: f32, natural: f32, (lo, hi): (f32, f32)) -> f32 {
+    (avail.x / base_w).min(avail.y * 0.98 / natural.max(1.0)).clamp(lo, hi)
 }
 
 /// The popped-out panel's fit, kept from frame to frame: the size it was
@@ -2321,6 +2362,18 @@ mod tests {
         // In line already, PTT to OFF is always allowed.
         let st = status(AmpReadings { ptt: true, drive_w: 9.0, ..Default::default() });
         assert!(keys(&shown(&st)).ptt.enabled);
+    }
+
+    #[test]
+    fn a_window_fits_by_its_width_or_its_height_whichever_is_tighter() {
+        let r = (MIN_SCALE, MAX_SCALE);
+        // 720 wide and 600 tall at scale 1.
+        assert!((fit_scale(Vec2::new(1440.0, 2000.0), 720.0, 600.0, r) - 2.0).abs() < 1e-3);
+        // A wide window: the height decides, a little short of a full fit.
+        assert!((fit_scale(Vec2::new(1900.0, 600.0), 720.0, 600.0, r) - 0.98).abs() < 1e-3);
+        // Never below the smallest scale (it scrolls) or past the largest.
+        assert_eq!(fit_scale(Vec2::new(200.0, 200.0), 720.0, 600.0, r), MIN_SCALE);
+        assert_eq!(fit_scale(Vec2::new(9000.0, 9000.0), 720.0, 600.0, r), MAX_SCALE);
     }
 
     #[test]

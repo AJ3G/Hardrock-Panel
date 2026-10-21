@@ -163,7 +163,9 @@ tuning cycle and needs a carrier: TX TUNE or RIG TUNE can provide one.
 reflected power, SWR, TX POWER (menu 34) and TX IN (menu 32), the TUNE strip, then
 every setting the radio answers over CAT, with its menu number, its meaning and the radio's
 answer as it came. **POP OUT** moves it into a window of its own, and
-**DOCK** brings it back. The settings are read when the port opens, when you press
+**DOCK** brings it back. Popped out, it grows and shrinks with its window,
+keeping its proportions; docked, drag its side to make it wider and it grows
+the same way. The settings are read when the port opens, when you press
 **READ AGAIN**, and every 10 seconds between transmissions. Menus that have no
 CAT command, such as 37 `CW IN` and 45 keyer speed, can only be read on the
 radio.
@@ -290,7 +292,15 @@ capacitance, judged good to about 10%. How the values were arrived at is in
 [atu-values.md](atu-values.md).
 
 **Resizing.** Drag the window to any size: the panel scales to fit its width
-and height and sits centred in it.
+and height and sits centred in it. In a window much wider than it is tall, the
+panel stops widening at a little over its own proportions and sits in the
+middle.
+
+**The buttons.** PTT/OFF, ANT, DN/UP and ON/BYP change on the screen as soon
+as they are clicked, in blue, and turn to their usual colour once the
+amplifier reads back the change. One the amplifier refuses (a relay while
+transmitting, or PTT with too much drive) goes back at once; one it still
+shows unchanged after a second goes back to what it reads.
 
 ## The scope and the panel's receiver
 

@@ -17,6 +17,7 @@ use eframe::egui::{self, RichText};
 use hardrock::{AmpStatus, Band};
 use rigcat::{Keying, RigStatus};
 
+use crate::radio::z;
 use crate::{chrome, theme};
 
 /// The shortest and longest TUNE the panel offers, in seconds. The link
@@ -214,7 +215,7 @@ pub(crate) struct TuneOut {
 }
 
 /// The TUNE and RIG TUNE buttons, the radio's power buttons and the Tune
-/// slider.
+/// slider, at the radio window's scale where it is drawn there.
 pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs<'_>) -> TuneOut {
     let mut out = TuneOut::default();
     let tuning = rig.tuning;
@@ -255,20 +256,22 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
             }
         }
 
-        ui.add_space(6.0);
-        ui.label(RichText::new("for").size(11.0));
+        ui.add_space(z(6.0));
+        ui.label(RichText::new("for").size(z(11.0)));
         ui.add(egui::DragValue::new(args.secs).range(TUNE_SECS).suffix(" s"))
             .on_hover_text("TUNE unkeys by itself after this long.");
 
         if let Some(t) = tuning {
             let left = t.until.saturating_duration_since(Instant::now()).as_secs_f32();
             ui.label(
-                RichText::new(format!("keyed · {left:.0} s left")).size(11.0).color(theme::CYAN()),
+                RichText::new(format!("keyed · {left:.0} s left"))
+                    .size(z(11.0))
+                    .color(theme::CYAN()),
             );
         } else if let Some(n) = &rig.tune_note {
             // Yellow only for a stop that is a warning; the time limit is not.
             let col = if n.starts_with("time limit") { theme::TEXT() } else { theme::YELLOW() };
-            ui.label(RichText::new(format!("Stopped: {n}")).size(11.0).color(col));
+            ui.label(RichText::new(format!("Stopped: {n}")).size(z(11.0)).color(col));
         }
     });
 
@@ -276,7 +279,7 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
         // The power buttons, captioned underneath so they read as the
         // radio's own and not the amplifier's.
         ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.spacing_mut().item_spacing.y = z(2.0);
             let row = ui.horizontal(|ui| {
                 for (label, code) in PRESETS {
                     let lit = rig.power_code == Some(code);
@@ -302,16 +305,16 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
                         }
                         _ => PRESETS_CAPTION.to_string(),
                     };
-                    ui.label(RichText::new(caption).size(9.5).strong().color(ink));
+                    ui.label(RichText::new(caption).size(z(9.5)).strong().color(ink));
                 },
             );
         });
-        ui.add_space(10.0);
+        ui.add_space(z(10.0));
         ui.label("Tune");
         let est = planned_watts(rig, Keying::Audio, *args.drive);
         let over = matches!((est, args.limit_in_line), (Some(w), Some(l)) if w > l);
         let text = est.map_or("≈ — W".to_string(), |w| format!("≈ {w:.1} W"));
-        ui.label(RichText::new(text).monospace().size(11.0).color(if over {
+        ui.label(RichText::new(text).monospace().size(z(11.0)).color(if over {
             theme::YELLOW()
         } else {
             theme::TEXT()
@@ -323,7 +326,7 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
         );
         // A fixed rail: `slider_vertical` is the skin without `fit_rail`'s
         // measuring, which the chips before it on this row throw off.
-        ui.spacing_mut().slider_width = 180.0;
+        ui.spacing_mut().slider_width = z(180.0);
         chrome::slider_vertical(
             ui,
             egui::Slider::new(args.drive, 0.0..=1.0)
@@ -343,7 +346,7 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
                     "The radio's TX IN (menu 32) is on {}: TUNE's tone can't reach it.",
                     rig.tx_input.as_deref().unwrap_or("?")
                 ))
-                .size(11.0)
+                .size(z(11.0))
                 .color(theme::YELLOW()),
             );
             if chrome::chip(ui, false, "USB AUDIO")
@@ -359,7 +362,7 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
         });
     }
     if let Some(e) = &args.tone_error {
-        ui.label(RichText::new(format!("Tone: {e}")).size(11.0).color(theme::YELLOW()));
+        ui.label(RichText::new(format!("Tone: {e}")).size(z(11.0)).color(theme::YELLOW()));
     }
     if let Some(l) = args.limit_in_line
         && rig.power().is_some_and(|p| p.watts > l)
@@ -369,7 +372,7 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
                 "Menu 34 is over the amplifier's {l:.0} W drive limit for PTT: keep the Tune \
                  slider, and other programs' audio, below it."
             ))
-            .size(11.0)
+            .size(z(11.0))
             .color(theme::YELLOW()),
         );
     }

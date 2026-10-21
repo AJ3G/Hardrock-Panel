@@ -485,3 +485,19 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 | skips `HRTP` and the tuner reads, ANT | 1184 / 1551 ms | 250 / 419 ms |
 
 **Where.** `crates/hardrock/src/link.rs` (`run`, `Read`, `next_read`, `act`, `Clear`, `queue`), `crates/hardrock/src/types.rs` (`AmpStatus::pending`, `AmpAction::control`), `panel.rs` (`keys`, `Shown::band`), `panel/tft.rs`.
+
+## 43. The RADIO window grows with its window; the AMP panel keeps its proportions
+
+**Decided:** AJ3G, 21 Oct 2026: "Radio Panel and Amp Panel do not scale when window is expanded" (NEXT-BUILD #9). The shape by the integrator.
+
+**What was wrong.** The radio window was drawn at fixed sizes: popped out, its face stopped at 760 points wide and its text never grew; docked, it was 560 wide and could not be resized. The AMP panel did scale to its window, but by whichever of width and height is tighter: in a wide window (a maximised landscape screen) the height decides, so it grew little while its boxes stretched across the whole width, which read as small text in a strip rather than as the panel grown.
+
+**What the panel does.**
+- **Radio window.** Drawn for a scale of 1 and scaled as a whole: every size it sets itself goes through `radio::zoom::z`, and the `Ui`'s style (text sizes, spacing, padding, slider and box widths) is scaled for the widgets that take their sizes from it (`zoom::scaled`). The text is laid out at the size it is shown, never a zoomed picture of it, so it stays sharp. Popped out it fits the window's width and height both (`panel::fit_scaled`, the AMP panel's fit, now shared), centred, between 0.75 and 3 times; smaller than that it scrolls. Docked, its width can be dragged and it scales with it, its height following. MENU and the confirmation questions are windows of their own and keep their size. The TUNE strip in the main window is unchanged.
+- **AMP panel.** Still fits width and height both, but its boxes stretch at most 1.3 times its own proportions (`MAX_STRETCH`); wider than that it keeps that width, centred. That partly reverses AJ3G's 18 Oct choice for the SDRoxide pop-out (boxes spanning the whole window) in very wide windows only; the constant is the one place to change it.
+- **Not done.** In a window much wider than it is tall the AMP panel cannot grow past what its height allows without a second, side-by-side layout (meters on the left, tuner and keys on the right). Not built.
+
+**Screens.** `screens/scale-before-*.png` and `screens/scale-after-*.png` beside this project's notes.
+
+**Where.** `radio/zoom.rs`, `radio.rs` (`fitted`, `radio_window`), `radio/face.rs`, `radio/controls.rs`, `tune.rs` (`tune_strip`), `panel.rs` (`fit_panel`, `fit_scaled`, `fit_scale`).
+

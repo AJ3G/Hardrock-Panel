@@ -18,6 +18,7 @@ mod controls;
 mod face;
 pub(crate) mod logic;
 mod rigtheme;
+mod zoom;
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -29,6 +30,7 @@ use crate::tune::{TuneArgs, TuneOut, tune_strip};
 use crate::{chrome, theme};
 use logic::RadioPrefs;
 use rigtheme::{RigTheme, rig_theme};
+pub(crate) use zoom::z;
 
 /// What the operator asked of the radio this frame.
 #[derive(Default)]
@@ -205,9 +207,8 @@ pub(crate) fn radio_window(
                     .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
                     .show(ui, |ui| {
                         chrome::window_body_bg(ui);
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            let w = ui.available_width().clamp(460.0, 760.0);
-                            radio_body(ui, w, true, st, &mut tune, &mut out, &mut prefs, &mut rui);
+                        fitted(ui, "radio-popped", |ui| {
+                            radio_body(ui, true, st, &mut tune, &mut out, &mut prefs, &mut rui)
                         });
                     });
                 ui.ctx().input(|i| i.viewport().close_requested())
@@ -217,20 +218,30 @@ pub(crate) fn radio_window(
             *open = false;
         }
     } else {
+        // Its width can be dragged, and its contents scale with it; its
+        // height follows them, up to the main window's.
+        let room = (ctx.content_rect().height() - 120.0).max(240.0);
         egui::Window::new(title)
             .id(egui::Id::new("radio-window"))
             .open(open)
             .frame(chrome::window_frame())
-            .resizable(false)
+            .resizable([true, false])
             .collapsible(false)
             .default_pos([180.0, 48.0])
+            .default_width(BODY_W + CASE_W)
+            .min_width(MIN_SCALE * (BODY_W + CASE_W))
             .show(ctx, |ui| {
                 chrome::window_body_bg(ui);
-                let room = (ctx.content_rect().height() - 120.0).max(240.0);
                 egui::ScrollArea::vertical().max_height(room).min_scrolled_height(room).show(
                     ui,
                     |ui| {
-                        radio_body(ui, 560.0, false, st, &mut tune, &mut out, &mut prefs, &mut rui);
+                        // From the room inside the scroll bar, rounded down: any
+                        // wider and the window would grow to it, and the scale
+                        // with it, every frame.
+                        let k = (ui.available_width().floor() - 1.0) / (BODY_W + CASE_W);
+                        zoom::scaled(ui, k.clamp(MIN_SCALE, MAX_SCALE), |ui| {
+                            radio_body(ui, false, st, &mut tune, &mut out, &mut prefs, &mut rui)
+                        })
                     },
                 );
             });
@@ -242,10 +253,36 @@ pub(crate) fn radio_window(
     out
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The radio's face is drawn [`BODY_W`] wide at scale 1, inside a case
+/// [`CASE_W`] wider.
+const BODY_W: f32 = 560.0;
+const CASE_W: f32 = 32.0;
+/// Smallest and largest scale the radio window is drawn at. Below the
+/// smallest it scrolls.
+const MIN_SCALE: f32 = 0.75;
+const MAX_SCALE: f32 = 3.0;
+
+/// The radio's face scaled to fit the room there is, width and height both,
+/// and centred across it: it keeps its proportions, and its text is laid
+/// out at the size it is shown (see [`zoom`]).
+fn fitted(ui: &mut egui::Ui, key: &'static str, body: impl FnOnce(&mut egui::Ui)) {
+    crate::panel::fit_scaled(ui, key, BODY_W + CASE_W, (MIN_SCALE, MAX_SCALE), |ui, k| {
+        let w = (BODY_W + CASE_W) * k;
+        let left = ui.max_rect().left() + ((ui.available_width() - w) / 2.0).max(0.0);
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(left, ui.cursor().top()),
+            egui::vec2(w, ui.available_height()),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| zoom::scaled(ui, k, body),
+        );
+    });
+}
+
+/// The window's contents at the scale in force ([`zoom::scaled`]).
 fn radio_body(
     ui: &mut egui::Ui,
-    width: f32,
     popped: bool,
     st: Option<&RigStatus>,
     tune: &mut TuneArgs<'_>,
@@ -290,11 +327,11 @@ fn radio_body(
     egui::Frame::new()
         .fill(th.case)
         .stroke(egui::Stroke::new(1.0, th.case_line))
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::symmetric(14, 12))
+        .corner_radius(egui::CornerRadius::same(zoom::zi(10.0) as u8))
+        .inner_margin(egui::Margin::symmetric(zoom::zi(14.0), zoom::zi(12.0)))
         .show(ui, |ui| {
-            ui.set_width(width);
-            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.set_width(z(BODY_W));
+            ui.spacing_mut().item_spacing.y = z(8.0);
             // Silk screen.
             ui.horizontal(|ui| {
                 ui.label(RichText::new(th.brand).font(face::label_font(17.0)).color(th.label));
@@ -320,9 +357,9 @@ fn radio_body(
 
             // The face: LCD and knobs.
             ui.horizontal(|ui| {
-                let lcd_w = ui.available_width() - 104.0 - 14.0;
+                let lcd_w = ui.available_width() - z(104.0 + 14.0);
                 face::lcd(ui, &mut f, prefs, lcd_w);
-                ui.add_space(6.0);
+                ui.add_space(z(6.0));
                 face::knobs(ui, &mut f, prefs);
             });
 
@@ -330,20 +367,23 @@ fn radio_body(
             controls::keys(ui, &mut f);
             controls::popout(ui, &mut f, prefs);
             controls::vfo_row(ui, &mut f);
-            ui.add_space(2.0);
+            ui.add_space(z(2.0));
             f.out.tune = tune_strip(ui, s, tune);
             controls::readouts(ui, &f);
             for n in [f.st.digi_note.clone(), f.st.note.clone(), s.set_note.clone()]
                 .into_iter()
                 .flatten()
             {
-                ui.label(RichText::new(n).size(11.5).color(th.dim));
+                ui.label(RichText::new(n).size(z(11.5)).color(th.dim));
             }
         });
 
+    // MENU and the questions are windows of their own, at their own size.
     let ctx = ui.ctx().clone();
-    if f.st.menu {
-        controls::menu_window(&ctx, &mut f, prefs);
-    }
-    controls::confirm(&ctx, &mut f);
+    zoom::unscaled(|| {
+        if f.st.menu {
+            controls::menu_window(&ctx, &mut f, prefs);
+        }
+        controls::confirm(&ctx, &mut f);
+    });
 }
