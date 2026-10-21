@@ -570,6 +570,29 @@ impl Rx {
         if now.transmitting {
             self.tx_at = Some(Instant::now());
         }
+        // An ELAD that has gone from USB (unplugged, or dropped off the bus,
+        // as RF on the USB lead during a transmission can make it): looked
+        // for again on the watchdog's timer, never while transmitting (#10).
+        if self.running == IqChoice::Elad
+            && self.pipeline.is_none()
+            && self.opening.is_none()
+            && !now.transmitting
+            && self.error.as_deref().is_some_and(|e| e.contains("no ELAD"))
+            && self.reopened_at.is_none_or(|t| t.elapsed() >= REOPEN_EVERY)
+        {
+            self.start(s, scope, now);
+            self.reopened_at = Some(Instant::now());
+        }
+        if let Some(e) = &mut self.error
+            && e.contains("no ELAD")
+            && !e.contains("transmission")
+            && self.tx_at.is_some_and(|t| t.elapsed() < AFTER_TX_DROP)
+        {
+            e.push_str(
+                ". It went from USB around a transmission: RF on the USB lead is the usual \
+                 cause (ferrites or a USB isolator). Replug it; the panel looks again every 20 s.",
+            );
+        }
         self.watch_stream(s, scope, now);
         self.keep_audio(s);
         let Some(p) = &self.pipeline else { return };
@@ -840,6 +863,10 @@ const DIAL_SETTLE: Duration = Duration::from_millis(1000);
 /// opened again. The DUO streams all the time it is on, at every rate.
 const STREAM_SILENT: Duration = Duration::from_secs(3);
 
+/// An ELAD lost from USB this soon after a transmission is said to have
+/// gone around it.
+const AFTER_TX_DROP: Duration = Duration::from_secs(120);
+
 /// The watchdog reopens no more often than this.
 const REOPEN_EVERY: Duration = Duration::from_secs(20);
 
@@ -1090,5 +1117,28 @@ mod tests {
             rx.frame(&mut s, &scope, now(false));
             rx.snapshot().samples > before + 1000
         });
+    }
+
+    #[test]
+    fn an_elad_gone_from_usb_after_an_over_is_said_so_and_looked_for_again() {
+        let scope = Scope::new(None, crate::scope::ScopeSettings::default());
+        // The retry starts the demo, standing in for the ELAD coming back.
+        let mut s = RxSettings { source: IqChoice::Demo, ..RxSettings::default() };
+        let mut rx = Rx::new(&s);
+        rx.running = IqChoice::Elad;
+        rx.error = Some("no ELAD device found on USB".into());
+        rx.tx_at = Some(Instant::now());
+        rx.reopened_at = Some(Instant::now());
+        rx.frame(&mut s, &scope, now(false));
+        let e = rx.error.clone().unwrap_or_default();
+        assert!(e.contains("around a transmission"), "{e}");
+        // Not looked for while transmitting, even when due.
+        rx.reopened_at = Instant::now().checked_sub(REOPEN_EVERY);
+        rx.frame(&mut s, &scope, now(true));
+        assert!(rx.error.is_some() && rx.pipeline.is_none());
+        // Due, and receiving: looked for again.
+        rx.frame(&mut s, &scope, now(false));
+        assert!(rx.error.is_none());
+        assert_eq!(rx.source(), IqChoice::Demo);
     }
 }
