@@ -887,37 +887,55 @@ fn paint_waterfall(
     };
     let label_x = rect.left() + 13.0;
 
-    // The decoder's slot lines (decision 51): green where a capture starts,
-    // red where one ends, across the whole width, with the UTC at the left.
+    // The decoder's slot lines (decision 51): green at each slot's start,
+    // with its UTC at the left, red where its transmissions end, and a faint
+    // yellow over the dead time between, all across the whole width.
     let mut labels: Vec<f32> = Vec::new();
     if sc.settings.slot_lines
         && let (Some(&newest), Some(&oldest)) = (times.first(), times.last())
     {
         let px = 1.0 / ppp;
+        let y_edge = |age: u32| {
+            let y = slotlines::row_y(rect.top(), age, scroll_frac, pts_per_row);
+            ((y * ppp).round() / ppp).clamp(rect.top(), rect.bottom())
+        };
+        // A little past the newest row, so a dead time still running is
+        // tinted from the top.
+        for (from, to) in sc.slot_lines.dead(oldest, newest + 1.0) {
+            if let Some((newer, older)) = slotlines::age_span(&times, from, to) {
+                let (y0, y1) = (y_edge(newer), y_edge(older));
+                if y1 > y0 {
+                    p.rect_filled(
+                        Rect::from_x_y_ranges(rect.x_range(), y0..=y1),
+                        0.0,
+                        slotlines::DEAD_TINT,
+                    );
+                }
+            }
+        }
         for m in sc.slot_lines.marks(oldest, newest) {
             let Some(y) = y_of(m.utc) else { continue };
-            // The newer slot is above the boundary, the older below: its
-            // start's green over it, the old one's end's red under it, each
-            // two pixels with one of the waterfall between, so the pair
-            // reads as green and red and not as one yellow line.
-            let band = |y0: f32| Rect::from_x_y_ranges(rect.x_range(), y0..=y0 + 2.0 * px);
-            if m.start {
-                p.rect_filled(band(y - 3.0 * px), 0.0, slotlines::START_INK);
-            }
-            if m.end {
-                p.rect_filled(band(y), 0.0, slotlines::END_INK);
-            }
-            if labels.last().is_none_or(|&l| y - l >= 12.0) {
-                let ink = if m.start { slotlines::START_INK } else { slotlines::END_INK };
-                let g = p.layout_no_wrap(fmt_utc(m.utc), mono(9.5), ink);
-                let at = pos2(label_x, y - 4.0 * px - g.size().y);
-                p.rect_filled(
-                    Rect::from_min_size(at - vec2(2.0, 0.0), g.size() + vec2(4.0, 0.0)),
-                    1.0,
-                    ground().gamma_multiply(0.75),
-                );
-                p.galley(at, g, ink);
-                labels.push(y);
+            // Two pixels, on the rows' edge.
+            let band = Rect::from_x_y_ranges(rect.x_range(), y - px..=y + px);
+            match m.line {
+                slotlines::Line::End => {
+                    p.rect_filled(band, 0.0, slotlines::END_INK);
+                }
+                slotlines::Line::Start => {
+                    p.rect_filled(band, 0.0, slotlines::START_INK);
+                    if labels.last().is_none_or(|&l| y - l >= 12.0) {
+                        let ink = slotlines::START_INK;
+                        let g = p.layout_no_wrap(fmt_utc(m.utc), mono(9.5), ink);
+                        let at = pos2(label_x, y - 2.0 * px - g.size().y);
+                        p.rect_filled(
+                            Rect::from_min_size(at - vec2(2.0, 0.0), g.size() + vec2(4.0, 0.0)),
+                            1.0,
+                            ground().gamma_multiply(0.75),
+                        );
+                        p.galley(at, g, ink);
+                        labels.push(y);
+                    }
+                }
             }
         }
     }

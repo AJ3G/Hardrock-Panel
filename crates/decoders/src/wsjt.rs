@@ -106,6 +106,53 @@ impl WsjtMode {
         }
     }
 
+    /// How long one transmission lasts, s: the mode's channel symbols (and
+    /// FT4's two ramp symbols) at its symbol length, from mfsk-core's frame
+    /// definitions. FT8 12.64 s, FT4 5.04 s, WSPR 110.59 s, JT65 46.83 s,
+    /// JT9 48.96 s, FST4-60 51.84 s, Q65-30A 25.5 s. `None` for MSK144,
+    /// whose short frames repeat through the slot.
+    pub fn signal_s(self) -> Option<f64> {
+        use mfsk_core::q65 as q;
+        use mfsk_core::{FrameLayout, ModulationParams, fst4};
+        fn frame<P: ModulationParams + FrameLayout>() -> f64 {
+            ((P::N_SYMBOLS + P::N_RAMP) * P::NSPS) as f64 / RATE
+        }
+        Some(match self {
+            WsjtMode::Ft8 => frame::<mfsk_core::Ft8>(),
+            WsjtMode::Ft4 => frame::<mfsk_core::Ft4>(),
+            WsjtMode::Wspr => frame::<mfsk_core::Wspr>(),
+            WsjtMode::Jt65 => frame::<mfsk_core::Jt65>(),
+            WsjtMode::Jt9 => frame::<mfsk_core::Jt9>(),
+            WsjtMode::Fst4(p) => match p {
+                Fst4Period::P15 => frame::<fst4::Fst4s15>(),
+                Fst4Period::P30 => frame::<fst4::Fst4s30>(),
+                Fst4Period::P60 => frame::<fst4::Fst4s60>(),
+                Fst4Period::P120 => frame::<fst4::Fst4s120>(),
+                Fst4Period::P300 => frame::<fst4::Fst4s300>(),
+            },
+            WsjtMode::Q65(m) => match m {
+                Q65Mode::A15 => frame::<q::Q65a15>(),
+                Q65Mode::A30 => frame::<q::Q65a30>(),
+                Q65Mode::A60 => frame::<q::Q65a60>(),
+                Q65Mode::B60 => frame::<q::Q65b60>(),
+                Q65Mode::C60 => frame::<q::Q65c60>(),
+                Q65Mode::D60 => frame::<q::Q65d60>(),
+                Q65Mode::E60 => frame::<q::Q65e60>(),
+                Q65Mode::D120 => frame::<q::Q65d120>(),
+                Q65Mode::E120 => frame::<q::Q65e120>(),
+                Q65Mode::A300 => frame::<q::Q65a300>(),
+            },
+            WsjtMode::Msk144 => return None,
+        })
+    }
+
+    /// Where a transmission sent on time ends, seconds into the slot: its
+    /// start ([`Self::start_delay_s`], the decoder's DT = 0) plus its length
+    /// ([`Self::signal_s`]). FT8 13.14 s, FT4 5.54 s, WSPR 111.59 s.
+    pub fn signal_end_s(self) -> Option<f64> {
+        Some(self.start_delay_s() + self.signal_s()?)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             WsjtMode::Ft8 => "FT8",
