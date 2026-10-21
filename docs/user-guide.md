@@ -36,7 +36,7 @@ the command line forces either; `--demo` shows the ELAD look.
    by itself; later, open it with **SETTINGS** at the top left.
 3. Tick **Enable**, then choose the **Model** and the **Port** the amplifier
    appears as (COM5, for example). If the port isn't listed, press
-   **REFRESH PORTS**.
+   **REFRESH DEVICES**.
 4. **Baud** must match the amplifier's menu. HobbyPCB's own control panel
    needs 115200, so an amplifier that has been used with it is already there.
 5. Press **APPLY**. The status line reads *Connected to the Hardrock-500* when
@@ -54,6 +54,11 @@ default settings.
 
 The settings, the meter picks, and the window's size and place are kept between
 runs.
+
+**The log.** The panel writes what it does, and any fault, to
+`hardrock-panel.log` in the same folder as its settings: on Windows
+`%APPDATA%\Hardrock Panel\data`. It is kept to a few MB. Where a message says
+to see the log, COPY LOG beside it copies the end of it for a bug report.
 
 **From a shortcut.** `hardrock-panel.exe --port COM5` opens straight onto the
 amplifier on COM5, ahead of the saved settings. Add `--baud 38400` for another

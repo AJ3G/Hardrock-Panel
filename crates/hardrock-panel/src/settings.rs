@@ -128,13 +128,35 @@ pub(crate) fn apply_button(ui: &mut egui::Ui) -> bool {
     .clicked()
 }
 
+/// Read the sound outputs again when the list `id` has just opened (it did
+/// not show last pass), so a speaker or cable plugged in after start-up is
+/// in it. Called from inside the open list.
+fn reread_sounds_on_open(ui: &egui::Ui, id: &str, sounds: &mut Vec<String>) {
+    let key = egui::Id::new(("sound-list-shown", id));
+    let now = ui.ctx().cumulative_pass_nr();
+    let last = ui.ctx().data_mut(|d| {
+        let last = d.get_temp::<u64>(key);
+        d.insert_temp(key, now);
+        last
+    });
+    if just_opened(last, now) {
+        *sounds = crate::audio::output_devices();
+    }
+}
+
+/// Whether a list last shown on pass `last` and showing on pass `now` has
+/// just opened.
+fn just_opened(last: Option<u64>, now: u64) -> bool {
+    last.is_none_or(|l| now > l + 1)
+}
+
 pub(crate) fn settings_radio_tab(
     ui: &mut egui::Ui,
     cfg: &mut RigConfig,
     amp_port: &str,
     status: Option<&RigStatus>,
     serial_ports: &[String],
-    sounds: &[String],
+    sounds: &mut Vec<String>,
     audio_out: &mut Option<String>,
 ) {
     ui.label(RichText::new("Radio").size(14.0).strong().color(theme::CYAN()));
@@ -207,10 +229,11 @@ pub(crate) fn settings_radio_tab(
             .width(260.0)
             .selected_text(shown)
             .show_styled(ui, |ui| {
+                reread_sounds_on_open(ui, "rig-sound", sounds);
                 if ui.selectable_label(audio_out.is_none(), "The radio's own USB audio").clicked() {
                     *audio_out = None;
                 }
-                for d in sounds {
+                for d in sounds.iter() {
                     if ui.selectable_label(audio_out.as_ref() == Some(d), d).clicked() {
                         *audio_out = Some(d.clone());
                     }
@@ -267,7 +290,7 @@ pub(crate) fn settings_receiver_tab(
     ui: &mut egui::Ui,
     source: &mut crate::rx::IqChoice,
     audio_out: &mut Option<String>,
-    sounds: &[String],
+    sounds: &mut Vec<String>,
     elad: &[elad_iq::EladDevice],
     rx: &crate::rx::Rx,
 ) -> bool {
@@ -310,11 +333,12 @@ pub(crate) fn settings_receiver_tab(
             .width(260.0)
             .selected_text(shown)
             .show_styled(ui, |ui| {
+                reread_sounds_on_open(ui, "rx-sound", sounds);
                 if ui.selectable_label(audio_out.is_none(), "The system's default output").clicked()
                 {
                     *audio_out = None;
                 }
-                for d in sounds {
+                for d in sounds.iter() {
                     if ui.selectable_label(audio_out.as_ref() == Some(d), d).clicked() {
                         *audio_out = Some(d.clone());
                     }
@@ -426,4 +450,20 @@ pub(crate) fn settings_dsp(ui: &mut egui::Ui, d: &mut crate::rx::DspSettings) {
             *d = DspSettings::default();
         }
     });
+}
+
+#[cfg(test)]
+mod sound_list_tests {
+    use super::just_opened;
+
+    #[test]
+    fn the_sound_list_is_read_again_each_time_it_opens() {
+        // First shown: read.
+        assert!(just_opened(None, 10));
+        // Still open on the next pass: not read again.
+        assert!(!just_opened(Some(10), 11));
+        assert!(!just_opened(Some(11), 11));
+        // Closed for a while and opened again: read.
+        assert!(just_opened(Some(11), 40));
+    }
 }

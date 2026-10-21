@@ -130,6 +130,9 @@ impl Scf {
                 ui.ctx().request_repaint();
             }
         }
+        if let Some(e) = st.as_ref().and_then(|st| st.error.as_deref()) {
+            error_row(ui, e);
+        }
         self.controls(ui, s);
     }
 
@@ -233,7 +236,7 @@ impl Scf {
                     )
                     .clicked()
                 {
-                    s.channels = c;
+                    s.set_channels(c);
                 }
             }
             caption(ui, "· N");
@@ -241,11 +244,18 @@ impl Scf {
                 .selected_text(s.strip.to_string())
                 .show_ui(ui, |ui| {
                     for n in STRIPS {
-                        let ok = n as u64 * s.channels as u64 <= super::engine::MAX_POINTS as u64;
-                        if ui
-                            .add_enabled(ok, egui::Button::selectable(s.strip == n, n.to_string()))
-                            .clicked()
-                        {
+                        let ok = super::strip_ok(n, s.channels);
+                        let r = ui
+                            .add_enabled(ok, egui::Button::selectable(s.strip == n, n.to_string()));
+                        let r = if n < super::min_strip(s.channels) {
+                            r.on_disabled_hover_text(format!(
+                                "N must be at least 4 × N′ ({})",
+                                super::min_strip(s.channels)
+                            ))
+                        } else {
+                            r.on_disabled_hover_text("Too many points for the GPU with this N′")
+                        };
+                        if r.clicked() {
                             s.strip = n;
                         }
                     }
@@ -316,6 +326,26 @@ impl Scf {
     }
 }
 
+/// The engine's trouble in full under the plane (the top bar has room for
+/// only a line of it), with COPY LOG for a bug report.
+fn error_row(ui: &mut egui::Ui, e: &str) {
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(e).size(12.0).color(theme::YELLOW()));
+        if let Some(log) = crate::logfile::path()
+            && chip(ui, false, "COPY LOG")
+                .on_hover_text(format!(
+                    "Copy the end of the panel's log, for a bug report ({})",
+                    log.display()
+                ))
+                .clicked()
+            && let Some(text) = crate::logfile::tail()
+        {
+            ui.ctx().copy_text(text);
+        }
+    });
+}
+
 fn top_bar(ui: &egui::Ui, r: Rect, st: &Status, s: &ScfSettings, centre_shown: f64) {
     let p = ui.painter_at(r);
     let fs = st.lane_rate;
@@ -344,7 +374,9 @@ fn top_bar(ui: &egui::Ui, r: Rect, st: &Status, s: &ScfSettings, centre_shown: f
             block,
             block * st.blocks.min(s.avg_blocks as u64) as f64,
         );
-        p.text(r.center(), Align2::CENTER_CENTER, mid, label(11.5), dim());
+        if st.error.is_none() {
+            p.text(r.center(), Align2::CENTER_CENTER, mid, label(11.5), dim());
+        }
         // The GPU keeping up is neutral; behind it is a warning.
         let load = st.ms_per_block as f64 / 1000.0 / block;
         let behind = load > 1.0 || st.gpu_drops > 0;
@@ -356,8 +388,10 @@ fn top_bar(ui: &egui::Ui, r: Rect, st: &Status, s: &ScfSettings, centre_shown: f
         let col = if behind { theme::YELLOW() } else { dim() };
         p.text(pos2(r.right() - 10.0, r.center().y), Align2::RIGHT_CENTER, text, label(11.5), col);
     }
-    if let Some(e) = &st.error {
-        p.text(r.center(), Align2::CENTER_CENTER, e, label(12.0), theme::YELLOW());
+    if st.error.is_some() {
+        // In full, with COPY LOG, under the plane.
+        let t = "SCF engine trouble: see below";
+        p.text(r.center(), Align2::CENTER_CENTER, t, label(12.0), theme::YELLOW());
     }
 }
 

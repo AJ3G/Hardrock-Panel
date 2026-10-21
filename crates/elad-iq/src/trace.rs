@@ -216,22 +216,99 @@ pub fn remember_probe(trace: &Trace) {
     *LAST_PROBE.lock().unwrap_or_else(|e| e.into_inner()) = Some(trace.clone());
 }
 
-/// The most recent session traces, for a bug report: the open session first —
-/// it is the one with streaming evidence — then the most recent probe. `None`
-/// before the first attempt of either kind.
+/// How many retunes [`note_retune`] keeps.
+pub const RETUNES: usize = 10;
+
+/// Where the radio is tuned now and how it got there, as the program using
+/// this driver tells it. The session trace covers only the opening: on an
+/// FDM-DUO later retunes go over CAT, past this driver, so without this a
+/// report shows the dial the session opened on as if it were current.
+#[derive(Debug, Default)]
+struct Tuning {
+    /// The program's own line for now (the dial, the I/Q centre, …) and
+    /// when it was last set.
+    now: Option<(String, std::time::SystemTime)>,
+    /// The latest retunes, oldest first, each with its wall-clock time.
+    retunes: VecDeque<(std::time::SystemTime, String)>,
+}
+
+static TUNING: Mutex<Tuning> = Mutex::new(Tuning { now: None, retunes: VecDeque::new() });
+
+/// Say where the radio is tuned now, in the program's words (for example
+/// "dial 7.038600 MHz (CAT), I/Q centre 7.038600 MHz"). Cheap enough to call
+/// every frame: only the latest is kept.
+pub fn note_dial(now: impl Into<String>) {
+    let mut t = TUNING.lock().unwrap_or_else(|e| e.into_inner());
+    let line = now.into();
+    match &mut t.now {
+        Some((l, at)) if *l == line => *at = std::time::SystemTime::now(),
+        slot => *slot = Some((line, std::time::SystemTime::now())),
+    }
+}
+
+/// Record a retune or recentre (over CAT, USB, or the knob), with the time.
+/// The last [`RETUNES`] are kept.
+pub fn note_retune(what: impl Into<String>) {
+    let mut t = TUNING.lock().unwrap_or_else(|e| e.into_inner());
+    if t.retunes.len() >= RETUNES {
+        t.retunes.pop_front();
+    }
+    t.retunes.push_back((std::time::SystemTime::now(), what.into()));
+}
+
+/// A wall-clock time as `HH:MM:SS.mmm UTC`.
+fn utc(t: std::time::SystemTime) -> String {
+    let ms = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let day_ms = (ms % 86_400_000) as u64;
+    format!(
+        "{:02}:{:02}:{:02}.{:03} UTC",
+        day_ms / 3_600_000,
+        day_ms / 60_000 % 60,
+        day_ms / 1000 % 60,
+        day_ms % 1000
+    )
+}
+
+/// The tuning section of the report: where the radio is now and its latest
+/// retunes.
+fn tuning_report() -> String {
+    let t = TUNING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out = String::from("### tuning now (after the session's opening)\n");
+    match &t.now {
+        Some((line, at)) => out.push_str(&format!("now: {line} (as of {})\n", utc(*at))),
+        None => out.push_str("now: (not reported)\n"),
+    }
+    if t.retunes.is_empty() {
+        out.push_str("retunes: none since start\n");
+    } else {
+        out.push_str(&format!("last {} retunes, oldest first:\n", t.retunes.len()));
+        for (at, what) in &t.retunes {
+            out.push_str(&format!("  {}  {what}\n", utc(*at)));
+        }
+    }
+    out
+}
+
+/// The most recent session traces, for a bug report: where the radio is
+/// tuned now and its latest retunes first (the traces cover only their
+/// opening), then the open session — it is the one with streaming evidence —
+/// then the most recent probe. `None` before the first attempt of either
+/// kind.
 pub fn diagnostics() -> Option<String> {
     let open = LAST_OPEN.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let probe = LAST_PROBE.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if open.is_none() && probe.is_none() {
         return None;
     }
-    let mut out = String::new();
+    let open_shown = open.is_some();
+    let mut out = tuning_report();
+    out.push('\n');
     if let Some(t) = open {
         out.push_str("### radio session (open / stream)\n");
         out.push_str(&t.dump());
     }
     if let Some(t) = probe {
-        if !out.is_empty() {
+        if open_shown {
             out.push('\n');
         }
         out.push_str("### probe\n");
@@ -243,6 +320,36 @@ pub fn diagnostics() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_report_carries_the_dial_now_and_the_last_retunes() {
+        // The other tests share the session slots: only the tuning part is
+        // looked at here, then its place when there is a report.
+        note_dial("dial 7.074000 MHz");
+        note_dial("dial 7.038600 MHz (CAT)");
+        for i in 0..(RETUNES + 3) {
+            note_retune(format!("recentre {i} over CAT"));
+        }
+        let d = tuning_report();
+        assert!(d.contains("now: dial 7.038600 MHz (CAT)"), "{d}");
+        assert!(!d.contains("7.074000"), "{d}");
+        // Only the last ten, oldest first, each with its time.
+        assert!(!d.contains("recentre 2 over"), "{d}");
+        let first = d.find("recentre 3 over").expect("kept");
+        let last = d.find("recentre 12 over").expect("kept");
+        assert!(first < last);
+        assert!(d.contains(" UTC  recentre 12"), "{d}");
+        // Ahead of the session's own trace.
+        if let Some(d) = diagnostics() {
+            assert!(d.starts_with("### tuning now"), "{d}");
+        }
+    }
+
+    #[test]
+    fn times_are_written_as_utc_clock_times() {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(86_400_000 + 3_723_045);
+        assert_eq!(utc(t), "01:02:03.045 UTC");
+    }
 
     #[test]
     fn dump_reports_requests_and_the_identity() {

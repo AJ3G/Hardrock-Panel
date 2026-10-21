@@ -605,6 +605,10 @@ impl Rx {
         let dial_settled = self.tx_at.is_none_or(|t| t.elapsed() >= DIAL_SETTLE);
         if snap_centre > 0.0 && snap_centre != self.centre && dial_settled {
             let asked = self.asked_centre.is_some_and(|(c, _)| (c - snap_centre).abs() < 1.0);
+            if self.running == IqChoice::Elad {
+                let why = if asked { "as the panel asked" } else { "the dial moved on the radio" };
+                elad_iq::note_retune(format!("I/Q centre now {} ({why})", mhz(snap_centre)));
+            }
             if !asked {
                 // The dial was turned on the radio: the receiver moves with it.
                 self.rx_hz += snap_centre - self.centre;
@@ -623,6 +627,10 @@ impl Rx {
         if self.rx_hz != self.last_rx {
             self.last_rx = self.rx_hz;
             self.rx_moved = Instant::now();
+        }
+        if self.running == IqChoice::Elad {
+            let cat = now.rig.filter(|r| r.connected).and_then(|r| r.freq_hz);
+            elad_iq::note_dial(dial_line(cat, self.centre, self.rx_hz));
         }
         s.rx_hz = self.rx_hz;
         s.centre_hz = self.centre;
@@ -752,6 +760,7 @@ impl Rx {
                     // USB read-back of the dial shows (interlock #5).
                     if let Some(f) = r.model.protocol().set_freq(Vfo::A, hz.round() as u64) {
                         link.set(vec![f]);
+                        elad_iq::note_retune(format!("recentre to {} over CAT (VFO A)", mhz(hz)));
                     }
                 } else {
                     // SAFETY INTERLOCK (docs/safety-interlocks.md, #10): with
@@ -759,6 +768,7 @@ impl Rx {
                     // the DUO outside interlock #5, so never while it
                     // transmits (checked above).
                     p.send(Command::SetCenter(hz));
+                    elad_iq::note_retune(format!("recentre to {} over USB (no CAT)", mhz(hz)));
                 }
             }
             IqChoice::Off => return,
@@ -934,6 +944,21 @@ impl SplitState {
     }
 }
 
+/// A frequency for the ELAD log, MHz to the hertz.
+fn mhz(hz: f64) -> String {
+    format!("{:.6} MHz", hz / 1e6)
+}
+
+/// The ELAD log's line for where the radio is now: its dial over CAT (when
+/// connected), the I/Q centre and the panel's receiver.
+fn dial_line(cat: Option<u64>, centre: f64, rx: f64) -> String {
+    let dial = cat.map_or_else(
+        || "dial not read (no CAT)".to_string(),
+        |f| format!("dial {} (CAT)", mhz(f as f64)),
+    );
+    format!("{dial}, I/Q centre {}, receiver {}", mhz(centre), mhz(rx))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -950,6 +975,13 @@ mod tests {
 
     fn text(f: &[Frame]) -> Vec<String> {
         f.iter().map(|f| String::from_utf8_lossy(&f.bytes).into_owned()).collect()
+    }
+
+    #[test]
+    fn the_elad_log_says_where_the_radio_is_now() {
+        let l = dial_line(Some(7_038_600), 7_038_600.0, 7_040_100.0);
+        assert_eq!(l, "dial 7.038600 MHz (CAT), I/Q centre 7.038600 MHz, receiver 7.040100 MHz");
+        assert!(dial_line(None, 14.2e6, 14.2e6).starts_with("dial not read (no CAT)"));
     }
 
     #[test]

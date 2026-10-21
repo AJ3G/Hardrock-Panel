@@ -236,7 +236,7 @@ fn run_gpu(
     bp: BlockParams,
     avg: u32,
 ) -> Engine {
-    let mut e = Engine::new(&dev.1, &dev.2, cfg);
+    let mut e = Engine::new(&dev.1, &dev.2, cfg).expect("valid sizes");
     let n = cfg.n as usize;
     let mut at = 0;
     let mut b = 0;
@@ -467,7 +467,7 @@ fn scf_sensitivity() {
         b.fs / b.cfg.n as f64
     );
     eprintln!("statistic: profile column {col}");
-    let mut e = Engine::new(&device, &queue, b.cfg);
+    let mut e = Engine::new(&device, &queue, b.cfg).expect("valid sizes");
     let n = b.cfg.n as usize;
     type Gen = fn(usize, f64, f64, &mut Rng) -> Vec<C>;
     let ft8: Gen = |len, fs, amp, rng| ft8_like(len, fs, 300.0, amp, rng);
@@ -541,7 +541,7 @@ fn scf_throughput() {
             grid_a: 256,
             taper: Taper::Kaiser,
         };
-        let mut e = Engine::new(&device, &queue, cfg);
+        let mut e = Engine::new(&device, &queue, cfg).expect("valid sizes");
         let mut rng = Rng::new(1);
         let blk = interleave(&noise(e.block_len(), 1.0, &mut rng));
         let bp = BlockParams {
@@ -569,4 +569,82 @@ fn scf_throughput() {
             n * nc
         );
     }
+}
+
+#[test]
+fn n_under_four_times_n_prime_is_greyed_and_never_reaches_the_engine() {
+    use super::{CHANNELS, STRIPS, min_strip, strip_ok};
+    for c in CHANNELS {
+        let ok: Vec<u32> = STRIPS.iter().copied().filter(|&n| strip_ok(n, c)).collect();
+        assert!(!ok.is_empty(), "no N for N′ {c}");
+        for n in STRIPS {
+            let cfg = EngineCfg { n, nc: c, grid_f: c.min(256), grid_a: 256, taper: Taper::Kaiser };
+            assert_eq!(strip_ok(n, c), cfg.valid(), "N {n}, N′ {c}");
+        }
+        let shortest = STRIPS.iter().copied().find(|&n| n >= min_strip(c));
+        assert_eq!(Some(ok[0]), shortest);
+    }
+    assert!(!strip_ok(1024, 1024));
+    assert!(strip_ok(4096, 1024));
+    assert!(!strip_ok(8192, 1024));
+}
+
+#[test]
+fn raising_n_prime_raises_n_to_the_smallest_that_runs() {
+    use super::ScfSettings;
+    let mut s = ScfSettings { strip: 1024, channels: 64, ..ScfSettings::default() };
+    s.set_channels(512);
+    assert_eq!((s.strip, s.channels), (2048, 512));
+    s.set_channels(1024);
+    assert_eq!((s.strip, s.channels), (4096, 1024));
+    // Lowering N′ leaves N where it was.
+    s.set_channels(64);
+    assert_eq!(s.strip, 4096);
+    // Too long for the new N′ comes down to the longest that fits.
+    let mut s = ScfSettings { strip: 65_536, channels: 64, ..ScfSettings::default() };
+    s.set_channels(1024);
+    assert_eq!(s.strip, 4096);
+    assert!(s.engine().valid());
+}
+
+#[test]
+fn a_bad_pair_kept_from_an_earlier_run_is_put_right_on_load() {
+    // The pair that stopped the engine on every start.
+    let mut s: super::ScfSettings =
+        serde_json::from_str(r#"{"strip": 1024, "channels": 1024}"#).unwrap();
+    s.sanitise();
+    assert_eq!((s.strip, s.channels), (4096, 1024));
+    // And through the scope's settings, as Scope::new loads them.
+    let mut sc = crate::scope::ScopeSettings::default();
+    sc.scf.strip = 1024;
+    sc.scf.channels = 512;
+    sc.sanitise();
+    assert_eq!(sc.scf.strip, 2048);
+    assert!(sc.scf.engine().valid());
+}
+
+#[test]
+fn the_engine_refuses_bad_sizes_with_a_reason() {
+    let cfg = EngineCfg { n: 1024, nc: 1024, grid_f: 256, grid_a: 256, taper: Taper::Kaiser };
+    let why = cfg.problem().expect("refused");
+    assert!(why.contains("4 × N′"), "{why}");
+    let ok = EngineCfg { n: 4096, ..cfg };
+    assert_eq!(ok.problem(), None);
+    let Some((_, device, queue)) = gpu() else {
+        eprintln!("no GPU: the refusal is checked without building");
+        return;
+    };
+    match Engine::new(&device, &queue, cfg) {
+        Err(e) => assert_eq!(e, why),
+        Ok(_) => panic!("built an engine for {cfg:?}"),
+    }
+}
+
+#[test]
+fn the_stop_message_carries_the_panic_and_the_log() {
+    let m = super::stop_message("index out of bounds", false);
+    assert!(m.contains("index out of bounds"), "{m}");
+    assert!(m.contains("log"), "{m}");
+    let m = super::stop_message("index out of bounds", true);
+    assert!(m.contains("started again"), "{m}");
 }

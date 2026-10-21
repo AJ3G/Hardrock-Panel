@@ -27,6 +27,9 @@
 mod chrome;
 #[path = "../src/layout.rs"]
 mod layout;
+// The SCF view says where the log is and copies it.
+#[path = "../src/logfile.rs"]
+mod logfile;
 #[path = "../src/repaint.rs"]
 mod repaint;
 #[path = "../src/scope/mod.rs"]

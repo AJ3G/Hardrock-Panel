@@ -103,13 +103,26 @@ pub struct EngineCfg {
 impl EngineCfg {
     /// Whether the sizes are ones the shaders handle.
     pub fn valid(&self) -> bool {
-        self.n.is_power_of_two()
-            && self.nc.is_power_of_two()
-            && (16..=SHARED_FFT).contains(&self.nc)
-            && self.n >= 4 * self.nc
-            && self.n as u64 * self.nc as u64 <= MAX_POINTS as u64
-            && self.grid_f >= 2
-            && self.grid_a >= 2
+        self.problem().is_none()
+    }
+
+    /// What is wrong with the sizes, in words for the status line, or
+    /// `None` when the shaders handle them.
+    pub fn problem(&self) -> Option<String> {
+        let (n, nc) = (self.n, self.nc);
+        if !n.is_power_of_two() || !nc.is_power_of_two() {
+            Some(format!("N {n} and N′ {nc} must be powers of two"))
+        } else if !(16..=SHARED_FFT).contains(&nc) {
+            Some(format!("N′ {nc} is outside 16 to {SHARED_FFT}"))
+        } else if (n as u64) < 4 * nc as u64 {
+            Some(format!("N {n} is under 4 × N′ ({}): choose a longer N", 4 * nc as u64))
+        } else if n as u64 * nc as u64 > MAX_POINTS as u64 {
+            Some(format!("N {n} × N′ {nc} is more points than the GPU buffers hold"))
+        } else if self.grid_f < 2 || self.grid_a < 2 {
+            Some(format!("a grid of {} × {} is too small", self.grid_f, self.grid_a))
+        } else {
+            None
+        }
     }
 
     fn four_step(&self) -> Option<(u32, u32)> {
@@ -264,9 +277,16 @@ pub fn supported(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
 }
 
 impl Engine {
-    /// Build for `cfg` (which must be [`EngineCfg::valid`]).
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, cfg: EngineCfg) -> Engine {
-        assert!(cfg.valid(), "SCF sizes {cfg:?}");
+    /// Build for `cfg`, or say why not when its sizes are not
+    /// [`EngineCfg::valid`].
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cfg: EngineCfg,
+    ) -> Result<Engine, String> {
+        if let Some(why) = cfg.problem() {
+            return Err(why);
+        }
         let d = device;
         let n = cfg.n;
         let nc = cfg.nc;
@@ -450,7 +470,7 @@ impl Engine {
         add("column_main", columns, &[(10, both(&grid)), (12, both(&colm))]);
         add("profile_main", profile, &[(10, both(&grid)), (11, both(&prof)), (12, both(&colm))]);
 
-        Engine {
+        Ok(Engine {
             device: device.clone(),
             queue: queue.clone(),
             cfg,
@@ -469,7 +489,7 @@ impl Engine {
             sum_g: g.iter().sum(),
             slot: 0,
             blocks: 0,
-        }
+        })
     }
 
     /// Complex samples a block takes: N new ones and N' carried over.
