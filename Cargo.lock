@@ -1606,6 +1606,7 @@ dependencies = [
  "half",
  "hardrock",
  "links",
+ "mfsk-core",
  "naga",
  "pollster",
  "rigcat",

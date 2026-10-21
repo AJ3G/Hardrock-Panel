@@ -390,7 +390,8 @@ itself and says so under the I/Q line.
 ## Decoding
 
 **DECODE**, on the top bar, opens the panel's own decoders. Pick a mode and
-press **RUN**; it keeps decoding with the window closed until **STOP**.
+it decodes for as long as the window is open, docked or popped out, as WSJT-X
+does; closing the window stops it.
 
 **Snap the radio to the mode** (on to start): picking a mode takes the
 panel's receiver and the DUO to its frequency on the band you are on (or the

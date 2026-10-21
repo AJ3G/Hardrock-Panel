@@ -568,6 +568,8 @@ impl App {
             xvtr_hz: xvtr as f64,
             ppm: self.scope.settings().ppm,
         };
+        // The decoder runs while its window is open.
+        self.saved.decode.running = self.show_decode;
         self.decode.frame(
             &self.saved.decode,
             &self.saved.station,

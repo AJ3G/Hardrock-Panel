@@ -190,7 +190,14 @@ impl WsjtDecoder {
                         let first = t0 + (outs as f64 - delay) / wsjt::RATE;
                         outs += block.len() as u64;
                         for s in rec.push(block, first) {
-                            if s.first_s <= max_late && slot_tx.send(SlotMsg::Done(s)).is_err() {
+                            if s.first_s > max_late {
+                                tracing::info!(
+                                    "{} slot {}: joined {:.2} s in, too late to decode",
+                                    mode.label(),
+                                    s.start_utc,
+                                    s.first_s
+                                );
+                            } else if slot_tx.send(SlotMsg::Done(s)).is_err() {
                                 return;
                             }
                         }
@@ -252,6 +259,17 @@ impl WsjtDecoder {
                             }
                             SlotMsg::Done(s) => {
                                 let slot_utc = s.start_utc.round() as i64;
+                                // Each slot in the log: how loud its audio was
+                                // and how late it was joined, so a slot with
+                                // no decodes can be told from no audio.
+                                let rms = (s.audio.iter().map(|x| x * x).sum::<f32>()
+                                    / s.audio.len().max(1) as f32)
+                                    .sqrt();
+                                tracing::info!(
+                                    "{} slot {slot_utc}: audio rms {rms:.4}, joined {:.2} s in",
+                                    mode.label(),
+                                    s.first_s
+                                );
                                 let decodes = match live.take() {
                                     Some(mut l) if l.slot_utc() == slot_utc => {
                                         l.push(&s.audio[l.heard().min(s.audio.len())..]);
@@ -271,6 +289,13 @@ impl WsjtDecoder {
                             decode_ms,
                             live = is_live
                         );
+                        if !is_live {
+                            tracing::info!(
+                                "{} slot {slot_utc}: {} decoded in {decode_ms} ms",
+                                mode.label(),
+                                decodes.len()
+                            );
+                        }
                         if is_live && decodes.is_empty() {
                             continue;
                         }

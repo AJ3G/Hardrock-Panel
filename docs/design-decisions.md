@@ -371,7 +371,7 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 
 **Decided:** by the integrator, 20 Oct 2026, under decisions 26 to 28.
 
-**What the panel does.** DECODE, on the top bar, opens a window with every mode in four rows: WSJT (FT8, FT4, WSPR, JT65, JT9, FST4-60, Q65-30A), keyboard (RTTY 45.45 Bd 170 Hz, PSK31, NAVTEX, Olivia 8/500, THOR16), pictures (SSTV, WEFAX) and from the I/Q (HFDL, ACARS, VDL2, AIS, Mode S). RUN starts the chosen one; it keeps running when the window is closed, until STOP. The audio modes take the receiver's 48 kHz audio, the data links the I/Q. The list shows each decode's UTC, SNR, DT, audio frequency and RF frequency (the receiver's dial plus the audio, corrected by the scope's ppm, plus the transverter LO), newest first, and the line above it how many blocks the decoder dropped and how long the last slot took. Keyboard modes show running text with their audio frequency to set; pictures build up as they arrive, WEFAX with its LPM and IOC and a manual start and stop. Data links take the radio window's transverter offset as their LO, so they report true RF, and say when the span doesn't hold their channels. WSJT decodes also go out as WSJT-X UDP Decode, WSPR Decode and Status messages when that is on under SETTINGS. Only one sub-mode of FST4 and Q65 is offered for now.
+**What the panel does.** DECODE, on the top bar, opens a window with every mode in four rows: WSJT (FT8, FT4, WSPR, JT65, JT9, FST4-60, Q65-30A), keyboard (RTTY 45.45 Bd 170 Hz, PSK31, NAVTEX, Olivia 8/500, THOR16), pictures (SSTV, WEFAX) and from the I/Q (HFDL, ACARS, VDL2, AIS, Mode S). The chosen one decodes while the window is open (decision 47; at first a RUN key started it and it ran with the window closed). The audio modes take the receiver's 48 kHz audio, the data links the I/Q. The list shows each decode's UTC, SNR, DT, audio frequency and RF frequency (the receiver's dial plus the audio, corrected by the scope's ppm, plus the transverter LO), newest first, and the line above it how many blocks the decoder dropped and how long the last slot took. Keyboard modes show running text with their audio frequency to set; pictures build up as they arrive, WEFAX with its LPM and IOC and a manual start and stop. Data links take the radio window's transverter offset as their LO, so they report true RF, and say when the span doesn't hold their channels. WSJT decodes also go out as WSJT-X UDP Decode, WSPR Decode and Status messages when that is on under SETTINGS. Only one sub-mode of FST4 and Q65 is offered for now.
 
 **Where.** `crates/hardrock-panel/src/decode.rs`.
 
@@ -561,3 +561,10 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 
 **Where.** `radio/zoom.rs`, `radio.rs` (`fitted`, `radio_window`), `radio/face.rs`, `radio/controls.rs`, `tune.rs` (`tune_strip`), `panel.rs` (`fit_panel`, `fit_scaled`, `fit_scale`).
 
+## 47. DECODE runs while its window is open (21 Oct 2026)
+
+**Why.** With a RUN key, a stopped decoder looked like a working one: the slot bar kept ticking and the list said "Nothing decoded yet". AJ3G lost a session of FT8 to it and asked whether the key was needed.
+
+**What the panel does.** No RUN or STOP. The decoder runs while the DECODE window is open, docked or popped out, as WSJT-X always decodes; closing the window stops it, and with it the spots it sends. The settings file's `running` is still read but is set each frame from the window.
+
+**Also.** Each WSJT slot goes in the log at info level: the audio's RMS, how late the slot was joined, and how many it decoded in how long, so a slot with nothing decoded can be told from a slot with no audio.

@@ -1173,4 +1173,101 @@ mod tests {
         assert!(rx.error.is_none());
         assert_eq!(rx.source(), IqChoice::Demo);
     }
+
+    /// FT8 on the air, as I/Q in real time: each slot from 0.5 s, one
+    /// station at `rf_hz`, in a little noise.
+    struct Ft8Air {
+        rate: f64,
+        centre: f64,
+        rf_hz: f64,
+        tones: Vec<u8>,
+        utc0: f64,
+        t0: Instant,
+        n: u64,
+        phase: f64,
+    }
+
+    impl sdr::IqSource for Ft8Air {
+        fn sample_rate(&self) -> f64 {
+            self.rate
+        }
+        fn center_hz(&self) -> f64 {
+            self.centre
+        }
+        fn read(&mut self, out: &mut [f32]) -> usize {
+            // In bursts, late by up to 0.15 s, as USB and a busy machine
+            // deliver it.
+            let late = ((self.n / 19_200) * 2_654_435_761 % 150) as f64 / 1000.0;
+            let due = ((self.t0.elapsed().as_secs_f64() - late).max(0.0) * self.rate) as u64;
+            let due = due / 19_200 * 19_200;
+            let k = ((due.saturating_sub(self.n)) as usize).min(out.len() / 2);
+            for i in 0..k {
+                let utc = self.utc0 + (self.n + i as u64) as f64 / self.rate;
+                let into = utc.rem_euclid(15.0) - 0.5;
+                let sym = (into / 0.16).floor();
+                let (re, im) = if (0.0..79.0).contains(&sym) {
+                    let f = self.rf_hz - self.centre + self.tones[sym as usize] as f64 * 6.25;
+                    self.phase = (self.phase + std::f64::consts::TAU * f / self.rate)
+                        % std::f64::consts::TAU;
+                    (0.01 * self.phase.cos() as f32, 0.01 * self.phase.sin() as f32)
+                } else {
+                    (0.0, 0.0)
+                };
+                let j = (i as u32).wrapping_mul(2_654_435_761) >> 20;
+                out[2 * i] = re + (j as f32 / 4096.0 - 0.5) * 1e-3;
+                out[2 * i + 1] = im + ((j ^ 0x5a5) as f32 / 4096.0 - 0.5) * 1e-3;
+            }
+            self.n += k as u64;
+            if k == 0 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            2 * k
+        }
+        fn label(&self) -> String {
+            "FT8 on the air".into()
+        }
+    }
+
+    #[test]
+    #[ignore = "real time, up to 35 s: cargo test -- --ignored ft8_on_the_air"]
+    fn ft8_on_the_air_decodes_off_the_centre() {
+        // As after the FT8 snap on 40 m from WSPR: the centre left at
+        // 7.0386 MHz, the receiver on 7.074 MHz USB.
+        let scope = Scope::new(None, crate::scope::ScopeSettings::default());
+        let mut s = RxSettings { source: IqChoice::Demo, ..RxSettings::default() };
+        let mut rx = Rx::new(&s);
+        rx.centre = 7_038_600.0;
+        rx.rx_hz = 7_074_000.0;
+        rx.passband = (100.0, 3_000.0);
+        let bits = mfsk_core::msg::wsjt77::pack77("CQ", "K1ABC", "FN42").unwrap();
+        let tones = mfsk_core::ft8::wave_gen::message_to_tones(&bits).to_vec();
+        let src = Ft8Air {
+            rate: 192_000.0,
+            centre: rx.centre,
+            rf_hz: 7_075_500.0,
+            tones,
+            utc0: decoders::slot::utc_now(),
+            t0: Instant::now(),
+            n: 0,
+            phase: 0.0,
+        };
+        rx.spawn(Box::new(src), &scope);
+        rx.running = IqChoice::Demo;
+        let ds = crate::decode::DecodeSettings {
+            kind: crate::decode::Kind::Ft8,
+            running: true,
+            ..Default::default()
+        };
+        let st = crate::station::StationSettings::default();
+        let at = crate::decode::Where { dial_hz: rx.rx_hz, lsb: false, xvtr_hz: 0.0, ppm: 0.0 };
+        let mut d = crate::decode::Decode::default();
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(35) && d.rows.is_empty() {
+            rx.frame(&mut s, &scope, now(false));
+            d.frame(&ds, &st, &rx, at, None);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let texts: Vec<_> = d.rows.iter().map(|r| r.text.clone()).collect();
+        assert!(texts.iter().any(|t| t == "CQ K1ABC FN42"), "{texts:?} {:?}", d.error);
+    }
 }

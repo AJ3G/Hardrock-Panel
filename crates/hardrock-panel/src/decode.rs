@@ -211,7 +211,8 @@ impl Kind {
 #[serde(default)]
 pub(crate) struct DecodeSettings {
     pub kind: Kind,
-    /// Decoding (the window's RUN), whether or not the window is open.
+    /// Decoding: set each frame from whether the DECODE window is open (no
+    /// RUN key, as in WSJT-X). Kept so older settings files still read.
     pub running: bool,
     /// The keyboard modes' audio frequency (RTTY's mark/space centre,
     /// PSK31's carrier, Olivia's and THOR's centre), Hz.
@@ -457,6 +458,7 @@ impl Decode {
                 let mut cfg = WsjtConfig::new(mode);
                 // Hashed messages naming the operator resolve from the start.
                 cfg.my_calls.extend(st.call());
+                tracing::info!("{} decoder started, receiver at {:.0} Hz", mode.label(), at.dial_hz);
                 let w = Arc::new(WsjtDecoder::spawn(cfg));
                 self.started_utc = Some(decoders::slot::utc_now());
                 let f = w.clone();
@@ -878,14 +880,6 @@ fn body(
         });
     }
     ui.horizontal_wrapped(|ui| {
-        let (t, hover) = if s.running {
-            (" STOP ", "Stop decoding")
-        } else {
-            (" RUN ", "Decode the receiver's audio (or the I/Q, for the data links)")
-        };
-        if chrome::chip(ui, s.running, t).on_hover_text(hover).clicked() {
-            s.running = !s.running;
-        }
         match s.kind.family() {
             Family::Text => {
                 if s.kind != Kind::Navtex {
@@ -1282,5 +1276,44 @@ mod tests {
         // An older settings file snaps.
         let s: DecodeSettings = serde_json::from_str("{\"running\": true}").unwrap();
         assert!(s.snap && s.running);
+    }
+
+    #[test]
+    fn ft8_heard_by_the_panel_reaches_the_list() {
+        // The panel's own path: DECODE started on a running receiver, a slot
+        // of FT8 audio at the tap, the slot's decodes taken frame by frame.
+        let scope = crate::scope::Scope::new(None, crate::scope::ScopeSettings::default());
+        let rs = rx::RxSettings { source: rx::IqChoice::Demo, ..Default::default() };
+        let mut rx = Rx::new(&rs);
+        rx.start(&rs, &scope, rx::RadioNow { link: None, rig: None, transmitting: false });
+        assert!(rx.active());
+        let s = DecodeSettings { kind: Kind::Ft8, running: true, ..Default::default() };
+        let st = StationSettings { callsign: "AJ3G".into(), grid: "FN20".into(), ..Default::default() };
+        let at = Where { dial_hz: 14_074_000.0, lsb: false, xvtr_hz: 0.0, ppm: 0.0 };
+        let mut d = Decode::default();
+        d.frame(&s, &st, &rx, at, None);
+        let Some((_, Worker::Wsjt(w, _))) = &d.worker else { panic!("no FT8 decoder") };
+        let w = w.clone();
+        rx.stop();
+
+        let slot_utc = 1_700_000_010i64;
+        let bits = mfsk_core::msg::wsjt77::pack77("CQ", "K1ABC", "FN42").unwrap();
+        let tones = mfsk_core::ft8::wave_gen::message_to_tones(&bits);
+        let burst = mfsk_core::ft8::wave_gen::tones_to_f32(&tones, 1500.0, 0.3);
+        let mut a12 = vec![0.0f32; 12_000 * 18];
+        let k = 12_000 / 2 + 2 * 12_000;
+        a12[k..k + burst.len()].copy_from_slice(&burst);
+        // 12 kHz to 48 kHz, each sample four times (the decoder filters it).
+        let a48: Vec<f32> = a12.iter().flat_map(|&x| [x; 4]).collect();
+        let start = slot_utc as f64 - 2.0;
+        for (i, c) in a48.chunks(4800).enumerate() {
+            w.push(c, start + (i * 4800) as f64 / 48_000.0);
+        }
+        let t = Instant::now();
+        while d.rows.is_empty() && t.elapsed().as_secs() < 60 {
+            d.take(at, None);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(d.rows.iter().any(|r| r.text == "CQ K1ABC FN42"), "{:?} {:?}", d.rows, d.last_slot);
     }
 }

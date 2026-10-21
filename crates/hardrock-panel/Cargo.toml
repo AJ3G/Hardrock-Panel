@@ -44,3 +44,5 @@ naga = { version = "30.0.1", features = ["wgsl-in"] }
 # The GPU spectrum's tests: a headless device, and the FFT to check it by.
 pollster = "1.0.1"
 rustfft.workspace = true
+# FT8 audio for the DECODE panel's end-to-end test.
+mfsk-core.workspace = true
