@@ -127,9 +127,35 @@ pub fn wgpu_options() -> egui_wgpu::WgpuConfiguration {
     }
 }
 
+/// Log the device's uncaptured errors rather than let wgpu panic on them.
+///
+/// wgpu's default handler panics on every uncaptured error, and one of them
+/// is a race this panel can't avoid: reconfiguring a window's surface (on a
+/// resize, or each time the driver calls the surface suboptimal) waits for
+/// the queue to drain, and fails with "Failed to wait for GPU to come idle"
+/// if the scope's I/Q upload or the SCF thread submits work meanwhile. That
+/// closed the panel 13 s after start on AJ3G's RTX 5070 (Vulkan, build
+/// 601aaf2). The surface keeps its old configuration and egui tries again
+/// on the next frame, so logging it loses at most a frame. Other errors are
+/// logged too, with the same text the panic would have had.
+pub fn log_errors(device: &wgpu::Device) {
+    let last = Arc::new(Mutex::new(None::<(String, std::time::Instant)>));
+    device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
+        let text = e.to_string();
+        let mut last = last.lock().unwrap_or_else(|p| p.into_inner());
+        // The same error every frame would flood the log: once a second.
+        if last.as_ref().is_some_and(|(t, at)| *t == text && at.elapsed().as_secs_f32() < 1.0) {
+            return;
+        }
+        tracing::error!("wgpu error (not fatal): {text}");
+        *last = Some((text, std::time::Instant::now()));
+    }));
+}
+
 /// Compile the pipelines and register them with egui's renderer. Call once,
 /// at start-up, with eframe's render state; a second call is harmless.
 pub fn init(rs: &RenderState) -> GpuInfo {
+    log_errors(&rs.device);
     let limits = rs.device.limits();
     let tex_w = limits.max_texture_dimension_2d.min(MAX_TEX_W);
     let adapter: &'static str = Box::leak(rs.adapter.get_info().name.into_boxed_str());
@@ -1452,6 +1478,21 @@ pub fn callback(rect: egui::Rect, cb: impl CallbackTrait + 'static) -> egui::Sha
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wgpu_error_is_logged_not_fatal() {
+        let Some((device, _queue)) = crate::scope::gpu_fft::tests::device() else { return };
+        log_errors(&device);
+        // MAP_READ with STORAGE is refused by validation: with wgpu's own
+        // handler this panics, as the surface error did in build 601aaf2.
+        let _ = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("invalid on purpose"),
+            size: 64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    }
 
     /// Parse and validate a shader as `Shared::new` builds it, and return the
     /// size of its uniform block, bytes.

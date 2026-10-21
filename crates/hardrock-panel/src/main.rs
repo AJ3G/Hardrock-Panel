@@ -41,8 +41,8 @@ mod theme;
 
 mod audio;
 mod decode;
-mod logfile;
 mod decodelog;
+mod logfile;
 mod outside;
 mod panel;
 mod radio;
