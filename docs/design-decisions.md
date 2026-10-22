@@ -715,3 +715,7 @@ AJ3G: "Yes do skimmers", meaning SDRoxide's wide CW, PSK31 and RTTY skimmers.
 - **Toggle.** SKIM CW/PSK/RTTY in DECODE, off to start, saved, in any mode, while DECODE is open. Nothing it reads goes to PSK Reporter, WSPRnet, ALL.TXT or WSJT-X UDP.
 - **Demo.** The demo band has made-up CW, PSK31 and RTTY stations on 20 m (`decoders::demo::DemoKeys`).
 
+
+## 57. One volume: the radio's VM and the panel's Sound follow each other (22 Oct 2026)
+
+AJ3G found E1 on VOL did nothing he could hear, and asked for the volume controls to coordinate. The radio's own audio is live at 192 kHz SPAN; wider, the radio mutes and the panel's receiver plays. So E1, RADIO's VOLUME and the radio's own knob (CAT `VM`, 0 to 100) and SCOPE's Sound slider (0 to 1) are kept as one (`rx.rs`, `VolSync`). The radio's read-back wins when the panel connects. A change to Sound is sent to the radio as VM, at most every 150 ms while it is dragged. The old read-back doesn't pull the slider back while the new value is awaited, up to 1.5 s; after that the radio's word stands. Nothing is sent while transmitting (the link refuses it then too, #5). Tested by `the_radio_volume_and_the_panel_volume_follow_each_other`.
