@@ -392,6 +392,8 @@ pub(crate) struct Rx {
     split: SplitState,
     /// The mode and filter width last sent to the DUO.
     duo_sent: Option<(Mode, u32)>,
+    /// The radio's volume and the panel's kept as one.
+    vol: VolSync,
     /// Restart at the scope's new SPAN.
     pub restart: bool,
     /// The DSP choices the pipeline was started with or last sent.
@@ -431,6 +433,7 @@ impl Default for Rx {
             last_rx: s.rx_hz,
             split: SplitState::default(),
             duo_sent: None,
+            vol: VolSync::default(),
             restart: false,
             dsp: s.dsp,
             heard: (0, Instant::now()),
@@ -630,6 +633,7 @@ impl Rx {
             );
         }
         self.watch_stream(s, scope, now);
+        self.sync_volume(s, now);
         self.keep_audio(s);
         let Some(p) = &self.pipeline else { return };
         let snap_centre = p.lock().center_hz;
@@ -718,6 +722,22 @@ impl Rx {
             self.reopened_at = Some(Instant::now());
             self.heard = (0, Instant::now());
             self.watchdog = Some(msg);
+        }
+    }
+
+    /// One volume (AJ3G): the radio's VM (E1 on VOL, RADIO's VOLUME, the
+    /// radio's own knob) and SCOPE's Sound slider follow each other, so the
+    /// one heard, the radio's audio or the panel's, turns with either.
+    fn sync_volume(&mut self, s: &mut RxSettings, now: RadioNow<'_>) {
+        let Some((link, r)) = now.cat() else { return };
+        let proto = r.model.protocol();
+        let Some(c) = crate::radio::logic::find(&*proto, "VM") else { return };
+        let radio = crate::radio::logic::readback(c, r).and_then(|v| v.trim().parse().ok());
+        if let Some(to) = self.vol.step(radio, &mut s.volume, now.transmitting, Instant::now())
+            && let Ok(f) = crate::radio::logic::control_frame(&*proto, c, &to.to_string(), r)
+        {
+            // Read back after; refused while transmitting (#5).
+            link.set(vec![f]);
         }
     }
 
@@ -993,6 +1013,63 @@ fn dial_line(cat: Option<u64>, centre: f64, rx: f64) -> String {
         |f| format!("dial {} (CAT)", mhz(f as f64)),
     );
     format!("{dial}, I/Q centre {}, receiver {}", mhz(centre), mhz(rx))
+}
+
+/// The radio's VM, 0 to 100, against the panel's volume, 0 to 1.
+#[derive(Default)]
+pub(crate) struct VolSync {
+    /// Where the two last agreed.
+    agreed: Option<(i32, f32)>,
+    /// A VM sent, and when, while its read-back is awaited.
+    sent: Option<(i32, Instant)>,
+}
+
+/// At most one VM for the radio this often while the slider is dragged.
+const VOL_SEND_EVERY: Duration = Duration::from_millis(150);
+/// How long a VM sent is waited for before the radio's word is taken.
+const VOL_WAIT: Duration = Duration::from_millis(1500);
+
+impl VolSync {
+    /// Given the radio's VM read back and the panel's volume: the panel's
+    /// takes a change of the radio's, and a change of the panel's is the VM
+    /// returned to send. The radio's wins at the start.
+    pub(crate) fn step(
+        &mut self,
+        radio: Option<i32>,
+        panel: &mut f32,
+        transmitting: bool,
+        now: Instant,
+    ) -> Option<i32> {
+        let v = radio?.clamp(0, 100);
+        let Some((vm, vol)) = self.agreed else {
+            *panel = v as f32 / 100.0;
+            self.agreed = Some((v, *panel));
+            return None;
+        };
+        if (*panel - vol).abs() > 1e-4 {
+            if transmitting || self.sent.is_some_and(|(_, t)| now - t < VOL_SEND_EVERY) {
+                return None;
+            }
+            let to = (*panel * 100.0).round().clamp(0.0, 100.0) as i32;
+            self.agreed = Some((to, *panel));
+            if to == vm {
+                return None;
+            }
+            self.sent = Some((to, now));
+            return Some(to);
+        }
+        if let Some((w, t)) = self.sent {
+            if v != w && now - t < VOL_WAIT {
+                return None;
+            }
+            self.sent = None;
+        }
+        if v != vm {
+            *panel = v as f32 / 100.0;
+            self.agreed = Some((v, *panel));
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1305,5 +1382,43 @@ mod tests {
         }
         let texts: Vec<_> = d.rows.iter().map(|r| r.text.clone()).collect();
         assert!(texts.iter().any(|t| t == "CQ K1ABC FN42"), "{texts:?} {:?}", d.error);
+    }
+
+    #[test]
+    fn the_radio_volume_and_the_panel_volume_follow_each_other() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut v = VolSync::default();
+        let mut panel = 0.5;
+        // Nothing read back yet: left alone.
+        assert_eq!(v.step(None, &mut panel, false, t0), None);
+        assert_eq!(panel, 0.5);
+        // The radio's wins at the start.
+        assert_eq!(v.step(Some(30), &mut panel, false, t0), None);
+        assert_eq!(panel, 0.3);
+        // E1 or the radio's knob: the panel follows.
+        assert_eq!(v.step(Some(42), &mut panel, false, ms(10)), None);
+        assert_eq!(panel, 0.42);
+        // The Sound slider: the radio is sent it, and the old read-back
+        // doesn't pull the slider back while it is awaited.
+        panel = 0.6;
+        assert_eq!(v.step(Some(42), &mut panel, false, ms(20)), Some(60));
+        assert_eq!(v.step(Some(42), &mut panel, false, ms(40)), None);
+        assert_eq!(panel, 0.6);
+        // Dragged on: one VM each 150 ms at most.
+        panel = 0.65;
+        assert_eq!(v.step(Some(42), &mut panel, false, ms(60)), None);
+        assert_eq!(v.step(Some(42), &mut panel, false, ms(180)), Some(65));
+        assert_eq!(v.step(Some(65), &mut panel, false, ms(300)), None);
+        assert_eq!(panel, 0.65);
+        // Not while transmitting; sent after.
+        panel = 0.2;
+        assert_eq!(v.step(Some(65), &mut panel, true, ms(500)), None);
+        assert_eq!(v.step(Some(65), &mut panel, false, ms(600)), Some(20));
+        // A VM the radio never takes: its word stands after a while.
+        assert_eq!(v.step(Some(65), &mut panel, false, ms(1000)), None);
+        assert_eq!(panel, 0.2);
+        assert_eq!(v.step(Some(65), &mut panel, false, ms(2200)), None);
+        assert_eq!(panel, 0.65);
     }
 }

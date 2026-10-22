@@ -127,7 +127,10 @@ says more.
   back. A hold starts digit by digit: turn to change the lit digit, use E1 or
   E2 to move along, and click or hold to go back.
 - **E1.** Turning changes VOL, SQL, AGC (AGC or manual gain), NR or NB, the
-  one named under it; a click picks the next.
+  one named under it; a click picks the next. VOL is one volume with
+  RADIO's VOLUME and SCOPE's Sound slider: move any of them, or the radio's
+  own knob, and the others follow, so it turns whichever audio you hear (the
+  radio's at 192 kHz SPAN, the panel's receiver wider).
 - **E2.** Turning changes the receive filter, the CW pitch (in CW) or the RIT
   offset (while RIT is on); a click picks the next.
 - **Lock.** Holding E1 or E2 locks the knobs and the dial, as pressing both
