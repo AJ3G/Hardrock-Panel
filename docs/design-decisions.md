@@ -610,7 +610,7 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 
 **Where.** `chrome.rs` (`window_frame`, `window_edge`), `scopewin.rs`, `radio.rs` (`radio_window`), `main.rs` (`settings_window`).
 
-## 51. Slot lines on the waterfall: green at the slot's start, red where its signals end, yellow over the dead time (21 Oct 2026)
+## 51. Slot lines on the waterfall: green at the slot's start, red where its signals end (21 Oct 2026)
 
 **Why.** AJ3G: "Inside of Scope when Decode window start/stops. When its starts draw a Green Line across the Waterfall, and when it ends draw a RED line across Waterfall. Look at WJSTX approach, its close." WSJT-X's wide graph draws one line per T/R period at its boundary, with the UTC beside it, so a signal can be read against the slot it was sent in.
 
@@ -620,14 +620,14 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 - **When.** While DECODE runs a mode with slots (FT8, FT4, WSPR, JT65, JT9, FST4-60, Q65-30A, MSK144). Keyboard modes, pictures and the I/Q links have no slots and get nothing.
 - **Green: the slot's start.** Slots start on whole periods from 00:00 UTC (FT8 15 s, FT4 7.5 s, WSPR 2 min from the even minute, JT65/JT9/FST4-60 1 min, Q65-30A 30 s, MSK144 15 s), as the decoder's slot recorder cuts them. The first green line is on the first slot the decoder takes: the one it joined, if it joined within `max_late_s` (1 s; MSK144 any time), or else the next (`WsjtConfig::first_slot`). The UTC is at the left, in green on a dimmed backing, where the UTC ticks are; a UTC tick that would sit on it is left out, and labels closer than 12 pt are thinned.
 - **Red: where the slot's transmissions end.** The last symbol of a signal sent on time: its start (`WsjtMode::start_delay_s`, the decoder's DT = 0: 0.5 s for FT8, FT4 and Q65-30A, 1 s for the rest) plus its length, worked out from mfsk-core's frame definitions as (channel symbols + ramp symbols) × samples per symbol / 12 000 (`WsjtMode::signal_s`, `signal_end_s`). Lengths: FT8 12.64 s, FT4 5.04 s (103 symbols and 2 ramp), WSPR 110.59 s, JT65 46.83 s, JT9 48.96 s, FST4-60 51.84 s, Q65-30A 25.5 s. So red sits at FT8 13.14 s, FT4 5.54 s, WSPR 111.59 s, JT65 47.83 s, JT9 49.96 s, FST4-60 52.84 s and Q65-30A 26.0 s into the slot. mfsk-core gives JT65 and JT9 a start of 0 s and Q65-30A 1 s; the decoder's own start delays are used, as they are what its DT is measured from. Red has no label.
-- **Blue: the dead time.** From the red line to the next slot's green, a faint blue over the whole width (`DEAD_TINT`, 6 % alpha; it was yellow at 18 %, until AJ3G found it hid signals and labels and asked for an almost clear blue) so a late or long signal still shows through it. A dead time still running is tinted from the top.
-- **No end, no red and no tint.** MSK144's pings come any time in the slot, so it gets green lines only. A slot cut short by DECODE stopping before its signal end gets no red line and no tint; stopped in the dead time, the tint ends at the stop.
+- **Nothing between.** The dead time from the red line to the next green was tinted, yellow at 18 % and then blue at 6 %; AJ3G had it taken out (22 Oct 2026): it hid signals and labels. The skimmer's labels and the offset bar are drawn over the lines, so the lines pass behind them as the rows scroll.
+- **No end, no red.** MSK144's pings come any time in the slot, so it gets green lines only. A slot cut short by DECODE stopping before its signal end gets no red line.
 - **The look.** Each line is two pixels, the waterfall's full width.
 - **Placement.** By each waterfall row's own time, as the UTC ticks (which use the same code: `slotlines::age_at`, `age_span`, `row_y`). So the lines and the tint scroll with the rows at every SPEED and stand still when the waterfall is paused. Over a transmission no rows are laid down, so a line that falls in the gap sits at the gap's edge.
 - **After DECODE stops or changes mode** what is already drawn stays on its rows: the scope remembers the decoder's last 32 runs, each from its first slot to when it stopped.
 - **SPEED row:** "Slot lines", one tick for all three, on by default, saved with the scope's settings.
 
-**Red and yellow.** Both are otherwise for warnings only (AJ3G's rule). The slot lines' green and red are the second named exception (the dead time was yellow too until 22 Oct 2026; it is blue now), after the waterfall palettes (`scope/palette.rs`), by AJ3G's request: here they mean "transmissions start" and "transmissions end", as WSJT-X users read the slot, not a warning.
+**Red and yellow.** Both are otherwise for warnings only (AJ3G's rule). The slot lines' green and red are the second named exception (the dead time was tinted yellow until 22 Oct 2026; there is no tint now), after the waterfall palettes (`scope/palette.rs`), by AJ3G's request: here they mean "transmissions start" and "transmissions end", as WSJT-X users read the slot, not a warning.
 
 **Screens.** `screens/slot-lines.png`, demo band, DECODE on FT8, SPEED Very slow.
 

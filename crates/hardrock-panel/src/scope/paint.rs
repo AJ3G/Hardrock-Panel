@@ -1027,8 +1027,6 @@ fn paint_waterfall(
             3.0,
         ));
     }
-    paint_skim_waterfall(sc, ui, &p, rect, cx);
-    paint_offset(sc, &p, rect, cx, false);
 
     // Each visible row's time, newest first, for the slot lines and the
     // UTC ticks: both are placed where the rows cross their time.
@@ -1045,31 +1043,13 @@ fn paint_waterfall(
     let label_x = rect.left() + 13.0;
 
     // The decoder's slot lines (decision 51): green at each slot's start,
-    // with its UTC at the left, red where its transmissions end, and a faint
-    // blue over the dead time between, all across the whole width.
+    // with its UTC at the left, and red where its transmissions end, across
+    // the whole width; nothing between (AJ3G took the tint out).
     let mut labels: Vec<f32> = Vec::new();
     if sc.settings.slot_lines
         && let (Some(&newest), Some(&oldest)) = (times.first(), times.last())
     {
         let px = 1.0 / ppp;
-        let y_edge = |age: u32| {
-            let y = slotlines::row_y(rect.top(), age, scroll_frac, pts_per_row);
-            ((y * ppp).round() / ppp).clamp(rect.top(), rect.bottom())
-        };
-        // A little past the newest row, so a dead time still running is
-        // tinted from the top.
-        for (from, to) in sc.slot_lines.dead(oldest, newest + 1.0) {
-            if let Some((newer, older)) = slotlines::age_span(&times, from, to) {
-                let (y0, y1) = (y_edge(newer), y_edge(older));
-                if y1 > y0 {
-                    p.rect_filled(
-                        Rect::from_x_y_ranges(rect.x_range(), y0..=y1),
-                        0.0,
-                        slotlines::DEAD_TINT,
-                    );
-                }
-            }
-        }
         for m in sc.slot_lines.marks(oldest, newest) {
             let Some(y) = y_of(m.utc) else { continue };
             // Two pixels, on the rows' edge.
@@ -1126,6 +1106,11 @@ fn paint_waterfall(
             );
         }
     }
+
+    // The skimmer's labels and the offset bar over the slot lines and the
+    // ticks, so the lines pass behind the labels as the rows scroll (AJ3G).
+    paint_skim_waterfall(sc, ui, &p, rect, cx);
+    paint_offset(sc, &p, rect, cx, false);
 
     // The colour bar, with the levels it runs between.
     let bar = Rect::from_min_max(
