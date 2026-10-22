@@ -345,7 +345,8 @@ with APPLY:
   panel waits a few seconds for the CAT link to read VFO A and opens the I/Q
   there, so opening doesn't move the radio.
 - **Demo signals**: a made-up band around 14.2 MHz with a few stations and
-  noise, to try the scope and DECODE with no radio.
+  noise, and FT8 on 14.074 MHz (pick FT8 in DECODE to go there), to try the
+  scope, DECODE and the skimmer with no radio.
 
 **Tuning.** As in SDR Console, the span stays centred on the DUO's VFO A
 while the panel's receiver moves inside it. Click a signal to tune to it, drag
@@ -421,6 +422,20 @@ itself and says so under the I/Q line.
 **Transverter.** The radio window's transverter offset and the scope's
 *Transverter LO* are the same setting: change either and the other follows.
 
+**The offset bar** measures how far a signal is from the dial, in the same
+hertz DECODE shows in its AF column. **Shift-click** the spectrum or the
+waterfall to drop it there (keep the button down to slide it), or press
+**OFFSET** in the Markers row to drop it in the middle of the receiver's
+passband. Drag it to move it. Its flag at the top of the spectrum reads the
+offset and the frequency (*+1 315 Hz · 14.075 315.2*), and the waterfall's
+foot repeats the offset. Put near a station DECODE has labelled, it jumps onto
+that station's frequency, so it reads exactly DECODE's figure. The **×** on
+its flag, or OFFSET again, takes it away. It tunes nothing, so it works while
+you transmit; it stays on its frequency when you retune, and the reading
+follows the dial (in LSB it counts down from the dial, as the audio does).
+
+![The skimmer's labels and the offset bar, DECODE on FT8](images/skimmer-offset.png)
+
 ## Decoding
 
 **DECODE**, on the top bar, opens the panel's own decoders. Pick a mode and
@@ -473,6 +488,17 @@ For the WSJT modes:
   added to `ALL.TXT` beside the panel's saved settings (on Windows
   `%APPDATA%\Hardrock Panel\data\ALL.TXT`), in WSJT-X's layout; hover over
   the line above the list to see where.
+- **SKIM** (on to start) labels each station decoded on the scope, by its
+  callsign at its frequency: a box beside the signal at the top of the
+  waterfall and the call standing up the foot of the spectrum. A station
+  calling CQ is in blue. The labels are the newest slot's, and fade over the
+  next two. Point at one for its message, SNR and AF; click it to pick its
+  line here. **SKIM WIDE** (FT8 and FT4) also decodes the mode on its other
+  dials inside the I/Q span, up to eight: with a wide SPAN (3.072 or 6.144
+  MHz) that takes in other bands, for instance 18.100 MHz while you listen on
+  14.074. Those stations are labelled on the scope too (clicking one tunes
+  there, not while transmitting) but are not added to this list, ALL.TXT or
+  the spots. The line above the list says which dials are skimmed.
 - **SPOTS.** **PSK Reporter** sends the FT8 and FT4 stations heard to
   pskreporter.info, a batch every five minutes or so; **WSPRnet** sends each
   WSPR slot's spots to wsprnet.org as it is decoded (or that you listened and

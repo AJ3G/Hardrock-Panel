@@ -6,10 +6,14 @@
 //!   WEFAX and more), ported from SDRoxide.
 //! * [`resample`]: from the `sdr` crate's 48 kHz audio and wide I/Q to the
 //!   rates the decoders want.
+//! * [`skim`]: the wide skimmer, FT8 or FT4 on every other dial in the I/Q.
+//! * [`demo`]: FT8 stations for the panel's demo band.
+pub mod demo;
 pub mod freq;
 pub mod image;
 pub mod modem;
 pub mod resample;
+pub mod skim;
 pub mod slot;
 pub mod worker;
 pub mod wsjt;
