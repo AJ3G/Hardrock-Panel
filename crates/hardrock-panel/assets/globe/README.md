@@ -11,3 +11,7 @@ From Natural Earth's 1:50m physical and cultural vectors
   for the city lights.
 - `places.json`: populated places as `[name, lon, lat, tier]`; tier 3 over
   3 million people, 2 over a million, 1 over 300 000, 0 the rest.
+- `earth.jpg`: the Earth by day, 2048 × 1024, equirectangular: NASA's Blue
+  Marble Next Generation (public domain, NASA Earth Observatory), with the
+  land's relief drawn out from Natural Earth's shaded relief. Both taken from
+  the basemap-data package's copies (`bmng.jpg`, `shadedrelief.jpg`).

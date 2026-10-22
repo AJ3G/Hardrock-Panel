@@ -16,6 +16,8 @@ pub(crate) struct Recipe {
     pub night: bool,
     pub grey: bool,
     pub lights: bool,
+    /// The natural-colour Earth (relief, the sea's depth) under it all.
+    pub relief: bool,
     pub clouds: Option<Clouds>,
     pub aurora: Option<Aurora>,
     /// The PROP layer: one band in the ramp, or every band in its colour.
@@ -123,9 +125,17 @@ pub(crate) fn paint(r: &Recipe) -> Vec<u8> {
         for col in 0..w {
             let i = row * w + col;
             let lon = -180.0 + (col as f64 + 0.5) * 360.0 / w as f64;
-            let land = g.land_mask[i] as f32 / 255.0;
-            let mut px = OCEAN;
-            over(&mut px, LAND, land);
+            let mut px = if r.relief {
+                let e = &g.earth[i * 3..i * 3 + 3];
+                // A little dimmer than the satellite's day, so the lines
+                // and the paths over it stand out.
+                [e[0] as f32 * 0.85, e[1] as f32 * 0.85, e[2] as f32 * 0.85]
+            } else {
+                let land = g.land_mask[i] as f32 / 255.0;
+                let mut px = OCEAN;
+                over(&mut px, LAND, land);
+                px
+            };
             // The Sun's height here, degrees.
             let elev =
                 (sl * sd + cl * cd * cos_dl[col]).clamp(-1.0, 1.0).asin().to_degrees() as f32;
@@ -133,8 +143,10 @@ pub(crate) fn paint(r: &Recipe) -> Vec<u8> {
             if r.night {
                 // Day lit up by the Sun's height; night darkened through
                 // twilight to its full depth past −12°.
-                over(&mut px, DAY, 0.27 * smooth(0.0, 40.0, elev));
-                over(&mut px, [0.0; 3], 0.70 * dark);
+                if !r.relief {
+                    over(&mut px, DAY, 0.27 * smooth(0.0, 40.0, elev));
+                }
+                over(&mut px, [0.0; 3], if r.relief { 0.80 } else { 0.70 } * dark);
             }
             if r.grey {
                 // The grey line: sunset to the end of civil twilight.
@@ -215,6 +227,7 @@ mod tests {
             night: true,
             grey: true,
             lights: true,
+            relief: false,
             clouds: None,
             aurora: None,
             prop: None,
@@ -225,8 +238,14 @@ mod tests {
         // Tokyo is lit at night; the sea beside it is not.
         assert!(lum(px(&img, 35.7, 139.7)) > lum(px(&img, 33.0, 145.0)) + 60);
         // Without the night layer New York and the sea are flat colours.
-        let flat = paint(&Recipe { night: false, grey: false, lights: false, ..r });
+        let flat = paint(&Recipe { night: false, grey: false, lights: false, ..r.clone() });
         assert_eq!(px(&flat, 30.0, 160.0), OCEAN.map(|x| x as u8));
+        // With RELIEF the sea is blue and the Sahara sand-coloured, by day.
+        let day = paint(&Recipe { night: false, grey: false, lights: false, relief: true, ..r });
+        let sea = px(&day, 30.0, -45.0);
+        assert!(sea[2] as i32 > sea[0] as i32 + 30, "{sea:?}");
+        let sand = px(&day, 23.0, 10.0);
+        assert!(sand[0] > sand[2], "{sand:?}");
     }
 
     #[test]

@@ -40,6 +40,8 @@ eframe = { version = "0.36.1", default-features = false, features = [
 ureq = "3.4.0"
 png = "0.18.1"
 chrono.workspace = true
+zune-jpeg = "0.5.15"
+zune-core = "0.5.3"
 
 [dev-dependencies]
 # Parses and validates the scope's WGSL in the tests, with no GPU.

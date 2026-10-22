@@ -41,6 +41,9 @@ pub(crate) struct GlobeSettings {
     pub clouds: bool,
     pub aurora: bool,
     pub cities: bool,
+    /// The land's relief and the sea's depth, in natural colour; off, the
+    /// flat dark land and sea.
+    pub relief: bool,
     pub borders: bool,
     pub grid: bool,
     /// PROP: every band in its colour, or `band` alone in the ramp.
@@ -67,6 +70,7 @@ impl Default for GlobeSettings {
             clouds: true,
             aurora: true,
             cities: true,
+            relief: true,
             borders: true,
             grid: false,
             all_bands: false,
@@ -237,7 +241,7 @@ impl Globe {
         let one = (!s.all_bands).then(|| band_static(&s.band));
         let key = PicKey {
             sun: ((sun.lat * 4.0).round() as i32, (sun.lon * 4.0).round() as i32),
-            layers: [s.grey, s.grey, s.cities, s.clouds, s.aurora],
+            layers: [s.relief, s.grey, s.cities, s.clouds, s.aurora],
             prop: s.prop.then_some((one, self.fields_id)),
             fetched: self.got.serial,
         };
@@ -249,6 +253,7 @@ impl Globe {
             night: s.grey,
             grey: s.grey,
             lights: s.cities,
+            relief: s.relief,
             clouds: s.clouds.then(|| self.got.clouds.clone()).flatten(),
             aurora: s.aurora.then(|| self.got.aurora.clone()).flatten(),
             prop: s.prop.then(|| picture::Prop { fields: self.fields.clone(), one }),
@@ -489,6 +494,7 @@ fn toolbar(ui: &mut egui::Ui, g: &mut Globe, s: &mut GlobeSettings) {
             (&mut s.grey, "GREY LINE"),
             (&mut s.clouds, "CLOUDS"),
             (&mut s.aurora, "AURORA"),
+            (&mut s.relief, "RELIEF"),
             (&mut s.cities, "CITIES"),
             (&mut s.borders, "BORDERS"),
             (&mut s.grid, "GRID"),

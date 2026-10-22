@@ -621,7 +621,8 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
   high the Sun is at each end. **TUNE** takes the radio to that mode's dial on
   its band, as its DATA key would (not while transmitting); **SHOW IN
   DECODE** brings its line into view.
-- **LAYERS.** STATIONS, PATHS, PROP MAP, GREY LINE, CLOUDS, AURORA, CITIES,
+- **LAYERS.** STATIONS, PATHS, PROP MAP, GREY LINE, CLOUDS, AURORA, RELIEF
+  (the Earth in natural colour, with its mountains and the sea's depth), CITIES,
   BORDERS (countries and states) and GRID (Maidenhead squares) can each be
   turned off.
 - **PROP.** Where the band was open, from the paths heard: each path counts at
@@ -642,8 +643,8 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
   The line at the bottom shows how old each source is, or that it failed (hover
   for why). Nothing is fetched while GLOBE is shut.
 
-The map is from Natural Earth (naturalearthdata.com), which is in the public
-domain.
+The map is from Natural Earth (naturalearthdata.com) and RELIEF's picture from
+NASA's Blue Marble Next Generation, both in the public domain.
 
 ## Outside programs
 

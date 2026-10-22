@@ -1639,6 +1639,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

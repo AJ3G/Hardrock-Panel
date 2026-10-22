@@ -32,6 +32,10 @@ pub(crate) struct Geo {
     pub land_mask: Vec<u8>,
     /// How bright a city's lights are there, 0 to 255.
     pub lights: Vec<u8>,
+    /// The Earth by day in natural colour, RGB, at the picture's size: NASA's
+    /// Blue Marble Next Generation (public domain), its land's relief drawn
+    /// out with Natural Earth's shaded relief.
+    pub earth: Vec<u8>,
 }
 
 fn flat_pairs(v: &[f64]) -> Vec<(f64, f64)> {
@@ -128,6 +132,14 @@ fn lights_mask(urban: &[f64], w: usize, h: usize) -> Vec<u8> {
     acc.iter().map(|a| (a * 255.0) as u8).collect()
 }
 
+/// The bundled natural-colour picture, RGB, `TEX_W` × `TEX_H`.
+fn decode_earth(jpg: &[u8]) -> Vec<u8> {
+    let mut d = zune_jpeg::JpegDecoder::new(zune_core::bytestream::ZCursor::new(jpg));
+    let px = d.decode().expect("the bundled picture is a valid JPEG");
+    assert_eq!(px.len(), TEX_W * TEX_H * 3, "the bundled picture is the map's size, RGB");
+    px
+}
+
 fn parse_lists(s: &str) -> Vec<Vec<f64>> {
     serde_json::from_str(s).expect("the bundled map data is valid")
 }
@@ -154,7 +166,8 @@ fn load() -> Geo {
         .collect();
     let land_mask = rasterize(&land, TEX_W, TEX_H);
     let lights = lights_mask(&urban, TEX_W, TEX_H);
-    Geo { coast, borders, states, places, land_mask, lights }
+    let earth = decode_earth(include_bytes!("../../assets/globe/earth.jpg"));
+    Geo { earth, coast, borders, states, places, land_mask, lights }
 }
 
 /// The map, read the first time it is asked for.
