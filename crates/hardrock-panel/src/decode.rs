@@ -384,7 +384,7 @@ pub(crate) struct Decode {
     /// A line to bring into view (picked from a scope label).
     scroll_to: Option<u64>,
     /// SKIM WIDE's decoders, and what they heard, newest first.
-    wide: Option<Arc<WideSkimmer>>,
+    wide: Vec<Arc<WideSkimmer>>,
     wide_spots: VecDeque<SkimSpot>,
     /// JTTY's messages and their lines: (message, row id), newest first.
     jtty_rows: VecDeque<(u64, u64)>,
@@ -427,7 +427,7 @@ impl Decode {
         taps.set_iq("decode", None);
         taps.set_iq("skim", None);
         self.worker = None;
-        self.wide = None;
+        self.wide.clear();
         self.started_utc = None;
     }
 
@@ -440,9 +440,7 @@ impl Decode {
             _ => None,
         };
         let mut feed = match wsjt {
-            Some(m) => {
-                skim_feed(&self.rows, &self.wide_spots, m.period_s(), decoders::slot::utc_now())
-            }
+            Some(m) => skim_feed(&self.rows, &self.wide_spots, m, decoders::slot::utc_now()),
             None => SkimFeed::default(),
         };
         feed.key_audio_hz = s.audio_hz;
@@ -491,47 +489,53 @@ impl Decode {
     }
 
     /// SKIM WIDE (decision 54): run a skimmer on every other dial of the
-    /// mode in the span, started again whenever the dials change, and take
-    /// what it heard.
+    /// mode in the span, and on the other of FT8 and FT4's dials there
+    /// (AJ3G: FT4 on the band unlabelled from FT8), started again whenever
+    /// the dials change, and take what they heard.
     fn wide_frame(&mut self, s: &DecodeSettings, st: &StationSettings, rx: &Rx, at: Where) {
-        let want = self.worker.as_ref().and_then(|(kind, _)| {
+        let want = self.worker.as_ref().map_or_else(Vec::new, |(kind, _)| {
             wide_dials(*kind, s, at.dial_hz, at.xvtr_hz, rx.centre(), rx.rate())
         });
-        let same = match (&self.wide, &want) {
-            (Some(w), Some((m, d))) => w.mode() == *m && w.dials() == &d[..],
-            (None, None) => true,
-            _ => false,
-        };
+        let same = self.wide.len() == want.len()
+            && self.wide.iter().zip(&want).all(|(w, (m, d))| w.mode() == *m && w.dials() == &d[..]);
         if !same {
             rx.taps.set_iq("skim", None);
-            self.wide = None;
-            if let Some((mode, dials)) = want {
-                let mine: Vec<String> = st.call().into_iter().collect();
+            self.wide.clear();
+            let mine: Vec<String> = st.call().into_iter().collect();
+            for (mode, dials) in want {
                 tracing::info!("{} skimmer started on {dials:?}", mode.label());
-                let w = Arc::new(WideSkimmer::spawn(mode, &dials, &mine));
-                let f = w.clone();
+                self.wide.push(Arc::new(WideSkimmer::spawn(mode, &dials, &mine)));
+            }
+            if !self.wide.is_empty() {
+                let f = self.wide.clone();
                 rx.taps.set_iq(
                     "skim",
-                    Some(Box::new(move |b| f.push_iq(b.iq, b.rate, b.center, b.utc))),
+                    Some(Box::new(move |b| {
+                        for w in &f {
+                            w.push_iq(b.iq, b.rate, b.center, b.utc);
+                        }
+                    })),
                 );
-                self.wide = Some(w);
             }
         }
-        let Some(w) = &self.wide else { return };
-        for r in w.results() {
-            for d in &r.slot.decodes {
-                let Some(call) = station::sender_of(&d.message).0 else { continue };
-                self.wide_spots.push_front(SkimSpot {
-                    row: None,
-                    hz: r.dial_hz + d.audio_hz as f64,
-                    audio_hz: d.audio_hz,
-                    dial_hz: r.dial_hz,
-                    call,
-                    text: d.message.clone(),
-                    snr: d.snr_db,
-                    utc: d.slot_utc as f64,
-                    key: None,
-                });
+        for w in &self.wide {
+            let wsjt = Some(w.mode());
+            for r in w.results() {
+                for d in &r.slot.decodes {
+                    let Some(call) = station::sender_of(&d.message).0 else { continue };
+                    self.wide_spots.push_front(SkimSpot {
+                        row: None,
+                        hz: r.dial_hz + d.audio_hz as f64,
+                        audio_hz: d.audio_hz,
+                        dial_hz: r.dial_hz,
+                        call,
+                        text: d.message.clone(),
+                        snr: d.snr_db,
+                        utc: d.slot_utc as f64,
+                        wsjt,
+                        key: None,
+                    });
+                }
             }
         }
         self.wide_spots.truncate(WIDE_SPOTS);
@@ -932,7 +936,13 @@ fn link_config(mode: LinkMode, rx: &Rx, at: Where) -> LinkConfig {
 /// The skimmer's labels at `now` from DECODE's lines (newest first) and the
 /// wide skimmer's decodes: those of the last few slots that name who sent
 /// them, at the radio's own frequency.
-fn skim_feed(rows: &VecDeque<Row>, wide: &VecDeque<SkimSpot>, period_s: f64, now: f64) -> SkimFeed {
+fn skim_feed(
+    rows: &VecDeque<Row>,
+    wide: &VecDeque<SkimSpot>,
+    mode: WsjtMode,
+    now: f64,
+) -> SkimFeed {
+    let period_s = mode.period_s();
     let since = now - (crate::scope::skim::SLOTS_SHOWN as f64 + 1.0) * period_s;
     let own = rows.iter().take_while(|r| r.utc >= since).filter_map(|r| {
         let (hz, dial_hz) = r.radio_hz?;
@@ -945,10 +955,16 @@ fn skim_feed(rows: &VecDeque<Row>, wide: &VecDeque<SkimSpot>, period_s: f64, now
             text: r.text.clone(),
             snr: r.snr.unwrap_or(0.0),
             utc: r.utc,
+            wsjt: Some(mode),
             key: None,
         })
     });
-    let wide = wide.iter().take_while(|w| w.utc >= since).cloned();
+    // SKIM WIDE's, each by its own mode's slots (FT8's beside FT4).
+    let wide = wide.iter().filter(|w| {
+        let p = w.wsjt.map_or(period_s, |m| m.period_s());
+        w.utc >= now - (crate::scope::skim::SLOTS_SHOWN as f64 + 1.0) * p
+    });
+    let wide = wide.cloned();
     SkimFeed { period_s, spots: own.chain(wide).collect(), ..Default::default() }
 }
 
@@ -963,6 +979,7 @@ fn key_spot(k: &KeySpot) -> Option<SkimSpot> {
         text: k.text.clone(),
         snr: k.snr_db,
         utc: k.heard_utc,
+        wsjt: None,
         key: Some(KeyTag { mode: k.mode, wpm: k.wpm, active: k.active }),
     })
 }
@@ -982,11 +999,12 @@ fn wsjt_bands(xvtr_hz: f64) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// The wide skimmer's mode and dials for DECODE's `kind`, with the receiver
-/// at `dial_hz` in a span `rate` wide around `centre` (all the radio's own
-/// Hz; the mode's dials are as shown, so the converter's `xvtr_hz` comes
-/// off them): every other dial of FT8 or FT4 whose lane is in the span.
-/// `None` with SKIM or SKIM WIDE off, another mode, or no dial in reach.
+/// The wide skimmers' modes and dials for DECODE's `kind`, with the
+/// receiver at `dial_hz` in a span `rate` wide around `centre` (all the
+/// radio's own Hz; the modes' dials are as shown, so the converter's
+/// `xvtr_hz` comes off them): every other dial of FT8 or FT4 whose lane is
+/// in the span, then the other mode's dials there. Empty with SKIM or SKIM
+/// WIDE off, another mode, or no dial in reach.
 fn wide_dials(
     kind: Kind,
     s: &DecodeSettings,
@@ -994,13 +1012,23 @@ fn wide_dials(
     xvtr_hz: f64,
     centre: f64,
     rate: f64,
-) -> Option<(WsjtMode, Vec<f64>)> {
-    if !(s.skim && s.skim_wide) || !matches!(kind, Kind::Ft8 | Kind::Ft4) || rate <= 0.0 {
-        return None;
+) -> Vec<(WsjtMode, Vec<f64>)> {
+    let other = match kind {
+        Kind::Ft8 => Kind::Ft4,
+        Kind::Ft4 => Kind::Ft8,
+        _ => return Vec::new(),
+    };
+    if !(s.skim && s.skim_wide) || rate <= 0.0 {
+        return Vec::new();
     }
-    let all: Vec<f64> = kind.digi()?.dials.iter().map(|&d| d as f64 - xvtr_hz).collect();
-    let dials = decoders::skim::dials_in_span(&all, centre, rate, Some(dial_hz));
-    (!dials.is_empty()).then_some((kind.wsjt()?, dials))
+    [kind, other]
+        .into_iter()
+        .filter_map(|k| {
+            let all: Vec<f64> = k.digi()?.dials.iter().map(|&d| d as f64 - xvtr_hz).collect();
+            let dials = decoders::skim::dials_in_span(&all, centre, rate, Some(dial_hz));
+            (!dials.is_empty()).then_some((k.wsjt()?, dials))
+        })
+        .collect()
 }
 
 fn push_row(rows: &mut VecDeque<Row>, next_id: &mut u64, mut r: Row) {
@@ -1333,12 +1361,12 @@ fn body(
         _ => format!("receiver audio, 48 kHz · {} at {:.3} kHz", rx.mode.label(), rx.rx_hz / 1e3),
     };
     let dropped = d.worker.as_ref().map_or(0, |(_, w)| w.dropped())
-        + d.wide.as_ref().map_or(0, |w| w.dropped())
+        + d.wide.iter().map(|w| w.dropped()).sum::<u64>()
         + d.keys.as_ref().map_or(0, |k| k.dropped());
     let mut line = format!("From the {src} · {dropped} blocks dropped");
-    if let Some(w) = &d.wide {
+    for w in &d.wide {
         let dials: Vec<String> = w.dials().iter().map(|&h| format!("{:.3}", h / 1e6)).collect();
-        line.push_str(&format!(" · skimming {} MHz too", dials.join(", ")));
+        line.push_str(&format!(" · skimming {} {} MHz too", w.mode().label(), dials.join(", ")));
     }
     if let Some((slot, n, ms)) = d.last_slot {
         line.push_str(&format!(" · slot {} : {n} decoded in {ms} ms", hms(slot as f64)));
@@ -1751,10 +1779,11 @@ mod tests {
             text: "CQ JA1XYZ PM95".into(),
             snr: -15.0,
             utc: 1000.0,
+            wsjt: Some(WsjtMode::Ft8),
             key: None,
         }]
         .into();
-        let f = skim_feed(&rows, &wide, 15.0, 1016.0);
+        let f = skim_feed(&rows, &wide, WsjtMode::Ft8, 1016.0);
         assert_eq!(f.period_s, 15.0);
         let calls: Vec<&str> = f.spots.iter().map(|s| s.call.as_str()).collect();
         // VE3ABC's slot is too long ago.
@@ -1777,24 +1806,32 @@ mod tests {
     }
 
     #[test]
-    fn skim_wide_takes_the_modes_other_dials_in_the_span() {
+    fn skim_wide_takes_the_modes_other_dials_and_the_other_modes_in_the_span() {
         let mut s = DecodeSettings { skim_wide: true, ..Default::default() };
-        // 6.144 MHz around 16 MHz with the receiver on 14.074: 18.100 too.
+        // 6.144 MHz around 16 MHz with the receiver on 14.074: FT8's 18.100,
+        // and FT4's 14.080 and 18.104.
         let w = wide_dials(Kind::Ft8, &s, 14_074_000.0, 0.0, 16e6, 6_144_000.0);
-        assert_eq!(w, Some((WsjtMode::Ft8, vec![18_100_000.0])));
+        assert_eq!(
+            w,
+            vec![
+                (WsjtMode::Ft8, vec![18_100_000.0]),
+                (WsjtMode::Ft4, vec![14_080_000.0, 18_104_000.0]),
+            ]
+        );
         let w = wide_dials(Kind::Ft4, &s, 14_080_000.0, 0.0, 16e6, 6_144_000.0);
-        assert_eq!(w, Some((WsjtMode::Ft4, vec![18_104_000.0])));
-        // 192 kHz: nothing else in reach.
-        assert_eq!(wide_dials(Kind::Ft8, &s, 14_074_000.0, 0.0, 14.1e6, 192_000.0), None);
+        assert_eq!(w[0], (WsjtMode::Ft4, vec![18_104_000.0]));
+        assert_eq!(w[1].0, WsjtMode::Ft8);
+        assert!(w[1].1.contains(&14_074_000.0));
+        // 192 kHz on 20 m (AJ3G's DUO): FT8 hears FT4's 14.080 beside it.
+        let w = wide_dials(Kind::Ft8, &s, 14_074_000.0, 0.0, 14.1e6, 192_000.0);
+        assert_eq!(w, vec![(WsjtMode::Ft4, vec![14_080_000.0])]);
         // Behind a converter the dials are where the radio hears them.
-        let w = wide_dials(Kind::Ft8, &s, 28_174_000.0, 116e6, 28.2e6, 192_000.0);
-        assert_eq!(w, None);
         let w = wide_dials(Kind::Ft8, &s, 28_000_000.0, 116e6, 28.1e6, 192_000.0);
-        assert_eq!(w, Some((WsjtMode::Ft8, vec![28_174_000.0])));
+        assert_eq!(w[0], (WsjtMode::Ft8, vec![28_174_000.0]));
         // Off, or another mode: none.
-        assert_eq!(wide_dials(Kind::Wspr, &s, 14_095_600.0, 0.0, 16e6, 6_144_000.0), None);
+        assert!(wide_dials(Kind::Wspr, &s, 14_095_600.0, 0.0, 16e6, 6_144_000.0).is_empty());
         s.skim = false;
-        assert_eq!(wide_dials(Kind::Ft8, &s, 14_074_000.0, 0.0, 16e6, 6_144_000.0), None);
+        assert!(wide_dials(Kind::Ft8, &s, 14_074_000.0, 0.0, 16e6, 6_144_000.0).is_empty());
         let d = DecodeSettings::default();
         assert!(d.skim && !d.skim_wide);
     }

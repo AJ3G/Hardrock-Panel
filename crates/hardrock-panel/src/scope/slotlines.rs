@@ -26,6 +26,10 @@ pub const START_INK: Color32 = Color32::from_rgb(0x3c, 0xe0, 0x5a);
 /// The signal end's red: part of the named exception to "red for warnings
 /// only".
 pub const END_INK: Color32 = Color32::from_rgb(0xff, 0x48, 0x48);
+/// How strongly the lines are drawn over the waterfall (AJ3G, 22 Oct 2026:
+/// "less bright, much dimmer"), and the slot's UTC beside its green line.
+pub const DIM: f32 = 0.3;
+pub const LABEL_DIM: f32 = 0.6;
 
 /// The most decoder runs remembered (each start, stop or change of mode is
 /// one).

@@ -114,7 +114,7 @@ pub(super) fn tft(
 
     // The skimmer's labels this frame (decision 54).
     sc.skim_shown = skim::labels(&sc.skim, super::utc_now());
-    sc.skim_on_bar = sc.offset.and_then(|b| skim::on_bar(&sc.skim_shown, b.hz, sc.skim.period_s));
+    sc.skim_on_bar = sc.offset.and_then(|b| skim::on_bar(&sc.skim_shown, b.hz));
     sc.offset_close = None;
 
     // Which callback carries this frame's rows: the first one on screen.
@@ -1116,12 +1116,12 @@ fn paint_waterfall(
             let band = Rect::from_x_y_ranges(rect.x_range(), y - px..=y + px);
             match m.line {
                 slotlines::Line::End => {
-                    p.rect_filled(band, 0.0, slotlines::END_INK);
+                    p.rect_filled(band, 0.0, slotlines::END_INK.gamma_multiply(slotlines::DIM));
                 }
                 slotlines::Line::Start => {
-                    p.rect_filled(band, 0.0, slotlines::START_INK);
+                    p.rect_filled(band, 0.0, slotlines::START_INK.gamma_multiply(slotlines::DIM));
                     if labels.last().is_none_or(|&l| y - l >= 12.0) {
-                        let ink = slotlines::START_INK;
+                        let ink = slotlines::START_INK.gamma_multiply(slotlines::LABEL_DIM);
                         let g = p.layout_no_wrap(fmt_utc(m.utc), mono(9.5), ink);
                         let at = pos2(label_x, y - 2.0 * px - g.size().y);
                         p.rect_filled(
@@ -1511,7 +1511,10 @@ fn pointer_on(
                     out.tune_to = Some(dial);
                     out.key_pick = Some(k.mode);
                 }
-                (None, None) => out.tune_to = Some(s.dial_hz),
+                (None, None) => {
+                    out.tune_to = Some(s.dial_hz);
+                    out.wide_pick = s.wsjt;
+                }
             }
         }
     }

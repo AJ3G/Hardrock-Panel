@@ -147,6 +147,9 @@ pub struct ScopeOut {
     /// `mode` and `passband` carry the receiver's part; DECODE takes this
     /// mode where it has it.
     pub key_pick: Option<skim::KeyMode>,
+    /// A SKIM WIDE label was clicked: `tune_to` carries its dial; DECODE
+    /// takes the mode it was heard in (FT4 heard from FT8, or the other way).
+    pub wide_pick: Option<skim::WsjtMode>,
 }
 
 /// A data mode picked on the scope.
@@ -1051,6 +1054,7 @@ mod tests {
             snr: -8.0,
             // Heard in the slot that has just ended.
             utc: utc_now() - 16.0,
+            wsjt: Some(skim::WsjtMode::Ft8),
             key: None,
         }
     }

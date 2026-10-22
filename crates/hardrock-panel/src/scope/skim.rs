@@ -12,6 +12,7 @@
 //! with a [`KeyTag`]: their labels carry the mode, and fade over
 //! [`KEY_FADE_S`] once the signal stops rather than by slots.
 
+pub use decoders::WsjtMode;
 pub use decoders::keyskim::KeyMode;
 
 /// A keyboard skimmer's signal: its mode, CW's speed, and whether it is
@@ -42,6 +43,9 @@ pub struct SkimSpot {
     /// The UTC start of the slot it was sent in; for the keyboard
     /// skimmer's, when it was last heard.
     pub utc: f64,
+    /// The WSJT mode it was heard in (SKIM WIDE hears FT4 beside FT8 and
+    /// FT8 beside FT4); `None` for the keyboard skimmer's.
+    pub wsjt: Option<WsjtMode>,
     /// The keyboard skimmer's signals (decision 56): `None` for FT8's.
     pub key: Option<KeyTag>,
 }
@@ -120,7 +124,9 @@ pub fn labels(feed: &SkimFeed, now: f64) -> Vec<(SkimSpot, f32)> {
     for s in &feed.spots {
         let a = match s.key {
             Some(k) => key_alpha(s.utc, k.active, now),
-            None => alpha(age_slots(s.utc, now, feed.period_s)),
+            // By its own mode's slots: SKIM WIDE's FT8 beside FT4 fades
+            // as FT8 does.
+            None => alpha(age_slots(s.utc, now, s.wsjt.map_or(feed.period_s, |m| m.period_s()))),
         };
         let Some(a) = a else { continue };
         let same = |o: &(SkimSpot, f32)| o.0.call == s.call && o.0.dial_hz == s.dial_hz;
@@ -155,28 +161,38 @@ pub fn key_tune(hz: f64, mode: KeyMode, audio_hz: f64) -> (sdr::Mode, (f32, f32)
 /// How far either side of a signal's middle the offset bar counts as on
 /// it, Hz, and where that middle is from the label's frequency. A WSJT
 /// label sits on the signal's lowest tone, as DECODE's AF column does, so
-/// its middle is half the signal's width above: FT8's 50 Hz, FT4's 83 Hz
-/// (its 7.5 s slots). A keyboard signal's frequency is its middle: CW's
-/// carrier, PSK31's 31 Hz, RTTY's 170 Hz shift.
-fn reach(s: &SkimSpot, period_s: f64) -> (f64, f64) {
+/// its middle is half its width above. A keyboard signal's frequency is its
+/// middle: CW's carrier, PSK31's 31 Hz, RTTY's 170 Hz shift.
+fn reach(s: &SkimSpot) -> (f64, f64) {
     match s.key.map(|k| k.mode) {
-        None if period_s < 10.0 => (41.5, 46.0),
-        None => (25.0, 30.0),
-        Some(KeyMode::Cw) => (0.0, 25.0),
-        Some(KeyMode::Psk) => (0.0, 25.0),
+        None => {
+            let half = 0.5 * width_hz(s.wsjt);
+            (half, half + 5.0)
+        }
+        Some(KeyMode::Cw) | Some(KeyMode::Psk) => (0.0, 25.0),
         Some(KeyMode::Rtty) => (0.0, 100.0),
+    }
+}
+
+/// A WSJT signal's width above its lowest tone, Hz: FT8's eight tones at
+/// 6.25 Hz, FT4's four at 20.8 Hz; others counted narrow.
+fn width_hz(m: Option<WsjtMode>) -> f64 {
+    match m {
+        Some(WsjtMode::Ft4) => 83.0,
+        Some(WsjtMode::Ft8) => 50.0,
+        _ => 10.0,
     }
 }
 
 /// The label the offset bar at `bar_hz` is on (AJ3G: "make it so I know
 /// which station I am on"): of those whose signal the bar is over, the one
 /// whose middle is nearest it.
-pub fn on_bar(shown: &[(SkimSpot, f32)], bar_hz: f64, period_s: f64) -> Option<usize> {
+pub fn on_bar(shown: &[(SkimSpot, f32)], bar_hz: f64) -> Option<usize> {
     shown
         .iter()
         .enumerate()
         .filter_map(|(i, (s, _))| {
-            let (mid, half) = reach(s, period_s);
+            let (mid, half) = reach(s);
             let d = (bar_hz - (s.hz + mid)).abs();
             (d <= half).then_some((i, d))
         })
@@ -227,6 +243,7 @@ mod tests {
             text: format!("CQ {call} FN42"),
             snr: -10.0,
             utc,
+            wsjt: Some(WsjtMode::Ft8),
             key: None,
         }
     }
@@ -320,18 +337,18 @@ mod tests {
         // FT8: labels on the lowest tone, the signal 50 Hz up from it.
         let shown =
             vec![(spot("K1ABC", 0.0, 14_075_000.0), 1.0), (spot("W9XYZ", 0.0, 14_075_060.0), 1.0)];
-        assert_eq!(on_bar(&shown, 14_075_025.0, 15.0), Some(0));
-        assert_eq!(on_bar(&shown, 14_074_996.0, 15.0), Some(0));
-        assert_eq!(on_bar(&shown, 14_075_090.0, 15.0), Some(1));
+        assert_eq!(on_bar(&shown, 14_075_025.0), Some(0));
+        assert_eq!(on_bar(&shown, 14_074_996.0), Some(0));
+        assert_eq!(on_bar(&shown, 14_075_090.0), Some(1));
         // Between them, nearer W9XYZ's middle.
-        assert_eq!(on_bar(&shown, 14_075_057.0, 15.0), Some(1));
-        assert_eq!(on_bar(&shown, 14_075_200.0, 15.0), None);
-        assert_eq!(on_bar(&shown, 14_074_900.0, 15.0), None);
+        assert_eq!(on_bar(&shown, 14_075_057.0), Some(1));
+        assert_eq!(on_bar(&shown, 14_075_200.0), None);
+        assert_eq!(on_bar(&shown, 14_074_900.0), None);
         // A CW signal is on its carrier.
         let mut cw = spot("DL1AA", 0.0, 14_030_000.0);
         cw.key = Some(KeyTag { mode: KeyMode::Cw, wpm: 25, active: true });
         let shown = vec![(cw, 1.0)];
-        assert_eq!(on_bar(&shown, 14_029_980.0, 15.0), Some(0));
-        assert_eq!(on_bar(&shown, 14_030_040.0, 15.0), None);
+        assert_eq!(on_bar(&shown, 14_029_980.0), Some(0));
+        assert_eq!(on_bar(&shown, 14_030_040.0), None);
     }
 }

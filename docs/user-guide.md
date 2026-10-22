@@ -507,12 +507,19 @@ For the WSJT modes:
   waterfall and the call standing up the foot of the spectrum. A station
   calling CQ is in blue. The labels are the newest slot's, and fade over the
   next two. Point at one for its message, SNR and AF; click it to pick its
-  line here. **SKIM WIDE** (FT8 and FT4) also decodes the mode on its other
-  dials inside the I/Q span, up to eight: with a wide SPAN (3.072 or 6.144
-  MHz) that takes in other bands, for instance 18.100 MHz while you listen on
-  14.074. Those stations are labelled on the scope too (clicking one tunes
-  there, not while transmitting) but are not added to this list, ALL.TXT or
-  the spots. The line above the list says which dials are skimmed.
+  line here. **SKIM WIDE** (FT8 and FT4) also decodes both FT8 and FT4 on
+  every other dial of theirs inside the I/Q span, up to eight of each: at
+  192 kHz on 20 m, FT4 on 14.080 while you run FT8 on 14.074 (or FT8 while
+  you run FT4); with a wide SPAN (3.072 or 6.144 MHz) other bands too, for
+  instance 18.100 MHz. Those stations are labelled on the scope too
+  (clicking one tunes there and switches DECODE to its mode, not while
+  transmitting) but are not added to this list, ALL.TXT or the spots. The
+  line above the list says which dials are skimmed. For CW, PSK31 and RTTY,
+  turn on SKIM CW/PSK/RTTY as well.
+- **The offset bar on a station:** when the red bar crosses a labelled
+  station's signal, that label's leader, pointer and box, and its tick on
+  the spectrum, turn red, and the bar's readout adds its call.
+- **Slot lines** are drawn dim, so the waterfall shows through them.
 - **SKIM CW/PSK/RTTY** (off to start), in any mode, finds every CW, PSK31
   and RTTY (45.45 baud, 170 Hz shift) signal in the I/Q window, up to 192
   kHz of it, reads each one and picks out the callsign it sends. Each is

@@ -689,6 +689,12 @@ impl App {
                 }
                 _ => {}
             }
+            // A SKIM WIDE label: DECODE runs the mode it was heard in.
+            match so.wide_pick.take() {
+                Some(decoders::WsjtMode::Ft8) => self.saved.decode.kind = decode::Kind::Ft8,
+                Some(decoders::WsjtMode::Ft4) => self.saved.decode.kind = decode::Kind::Ft4,
+                _ => {}
+            }
             let now = rx::RadioNow { link: self.rig.as_deref(), rig, transmitting };
             self.rx.apply_scope(so, &mut self.saved.rx, now);
             // A DATA key or a band-plan marker: the radio's filter, the
