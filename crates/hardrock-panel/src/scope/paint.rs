@@ -114,6 +114,7 @@ pub(super) fn tft(
 
     // The skimmer's labels this frame (decision 54).
     sc.skim_shown = skim::labels(&sc.skim, super::utc_now());
+    sc.skim_on_bar = sc.offset.and_then(|b| skim::on_bar(&sc.skim_shown, b.hz, sc.skim.period_s));
     sc.offset_close = None;
 
     // Which callback carries this frame's rows: the first one on screen.
@@ -588,16 +589,23 @@ fn paint_skim_spectrum(sc: &Scope, p: &egui::Painter, all: Rect, trace: Rect, cx
     let v = cx.view;
     let font = mono(9.5 * theme::skimmer_font_scale());
     let foot = all.bottom() - 15.0;
-    for (s, a) in &sc.skim_shown {
+    for (i, (s, a)) in sc.skim_shown.iter().enumerate() {
         if !v.contains(s.hz) {
             continue;
         }
         let xx = v.x_of(s.hz, all.left(), all.width()).round() + 0.5;
-        let col = skim_ink(s, *a);
+        // The station the offset bar is on: its tick in the bar's red.
+        let on = sc.skim_on_bar == Some(i);
+        let col = if on { ink() } else { skim_ink(s, *a) };
         let g = p.layout_no_wrap(s.tag(), font.clone(), col);
         let (w, h) = (g.size().x, g.size().y);
         // A bold tick on the station's frequency (AJ3G: easy to read).
-        p.vline(xx, foot - 8.0..=foot, Stroke::new(2.0, accent().gamma_multiply(*a)));
+        let tick = if on {
+            Stroke::new(3.0, BAR_INK)
+        } else {
+            Stroke::new(2.0, accent().gamma_multiply(*a))
+        };
+        p.vline(xx, foot - 8.0..=foot, tick);
         // Turned to read upwards, from just over the tick, on a backing so
         // the trace's noise does not run through it.
         let at = pos2(xx - 0.5 * h, foot - 5.0);
@@ -651,14 +659,30 @@ fn paint_skim_waterfall(sc: &mut Scope, ui: &egui::Ui, p: &egui::Painter, rect: 
             continue;
         }
         let hot = hover.is_some_and(|q| r.contains(q));
-        let edge_c = if hot { accent() } else { accent().gamma_multiply(0.55 * a) };
+        // The station the offset bar is on (AJ3G: "make it so I know which
+        // station I am on"): its leader, pointer and box in the bar's red,
+        // the box tinted and its call full white.
+        let on = sc.skim_on_bar == Some(i);
+        let edge_c = if on {
+            BAR_INK
+        } else if hot {
+            accent()
+        } else {
+            accent().gamma_multiply(0.55 * a)
+        };
         // The leader, bold so it reads over the waterfall (AJ3G: it shows
         // where the station is, where the offset bar goes to transmit):
         // dark-edged, from a pointer at the top on the signal's frequency
         // down to the box's middle.
-        let lead_c = if hot { accent() } else { accent().gamma_multiply(a) };
+        let lead_c = if on {
+            BAR_INK
+        } else if hot {
+            accent()
+        } else {
+            accent().gamma_multiply(a)
+        };
         let lx = sx.round() + 0.5;
-        let halo = Stroke::new(3.5, ground().gamma_multiply(0.7 * a));
+        let halo = Stroke::new(3.5, ground().gamma_multiply(0.7 * if on { 1.0 } else { a }));
         p.vline(lx, rect.top()..=r.center().y, halo);
         p.hline(lx..=r.left(), r.center().y, halo);
         p.vline(lx, rect.top()..=r.center().y, Stroke::new(1.5, lead_c));
@@ -673,13 +697,25 @@ fn paint_skim_waterfall(sc: &mut Scope, ui: &egui::Ui, p: &egui::Painter, rect: 
             Stroke::new(1.0, ground().gamma_multiply(0.7 * a)),
         ));
         p.rect_filled(r, 2.0, ground().gamma_multiply(0.85));
+        if on {
+            p.rect_filled(r, 2.0, BAR_INK.gamma_multiply(0.3));
+        }
         p.rect_stroke(
             r,
             2.0,
-            Stroke::new(if hot { 1.5 } else { 1.0 }, edge_c),
+            Stroke::new(
+                if on {
+                    2.0
+                } else if hot {
+                    1.5
+                } else {
+                    1.0
+                },
+                edge_c,
+            ),
             egui::StrokeKind::Inside,
         );
-        let col = if hot { ink() } else { skim_ink(&sc.skim_shown[i].0, a) };
+        let col = if hot || on { ink() } else { skim_ink(&sc.skim_shown[i].0, a) };
         p.galley(pos2(r.left() + SKIM_PAD, r.center().y - 0.5 * g.size().y), g, col);
         sc.skim_boxes.push((r, i));
     }
@@ -706,6 +742,12 @@ fn paint_offset(sc: &mut Scope, p: &egui::Painter, rect: Rect, cx: &Ctx, spectru
         format!("{} · {}", fmt_offset(off), fmt_tenth(cx.map.shown(bar.hz)))
     } else {
         fmt_offset(off)
+    };
+    // The station it is on, by its call, so the bar reads which one even
+    // where its label has no room.
+    let text = match sc.skim_on_bar.and_then(|i| sc.skim_shown.get(i)) {
+        Some((s, _)) => format!("{text} · {}", s.call),
+        None => text,
     };
     let text = match (inside, xx < rect.left()) {
         (true, _) => text,

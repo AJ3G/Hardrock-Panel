@@ -313,6 +313,8 @@ pub struct Scope {
     offset: Option<OffsetBar>,
     offset_drag: bool,
     offset_close: Option<egui::Rect>,
+    /// The label the offset bar is on this frame, in `skim_shown`.
+    skim_on_bar: Option<usize>,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -390,6 +392,7 @@ impl Scope {
             offset: None,
             offset_drag: false,
             offset_close: None,
+            skim_on_bar: None,
         }
     }
 
