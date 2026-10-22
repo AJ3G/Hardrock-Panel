@@ -596,7 +596,8 @@ fn paint_skim_spectrum(sc: &Scope, p: &egui::Painter, all: Rect, trace: Rect, cx
         let col = skim_ink(s, *a);
         let g = p.layout_no_wrap(s.call.clone(), font.clone(), col);
         let (w, h) = (g.size().x, g.size().y);
-        p.vline(xx, foot - 3.0..=foot, Stroke::new(1.0, accent().gamma_multiply(*a)));
+        // A bold tick on the station's frequency (AJ3G: easy to read).
+        p.vline(xx, foot - 8.0..=foot, Stroke::new(2.0, accent().gamma_multiply(*a)));
         // Turned to read upwards, from just over the tick, on a backing so
         // the trace's noise does not run through it.
         let at = pos2(xx - 0.5 * h, foot - 5.0);
@@ -651,9 +652,26 @@ fn paint_skim_waterfall(sc: &mut Scope, ui: &egui::Ui, p: &egui::Painter, rect: 
         }
         let hot = hover.is_some_and(|q| r.contains(q));
         let edge_c = if hot { accent() } else { accent().gamma_multiply(0.55 * a) };
-        // The leader: down the signal from the top to the box's middle.
-        p.vline(sx.round() + 0.5, rect.top()..=r.center().y, Stroke::new(1.0, edge_c));
-        p.hline(sx..=r.left(), r.center().y, Stroke::new(1.0, edge_c));
+        // The leader, bold so it reads over the waterfall (AJ3G: it shows
+        // where the station is, where the offset bar goes to transmit):
+        // dark-edged, from a pointer at the top on the signal's frequency
+        // down to the box's middle.
+        let lead_c = if hot { accent() } else { accent().gamma_multiply(a) };
+        let lx = sx.round() + 0.5;
+        let halo = Stroke::new(3.5, ground().gamma_multiply(0.7 * a));
+        p.vline(lx, rect.top()..=r.center().y, halo);
+        p.hline(lx..=r.left(), r.center().y, halo);
+        p.vline(lx, rect.top()..=r.center().y, Stroke::new(1.5, lead_c));
+        p.hline(lx..=r.left(), r.center().y, Stroke::new(1.5, lead_c));
+        p.add(Shape::convex_polygon(
+            vec![
+                pos2(lx - 5.0, rect.top()),
+                pos2(lx + 5.0, rect.top()),
+                pos2(lx, rect.top() + 7.0),
+            ],
+            lead_c,
+            Stroke::new(1.0, ground().gamma_multiply(0.7 * a)),
+        ));
         p.rect_filled(r, 2.0, ground().gamma_multiply(0.85));
         p.rect_stroke(
             r,
