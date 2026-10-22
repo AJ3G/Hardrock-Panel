@@ -406,9 +406,38 @@ pub(crate) struct Decode {
     key_view: Option<(f64, f64)>,
     /// SKIM LOG: every mode skimmed, with its mode (decision 60).
     pub(crate) skim_log: SkimLog,
+    /// Where the receiver's dial has been: (UTC it moved there, dial Hz),
+    /// oldest first, so a slot is put on the dial it was heard on.
+    dials: DialLog,
     /// AUTO ID (decision 61): asked for, and at work.
     pub(crate) autoid_on: bool,
     autoid: Option<AutoIdRun>,
+}
+
+/// The receiver's dial over the last few minutes. A WSJT slot's decodes
+/// come a second or two after it ends, by when the dial may have moved: on
+/// to another band, AJ3G saw 40 m's stations labelled on 20 m (22 Oct 2026),
+/// and they went to ALL.TXT and the spots at 20 m's frequency too.
+#[derive(Default)]
+struct DialLog(VecDeque<(f64, f64)>);
+
+impl DialLog {
+    /// The dial is at `hz` at `utc`.
+    fn note(&mut self, utc: f64, hz: f64) {
+        if self.0.back().is_none_or(|&(_, d)| d != hz) {
+            self.0.push_back((utc, hz));
+        }
+        while self.0.len() > 1 && self.0[1].0 < utc - 600.0 {
+            self.0.pop_front();
+        }
+    }
+
+    /// The one dial from `t0` to `t1`, or `None` if it moved between.
+    fn during(&self, t0: f64, t1: f64) -> Option<f64> {
+        let at_start = self.0.iter().rev().find(|&&(t, _)| t <= t0).or(self.0.front())?.1;
+        let moved = self.0.iter().any(|&(t, d)| t > t0 && t < t1 && d != at_start);
+        (!moved).then_some(at_start)
+    }
 }
 
 /// AUTO ID listening to one passband on one dial.
@@ -756,6 +785,7 @@ impl Decode {
         self.keys_frame(s, rx, at, s.running && rx.active());
         self.skim_log_frame(at);
         self.autoid_frame(st, rx, s.running && rx.active());
+        self.dials.note(decoders::slot::utc_now(), at.dial_hz);
         let taps = &rx.taps;
         if !s.running || !rx.active() {
             if self.worker.is_some() {
@@ -893,7 +923,19 @@ impl Decode {
                 let mode = *mode;
                 let slots: Vec<_> = w.results().try_iter().collect();
                 for slot in slots {
-                    self.wsjt_slot(&slot, mode, at, wsjtx);
+                    // On the dial it was heard on; heard across a retune,
+                    // half one place and half another, it is dropped.
+                    let t0 = slot.slot_utc as f64;
+                    match self.dials.during(t0, t0 + mode.period_s()) {
+                        Some(dial_hz) => {
+                            self.wsjt_slot(&slot, mode, Where { dial_hz, ..at }, wsjtx)
+                        }
+                        None => tracing::info!(
+                            "{} slot {} dropped: the dial moved during it",
+                            mode.label(),
+                            hms(t0)
+                        ),
+                    }
                 }
             }
             Worker::Text(w, _) => {
@@ -2041,6 +2083,24 @@ mod tests {
         assert_eq!(Kind::of_digi(digimodes::digi("JS8").unwrap()), None);
         assert_eq!(Kind::Olivia.audio_passband(1500.0), Some((1150.0, 1850.0)));
         assert_eq!(Kind::Ft8.audio_passband(1500.0), None);
+    }
+
+    #[test]
+    fn a_slot_goes_on_the_dial_it_was_heard_on_and_one_heard_across_a_band_change_is_dropped() {
+        let mut d = DialLog::default();
+        d.note(1000.0, 7_074_000.0);
+        d.note(1010.0, 7_074_000.0);
+        // To 20 m at 1050, early in the 1050 slot.
+        d.note(1050.4, 14_074_000.0);
+        d.note(1060.0, 14_074_000.0);
+        // The slot before, all on 40 m, decoded once on 20 m: 40 m's.
+        assert_eq!(d.during(1035.0, 1050.0), Some(7_074_000.0));
+        // The slot the change fell in: half each.
+        assert_eq!(d.during(1050.0, 1065.0), None);
+        assert_eq!(d.during(1065.0, 1080.0), Some(14_074_000.0));
+        // Before anything was noted: the first dial.
+        assert_eq!(d.during(900.0, 915.0), Some(7_074_000.0));
+        assert_eq!(DialLog::default().during(0.0, 15.0), None);
     }
 
     #[test]

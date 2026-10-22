@@ -765,3 +765,9 @@ Each of 25 signatures (CW, PSK31/63/125, RTTY, NAVTEX, Packet 300/1200, the WSJT
 - **Persistence.** A CW label fades over 10 s once its signal stops (`CW_FADE_S`); PSK31 and RTTY stay at 5 s. The skimmer drops a silent track after 6 s, which cut every label off then, so DECODE keeps each signal's last spot until its label has faded (`key_held`).
 - **Wide spans.** Above 192 kHz the skimmer reads a 192 kHz cut of the span, meant to be around the scope's view (decision 56), but the panel never told it the view, so it was cut around the span's centre and missed everything else. DECODE now passes the scope's view, to the nearest 5 kHz, at spans over 192 kHz only. Tested by `in_a_wide_span_the_signals_in_the_scopes_view_are_read`.
 - **Not changed.** At very wide spans a WSJT dial is a pixel or two wide and at most five labels stack in one place (`MAX_LANES`), so most FT8 labels are left out until the scope is zoomed in.
+
+## 63. A WSJT slot goes on the dial it was heard on (22 Oct 2026)
+
+**Why.** AJ3G: "When I switch bands from 40M to 20M I believe the spots from 40M carried over to 20M." They did. A slot's decodes come a second or two after it ends, and DECODE put them on the dial as it was then. So the slot heard on 40 m before a change to 20 m was labelled on 20 m, written to ALL.TXT at 20 m's dial and spotted to PSK Reporter there.
+
+**What.** DECODE keeps where the receiver's dial has been over the last ten minutes (`DialLog`). Each slot goes on the dial it was on for the whole slot. A slot the dial moved during, half on one band and half on another, is dropped and logged rather than labelled, written or spotted anywhere. Tested by `a_slot_goes_on_the_dial_it_was_heard_on_and_one_heard_across_a_band_change_is_dropped`.
