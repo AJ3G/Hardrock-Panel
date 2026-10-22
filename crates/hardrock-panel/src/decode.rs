@@ -1127,6 +1127,8 @@ pub(crate) fn window(
 ) -> DecodeOut {
     let mut out = DecodeOut::default();
     if popped {
+        // Painted in place: no background GPU submit meanwhile (gpu_gate).
+        let _shut = crate::gpu_gate::shut();
         let closed = ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("decode-window"),
             egui::ViewportBuilder::default()

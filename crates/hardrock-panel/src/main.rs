@@ -42,6 +42,7 @@ mod theme;
 mod audio;
 mod decode;
 mod decodelog;
+mod gpu_gate;
 mod logfile;
 mod outside;
 mod panel;
@@ -948,6 +949,10 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // The scope's GPU threads may submit while the app's own code runs,
+        // not while eframe paints or reconfigures a window (gpu_gate).
+        gpu_gate::open();
+        let _shut_after = gpu_gate::Closing;
         let ctx = &ui.ctx().clone();
         // The whole panel wears the chosen radio's look (decision 39). Only
         // here, before anything is painted.

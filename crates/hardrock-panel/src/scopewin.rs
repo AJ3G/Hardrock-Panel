@@ -44,6 +44,8 @@ pub(crate) fn scope_window(
 ) -> WinOut {
     let mut out = WinOut::default();
     if popped {
+        // Painted in place: no background GPU submit meanwhile (gpu_gate).
+        let _shut = crate::gpu_gate::shut();
         let closed = ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("scope-window"),
             egui::ViewportBuilder::default()

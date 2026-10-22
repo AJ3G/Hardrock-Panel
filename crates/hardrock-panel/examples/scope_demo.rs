@@ -25,6 +25,8 @@
 
 #[path = "../src/chrome.rs"]
 mod chrome;
+#[path = "../src/gpu_gate.rs"]
+mod gpu_gate;
 #[path = "../src/layout.rs"]
 mod layout;
 // The SCF view says where the log is and copies it.
@@ -173,6 +175,8 @@ impl Demo {
 
 impl eframe::App for Demo {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        gpu_gate::open();
+        let _shut_after = gpu_gate::Closing;
         let snap = self.pipeline.snapshot();
         if let Some(k) = &self.keyed {
             self.transmitting = k.load(std::sync::atomic::Ordering::Relaxed);

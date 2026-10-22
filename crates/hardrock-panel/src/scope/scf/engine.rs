@@ -549,7 +549,8 @@ impl Engine {
         }
         let bytes = self.cfg.grid_a as u64 * 16;
         enc.copy_buffer_to_buffer(&self.prof, 0, &self.readback[slot], 0, bytes);
-        let idx = q.submit([enc.finish()]);
+        let cmds = enc.finish();
+        let idx = crate::gpu_gate::submit(|| q.submit([cmds]));
         let flag = self.mapped[slot].clone();
         flag.store(false, Ordering::Release);
         self.readback[slot].slice(..).map_async(wgpu::MapMode::Read, move |r| {
@@ -603,7 +604,8 @@ impl Engine {
         });
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.copy_buffer_to_buffer(buf, 0, &staging, 0, size);
-        let idx = self.queue.submit([enc.finish()]);
+        let cmds = enc.finish();
+        let idx = crate::gpu_gate::submit(|| self.queue.submit([cmds]));
         staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         let _ =
             self.device.poll(wgpu::PollType::Wait { submission_index: Some(idx), timeout: None });

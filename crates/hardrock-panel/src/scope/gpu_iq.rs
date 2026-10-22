@@ -193,7 +193,7 @@ impl GpuIq {
                     &mut cons,
                     |off, bytes| queue.write_buffer(&buffer, off, bytes),
                     || {
-                        queue.submit(std::iter::empty());
+                        crate::gpu_gate::submit(|| queue.submit(std::iter::empty()));
                     },
                 );
             })

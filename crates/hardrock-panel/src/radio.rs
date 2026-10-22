@@ -212,6 +212,8 @@ pub(crate) fn radio_window(
     let mut rui: RadioUi = ctx.data_mut(|d| d.get_temp(ui_id())).unwrap_or_default();
     let title = st.map_or("Radio", |s| s.model.label());
     if popped {
+        // Painted in place: no background GPU submit meanwhile (gpu_gate).
+        let _shut = crate::gpu_gate::shut();
         let closed = ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("radio-window"),
             egui::ViewportBuilder::default()
