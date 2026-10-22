@@ -48,6 +48,7 @@ use crate::decodelog::{self, DecodeLog};
 use crate::rx::{self, Rx};
 use crate::scope::digimodes::{self, Digi};
 use crate::scope::{KeyTag, SkimFeed, SkimSpot};
+use crate::skimlog::{self, SkimLog};
 use crate::spots::{self, SpotSettings, Spots, pskreporter, wsprnet};
 use crate::station::{self, Heard, StationSettings};
 use crate::{chrome, slotclock, theme};
@@ -255,6 +256,8 @@ pub(crate) struct DecodeSettings {
     /// SKIM CW/PSK/RTTY: find and read the keyboard modes across the I/Q
     /// window and label them on the scope (decision 56).
     pub skim_keys: bool,
+    /// The SKIM LOG window is open (decision 60).
+    pub skim_log: bool,
 }
 
 impl Default for DecodeSettings {
@@ -271,6 +274,7 @@ impl Default for DecodeSettings {
             skim: true,
             skim_wide: false,
             skim_keys: false,
+            skim_log: false,
         }
     }
 }
@@ -391,6 +395,8 @@ pub(crate) struct Decode {
     /// SKIM CW/PSK/RTTY's skimmer, and the exclusions it was given.
     keys: Option<Arc<KeySkimWorker>>,
     keys_cfg: Option<KeySkimConfig>,
+    /// SKIM LOG: every mode skimmed, with its mode (decision 60).
+    pub(crate) skim_log: SkimLog,
 }
 
 /// The most of the wide skimmer's decodes kept.
@@ -478,6 +484,35 @@ impl Decode {
         self.keys_cfg = Some(cfg);
     }
 
+    /// SKIM LOG (decision 60): SKIM CW/PSK/RTTY's signals as they are now,
+    /// and what came this frame into SKIM.TXT.
+    fn skim_log_frame(&mut self, at: Where) {
+        if let Some(k) = &self.keys {
+            let st = k.state();
+            for p in &st.spots {
+                self.skim_log.key(
+                    p.id,
+                    skimlog::Line {
+                        utc: p.heard_utc,
+                        mode: p.mode.label(),
+                        source: skimlog::Source::Keys,
+                        rf_hz: p.hz + at.xvtr_hz,
+                        snr: p.snr_db,
+                        call: p.call.clone(),
+                        text: p.text.clone(),
+                        track: None,
+                        live: p.active,
+                    },
+                );
+            }
+            let alive: Vec<u64> = st.spots.iter().map(|p| p.id).collect();
+            self.skim_log.end_tracks(&alive);
+        } else {
+            self.skim_log.end_tracks(&[]);
+        }
+        self.skim_log.flush();
+    }
+
     /// Pick line `id` alone and bring it into view: a scope label clicked.
     pub(crate) fn pick_row(&mut self, id: u64) {
         if self.rows.iter().any(|r| r.id == id) {
@@ -522,7 +557,20 @@ impl Decode {
             let wsjt = Some(w.mode());
             for r in w.results() {
                 for d in &r.slot.decodes {
-                    let Some(call) = station::sender_of(&d.message).0 else { continue };
+                    let cal = decoders::FreqCal { ppm: at.ppm };
+                    let call = station::sender_of(&d.message).0;
+                    self.skim_log.add(skimlog::Line {
+                        utc: d.slot_utc as f64,
+                        mode: w.mode().label(),
+                        source: skimlog::Source::Wide,
+                        rf_hz: cal.rf_of_audio(r.dial_hz, d.audio_hz as f64, false) + at.xvtr_hz,
+                        snr: d.snr_db,
+                        call: call.clone(),
+                        text: d.message.clone(),
+                        track: None,
+                        live: false,
+                    });
+                    let Some(call) = call else { continue };
                     self.wide_spots.push_front(SkimSpot {
                         row: None,
                         hz: r.dial_hz + d.audio_hz as f64,
@@ -575,6 +623,7 @@ impl Decode {
         // The uploaders follow their ticks whether or not anything decodes.
         self.spots.frame(&s.spots, me(st).as_ref());
         self.keys_frame(s, rx, at, s.running && rx.active());
+        self.skim_log_frame(at);
         let taps = &rx.taps;
         if !s.running || !rx.active() {
             if self.worker.is_some() {
@@ -742,6 +791,19 @@ impl Decode {
                         call: e.call,
                         grid: None,
                     };
+                    if e.complete {
+                        self.skim_log.add(skimlog::Line {
+                            utc: r.utc,
+                            mode: "JTTY",
+                            source: skimlog::Source::Receiver,
+                            rf_hz: r.rf_hz.unwrap_or(0.0),
+                            snr: 0.0,
+                            call: r.call.clone(),
+                            text: r.text.clone(),
+                            track: None,
+                            live: false,
+                        });
+                    }
                     // One line a message, rewritten as it grows.
                     let line = self.jtty_rows.iter().find(|(m, _)| *m == e.id).map(|&(_, id)| id);
                     match line.and_then(|id| self.rows.iter_mut().find(|x| x.id == id)) {
@@ -895,6 +957,17 @@ impl Decode {
                 }
                 _ => {}
             }
+            self.skim_log.add(skimlog::Line {
+                utc: row.utc,
+                mode: mode.label(),
+                source: skimlog::Source::Receiver,
+                rf_hz: rf,
+                snr: d.snr_db,
+                call: row.call.clone(),
+                text: row.text.clone(),
+                track: None,
+                live: false,
+            });
             push_row(&mut self.rows, &mut self.next_id, row);
             if let Some(u) = wsjtx {
                 send_wsjtx(u, mode, d, rf);
@@ -1329,6 +1402,14 @@ fn body(
         );
         if r.clicked() {
             s.skim_keys = !s.skim_keys;
+        }
+        let r = chrome::chip(ui, s.skim_log, "SKIM LOG").on_hover_text(
+            "Open a window listing everything heard, of every mode, with the mode and where \
+             it was heard: the receiver's own decodes, SKIM WIDE's FT8 and FT4 on the other \
+             dials, and SKIM CW/PSK/RTTY's signals. Also kept in SKIM.TXT beside ALL.TXT",
+        );
+        if r.clicked() {
+            s.skim_log = !s.skim_log;
         }
         if let Some(k) = &d.keys {
             let st = k.state();

@@ -53,6 +53,7 @@ mod rx;
 mod scope;
 mod scopewin;
 mod settings;
+mod skimlog;
 mod slotclock;
 mod spots;
 mod station;
@@ -1166,6 +1167,9 @@ impl eframe::App for App {
             );
             if let Some(p) = o.pop {
                 self.saved.decode_popped = p;
+            }
+            if self.saved.decode.skim_log {
+                skimlog::window(ctx, &mut self.saved.decode.skim_log, &mut self.decode.skim_log);
             }
             if let Some(k) = o.picked {
                 // The scope's DATA row shows the mode picked here, whether

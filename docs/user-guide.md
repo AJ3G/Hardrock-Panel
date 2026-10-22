@@ -516,6 +516,11 @@ For the WSJT modes:
   transmitting) but are not added to this list, ALL.TXT or the spots. The
   line above the list says which dials are skimmed. For CW, PSK31 and RTTY,
   turn on SKIM CW/PSK/RTTY as well.
+- **SKIM LOG** opens a window listing everything heard, of every mode: the
+  receiver's own decodes (RX), SKIM WIDE's FT8 and FT4 on the other dials
+  (WIDE), and SKIM CW/PSK/RTTY's stations (SKIM), each with its UTC, mode,
+  RF, SNR and message. The chips across the top show one mode; COPY ALL
+  copies the list. Every line is also kept in `SKIM.TXT`, beside `ALL.TXT`.
 - **The offset bar on a station:** when the red bar crosses a labelled
   station's signal, that label's leader, pointer and box, and its tick on
   the spectrum, turn red, and the bar's readout adds its call.
