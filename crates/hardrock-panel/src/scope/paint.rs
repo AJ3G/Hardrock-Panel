@@ -594,7 +594,7 @@ fn paint_skim_spectrum(sc: &Scope, p: &egui::Painter, all: Rect, trace: Rect, cx
         }
         let xx = v.x_of(s.hz, all.left(), all.width()).round() + 0.5;
         let col = skim_ink(s, *a);
-        let g = p.layout_no_wrap(s.call.clone(), font.clone(), col);
+        let g = p.layout_no_wrap(s.tag(), font.clone(), col);
         let (w, h) = (g.size().x, g.size().y);
         p.vline(xx, foot - 3.0..=foot, Stroke::new(1.0, accent().gamma_multiply(*a)));
         // Turned to read upwards, from just over the tick, on a backing so
@@ -631,7 +631,7 @@ fn paint_skim_waterfall(sc: &mut Scope, ui: &egui::Ui, p: &egui::Painter, rect: 
         .iter()
         .map(|&i| {
             let (s, a) = &sc.skim_shown[i];
-            p.layout_no_wrap(s.call.clone(), font.clone(), skim_ink(s, *a))
+            p.layout_no_wrap(s.tag(), font.clone(), skim_ink(s, *a))
         })
         .collect();
     let boxes: Vec<(f32, f32)> = vis
@@ -1291,19 +1291,32 @@ fn pointer_on(
                 "click to pick it in DECODE".to_string()
             } else if tx {
                 "tuning locked while transmitting".to_string()
+            } else if let Some(k) = s.key {
+                format!("click to listen there in {}", k.mode.label())
             } else {
                 format!("click to tune to its dial, {}", view::fmt_freq(cx.map.shown(s.dial_hz)))
             };
-            sc.cursor = format!("{} · {what}", s.call);
-            let detail = format!(
-                "{}\n{:+.0} dB · AF {:.0} Hz on the {} dial · {} · {} UTC\n{what}",
-                s.text,
-                s.snr,
-                s.audio_hz,
-                view::fmt_freq(cx.map.shown(s.dial_hz)),
-                fmt_tenth(cx.map.shown(s.hz)),
-                fmt_utc(s.utc),
-            );
+            sc.cursor = format!("{} · {what}", s.tag());
+            let detail = match s.key {
+                Some(k) => format!(
+                    "{}\n{}{} · {:+.0} dB over the noise · {} · heard {} UTC\n{what}",
+                    s.text,
+                    k.mode.label(),
+                    if k.wpm > 0 { format!(" {} WPM", k.wpm) } else { String::new() },
+                    s.snr,
+                    fmt_tenth(cx.map.shown(s.hz)),
+                    fmt_utc(s.utc),
+                ),
+                None => format!(
+                    "{}\n{:+.0} dB · AF {:.0} Hz on the {} dial · {} · {} UTC\n{what}",
+                    s.text,
+                    s.snr,
+                    s.audio_hz,
+                    view::fmt_freq(cx.map.shown(s.dial_hz)),
+                    fmt_tenth(cx.map.shown(s.hz)),
+                    fmt_utc(s.utc),
+                ),
+            };
             resp.clone().on_hover_text_at_pointer(detail);
             over_own = true;
         } else if close_at(pos) {
@@ -1433,19 +1446,27 @@ fn pointer_on(
         sc.marker_drag = None;
         sc.offset_drag = false;
         // A click on a skimmer label: DECODE's own picks its line there;
-        // the wide skimmer's tunes the receiver to the dial it was heard on.
-        // (Only where the press was: the spectrum and the waterfall each
-        // see the release.)
+        // the wide skimmer's tunes the receiver to the dial it was heard on;
+        // the keyboard skimmer's sets the receiver's mode and tunes onto the
+        // signal, and DECODE to its mode (decision 56). (Only where the
+        // press was: the spectrum and the waterfall each see the release.)
         if let Some(pos) = here
             && let Some(i) = sc.skim_press.take().filter(|&i| label_at(pos) == Some(i))
         {
             let s = &sc.skim_shown[i].0;
-            match s.row {
-                Some(id) => out.skim_pick = Some(id),
-                // SAFETY INTERLOCK 9: a label tunes nothing while
-                // transmitting.
-                None if !tx => out.tune_to = Some(s.dial_hz),
-                None => {}
+            match (s.row, s.key) {
+                (Some(id), _) => out.skim_pick = Some(id),
+                // SAFETY INTERLOCK (docs/safety-interlocks.md, #9): a label
+                // tunes nothing, and changes no mode, while transmitting.
+                (None, _) if tx => {}
+                (None, Some(k)) => {
+                    let (mode, pb, dial) = skim::key_tune(s.hz, k.mode, sc.skim.key_audio_hz);
+                    out.mode = Some(mode);
+                    out.passband = Some(pb);
+                    out.tune_to = Some(dial);
+                    out.key_pick = Some(k.mode);
+                }
+                (None, None) => out.tune_to = Some(s.dial_hz),
             }
         }
     }

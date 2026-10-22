@@ -499,6 +499,20 @@ For the WSJT modes:
   14.074. Those stations are labelled on the scope too (clicking one tunes
   there, not while transmitting) but are not added to this list, ALL.TXT or
   the spots. The line above the list says which dials are skimmed.
+- **SKIM CW/PSK/RTTY** (off to start), in any mode, finds every CW, PSK31
+  and RTTY (45.45 baud, 170 Hz shift) signal in the I/Q window, up to 192
+  kHz of it, reads each one and picks out the callsign it sends. Each is
+  labelled on the scope like the FT8 stations, with its mode beside the call
+  ("W2XYZ CW"), blue when it calls CQ, fading over five seconds once it
+  stops. Point at one for its text so far, its speed (CW), its level and
+  frequency; click it to listen there: the receiver goes to CW on the
+  carrier, or to USB with a PSK31 or RTTY signal at DECODE's audio
+  frequency and DECODE to that mode (not while transmitting). The FT8 and
+  other WSJT sub-bands are left out. Nothing it reads is sent anywhere. The
+  line beside it shows how many signals it tracks and how much of a core it
+  uses. CW is read by timing alone, so a fast or ragged fist, or a weak
+  signal, reads less well than PSK31 or RTTY, and a word's first letter can
+  come out wrong.
 - **SPOTS.** **PSK Reporter** sends the FT8 and FT4 stations heard to
   pskreporter.info, a batch every five minutes or so; **WSPRnet** sends each
   WSPR slot's spots to wsprnet.org as it is decoded (or that you listened and

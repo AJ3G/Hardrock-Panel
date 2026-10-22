@@ -7,6 +7,21 @@
 //! newest one of each station, faded by how many slots ago it was heard,
 //! and laid out in lanes along the top of the waterfall so that labels of
 //! nearby signals stack rather than overlap.
+//!
+//! The keyboard skimmer's signals (decision 56) come in the same feed, each
+//! with a [`KeyTag`]: their labels carry the mode, and fade over
+//! [`KEY_FADE_S`] once the signal stops rather than by slots.
+
+pub use decoders::keyskim::KeyMode;
+
+/// A keyboard skimmer's signal: its mode, CW's speed, and whether it is
+/// being heard now.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyTag {
+    pub mode: KeyMode,
+    pub wpm: u16,
+    pub active: bool,
+}
 
 /// One decode to label.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,14 +39,29 @@ pub struct SkimSpot {
     pub call: String,
     pub text: String,
     pub snr: f32,
-    /// The UTC start of the slot it was sent in.
+    /// The UTC start of the slot it was sent in; for the keyboard
+    /// skimmer's, when it was last heard.
     pub utc: f64,
+    /// The keyboard skimmer's signals (decision 56): `None` for FT8's.
+    pub key: Option<KeyTag>,
 }
 
 impl SkimSpot {
-    /// It is calling CQ.
+    /// It is calling CQ: a WSJT message that starts so, or "CQ" among a
+    /// keyboard signal's words.
     pub fn cq(&self) -> bool {
-        self.text.starts_with("CQ ")
+        match self.key {
+            Some(_) => self.text.split_whitespace().any(|w| w == "CQ"),
+            None => self.text.starts_with("CQ "),
+        }
+    }
+
+    /// The label's text: the callsign, and a keyboard signal's mode.
+    pub fn tag(&self) -> String {
+        match self.key {
+            Some(k) => format!("{} {}", self.call, k.mode.label()),
+            None => self.call.clone(),
+        }
     }
 }
 
@@ -41,6 +71,22 @@ impl SkimSpot {
 pub struct SkimFeed {
     pub period_s: f64,
     pub spots: Vec<SkimSpot>,
+    /// DECODE's audio frequency for PSK31 and RTTY: a keyboard label
+    /// clicked tunes so its signal lands there.
+    pub key_audio_hz: f64,
+}
+
+/// How long a keyboard signal's label fades once it stops, s.
+pub const KEY_FADE_S: f64 = 5.0;
+
+/// A keyboard signal's label's opacity: full while it is heard, then fading
+/// over [`KEY_FADE_S`] from when it was last heard, then gone.
+pub fn key_alpha(heard_utc: f64, active: bool, now: f64) -> Option<f32> {
+    if active {
+        return Some(1.0);
+    }
+    let t = (now - heard_utc).max(0.0);
+    (t < KEY_FADE_S).then(|| (1.0 - 0.8 * t / KEY_FADE_S) as f32)
 }
 
 /// Slots a label stays for: the newest slot's, and two before it, fading.
@@ -72,7 +118,11 @@ pub fn age_slots(utc: f64, now: f64, period: f64) -> u32 {
 pub fn labels(feed: &SkimFeed, now: f64) -> Vec<(SkimSpot, f32)> {
     let mut out: Vec<(SkimSpot, f32)> = Vec::new();
     for s in &feed.spots {
-        let Some(a) = alpha(age_slots(s.utc, now, feed.period_s)) else { continue };
+        let a = match s.key {
+            Some(k) => key_alpha(s.utc, k.active, now),
+            None => alpha(age_slots(s.utc, now, feed.period_s)),
+        };
+        let Some(a) = a else { continue };
         let same = |o: &(SkimSpot, f32)| o.0.call == s.call && o.0.dial_hz == s.dial_hz;
         match out.iter_mut().find(|o| same(o)) {
             Some(o) if o.0.utc < s.utc => *o = (s.clone(), a),
@@ -81,6 +131,25 @@ pub fn labels(feed: &SkimFeed, now: f64) -> Vec<(SkimSpot, f32)> {
         }
     }
     out
+}
+
+/// Where a keyboard signal's label clicked puts the receiver: its mode,
+/// passband and dial (the radio's own Hz). CW on its carrier at the CW
+/// passband's middle (the pitch); PSK31 and RTTY on USB with the signal at
+/// DECODE's audio frequency `audio_hz`, so DECODE reads it there.
+pub fn key_tune(hz: f64, mode: KeyMode, audio_hz: f64) -> (sdr::Mode, (f32, f32), f64) {
+    match mode {
+        KeyMode::Cw => {
+            let pb = sdr::Mode::Cw.default_passband();
+            let pitch = 0.5 * (pb.0 + pb.1) as f64;
+            (sdr::Mode::Cw, pb, hz - pitch)
+        }
+        KeyMode::Psk | KeyMode::Rtty => {
+            let half = if mode == KeyMode::Psk { 250.0 } else { 350.0 };
+            let pb = ((audio_hz - half) as f32, (audio_hz + half) as f32);
+            (sdr::Mode::Usb, pb, hz - audio_hz)
+        }
+    }
 }
 
 /// Lanes a label may take, down from the waterfall's top.
@@ -126,6 +195,7 @@ mod tests {
             text: format!("CQ {call} FN42"),
             snr: -10.0,
             utc,
+            key: None,
         }
     }
 
@@ -154,6 +224,7 @@ mod tests {
                 spot("K1ABC", 15.0, 14_075_200.0),
                 spot("G4ABC", 0.0, 14_074_900.0),
             ],
+            ..Default::default()
         };
         let l = labels(&feed, 46.0);
         assert_eq!(l.len(), 3);
@@ -167,7 +238,11 @@ mod tests {
         let mut wide = spot("K1ABC", 30.0, 18_101_000.0);
         wide.dial_hz = 18_100_000.0;
         wide.row = None;
-        let feed = SkimFeed { period_s: 15.0, spots: vec![spot("K1ABC", 30.0, 1.0), wide] };
+        let feed = SkimFeed {
+            period_s: 15.0,
+            spots: vec![spot("K1ABC", 30.0, 1.0), wide],
+            ..Default::default()
+        };
         assert_eq!(labels(&feed, 46.0).len(), 2);
         assert!(feed.spots[0].cq());
     }
@@ -183,5 +258,28 @@ mod tests {
         let l = lanes(&crowd, 6.0, 4.0);
         assert_eq!(l.iter().filter(|x| x.is_some()).count(), MAX_LANES);
         assert_eq!(l[MAX_LANES], None);
+    }
+
+    #[test]
+    fn a_keyboard_signals_label_carries_its_mode_and_fades_once_it_stops() {
+        let mut k = spot("W2XYZ", 100.0, 14_025_500.0);
+        k.row = None;
+        k.text = "CQ CQ DE W2XYZ W2XYZ K".into();
+        k.key = Some(KeyTag { mode: KeyMode::Cw, wpm: 22, active: true });
+        assert_eq!(k.tag(), "W2XYZ CW");
+        assert!(k.cq());
+        let feed = SkimFeed { period_s: 15.0, spots: vec![k.clone()], ..Default::default() };
+        // Heard now: full, however long ago the slots went by.
+        assert_eq!(labels(&feed, 500.0)[0].1, 1.0);
+        // Stopped: fading, then gone after KEY_FADE_S.
+        k.key = Some(KeyTag { active: false, ..k.key.unwrap() });
+        let feed = SkimFeed { spots: vec![k], ..feed };
+        let a = labels(&feed, 102.0)[0].1;
+        assert!(a < 1.0 && a > 0.2, "{a}");
+        assert!(labels(&feed, 100.0 + KEY_FADE_S).is_empty());
+        // "CQ" must be a word of its own in a keyboard signal's text.
+        let mut q = feed.spots[0].clone();
+        q.text = "TNX QSO CQX".into();
+        assert!(!q.cq());
     }
 }

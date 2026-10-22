@@ -701,3 +701,17 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 **Why a bar of its own and not a third marker.** M1 and M2 read level as well as frequency, can track a peak, are placed by right-click and give M2 − M1; a marker is about the signal, and their pair is about each other. The offset bar is about the dial: its reading changes when the dial moves and not when the signal's level does, and in LSB it counts the other way. Making it a marker would have taken one of the two away from a level measurement, or put a third reading with a different meaning in the same readout. It shares their formatting (`fmt_tenth`) and their place in the Markers row.
 
 **Where.** `hardrock-panel/src/scope/offset.rs`, `scope/paint.rs` (`paint_offset`, `pointer_on`), `scope/controls.rs` (OFFSET), `scope/mod.rs`.
+
+## 56. SKIM CW/PSK/RTTY: the keyboard modes found and read across the I/Q (22 Oct 2026)
+
+AJ3G: "Yes do skimmers", meaning SDRoxide's wide CW, PSK31 and RTTY skimmers.
+
+- **Finding.** `decoders::keyskim` runs a streaming FFT over the I/Q window, up to 192 kHz (a wider I/Q is cut down to 192 kHz around its centre), in bins of about 47 Hz at 375 frames a second. Each bin's power is smoothed and set against a median noise floor per 3 kHz region; a peak that holds 4 dB over the floor for 80 ms becomes a track. The detector, the floor and the track bookkeeping follow SDRoxide's (`crates/sdroxide-skimmer/src/cw.rs` and `digi.rs`, GPL-3.0-or-later, credited in the file). The WSJT modes' sub-bands (each dial and 3 kHz above it) are never tracked: FT8 reads as PSK31 garbage.
+- **Telling the modes apart.** SDRoxide gates each skimmer to its band-plan segment. This one looks at the signal's first 1.2 s instead. A second tone 170 Hz away, keyed against the first, is RTTY. A carrier that spends more than 12 % of the time in gaps of 40 ms or longer is CW. Anything else is PSK31.
+- **Reading.** CW goes from its bin's magnitude through SDRoxide's timing decoder (`decoders::morse`). PSK31 and RTTY each get a lane cut from the I/Q, at 500 Hz and 2 kHz, read by the panel's own demodulators (`BpskCore`, and `RttyRx` with its AFC and unshift-on-space), the same ones DECODE uses. The callsign is the last callsign-shaped word read.
+- **Cost.** One thread, at most 32 tracks (strongest first), behind a queue that drops blocks rather than make the I/Q wait; DECODE shows the tracks and the load.
+- **Measured** on a synthetic band (4 CW at 16 to 30 WPM, 3 PSK31, 3 RTTY, one over each, 26 s): from +10 down to -3 dB SNR in 2.5 kHz, every station's call is read (4/4, 3/3, 3/3), with no wrong calls. At -6 dB, CW 0/4, PSK31 3/3, RTTY 1/3; at -9 dB, PSK31 3/3; nothing at -12 dB. CW's first letter is often misread at an over's start (NQ for CQ), so the callsign, not the text, is what the label shows. Not yet tried on air.
+- **Labels.** They share decision 54's look and rules: callsign plus mode, blue for CQ, lanes along the waterfall's top. They fade over 5 s once the signal stops, not by slots. A click sets the receiver to CW on the carrier (at the passband's middle, 600 Hz), or USB with a PSK31 or RTTY signal at DECODE's audio frequency, and DECODE to PSK31 or RTTY. Never while transmitting (interlock #9).
+- **Toggle.** SKIM CW/PSK/RTTY in DECODE, off to start, saved, in any mode, while DECODE is open. Nothing it reads goes to PSK Reporter, WSPRnet, ALL.TXT or WSJT-X UDP.
+- **Demo.** The demo band has made-up CW, PSK31 and RTTY stations on 20 m (`decoders::demo::DemoKeys`).
+

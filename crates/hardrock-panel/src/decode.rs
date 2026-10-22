@@ -24,12 +24,16 @@
 //! clicked there picks its line here. **SKIM WIDE** (decision 54) also
 //! decodes FT8 or FT4 on every other dial of the mode in the I/Q span
 //! ([`decoders::skim::WideSkimmer`]); those are labelled on the scope only.
+//! **SKIM CW/PSK/RTTY** (decision 56) finds and reads every CW, PSK31 and
+//! RTTY signal in the I/Q window ([`decoders::keyskim::KeySkimWorker`]),
+//! whatever mode this window decodes; those are labelled on the scope only.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
 use datalink::{LinkConfig, LinkEvent, LinkMode, LinkWorker, Tuning};
+use decoders::keyskim::{KeySkimConfig, KeySkimWorker, KeySpot};
 use decoders::modem::wefax::{Ioc, Lpm};
 use decoders::skim::WideSkimmer;
 use decoders::{
@@ -43,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use crate::decodelog::{self, DecodeLog};
 use crate::rx::{self, Rx};
 use crate::scope::digimodes::{self, Digi};
-use crate::scope::{SkimFeed, SkimSpot};
+use crate::scope::{KeyTag, SkimFeed, SkimSpot};
 use crate::spots::{self, SpotSettings, Spots, pskreporter, wsprnet};
 use crate::station::{self, Heard, StationSettings};
 use crate::{chrome, slotclock, theme};
@@ -239,6 +243,9 @@ pub(crate) struct DecodeSettings {
     /// SKIM WIDE: with FT8 or FT4, decode every other dial of the mode in
     /// the I/Q span too (decision 54).
     pub skim_wide: bool,
+    /// SKIM CW/PSK/RTTY: find and read the keyboard modes across the I/Q
+    /// window and label them on the scope (decision 56).
+    pub skim_keys: bool,
 }
 
 impl Default for DecodeSettings {
@@ -254,6 +261,7 @@ impl Default for DecodeSettings {
             spots: SpotSettings::default(),
             skim: true,
             skim_wide: false,
+            skim_keys: false,
         }
     }
 }
@@ -366,6 +374,9 @@ pub(crate) struct Decode {
     /// SKIM WIDE's decoders, and what they heard, newest first.
     wide: Option<Arc<WideSkimmer>>,
     wide_spots: VecDeque<SkimSpot>,
+    /// SKIM CW/PSK/RTTY's skimmer, and the exclusions it was given.
+    keys: Option<Arc<KeySkimWorker>>,
+    keys_cfg: Option<KeySkimConfig>,
 }
 
 /// The most of the wide skimmer's decodes kept.
@@ -407,14 +418,52 @@ impl Decode {
     }
 
     /// The scope's skimmer labels (decision 54): the newest decodes, with
-    /// SKIM on and a slotted mode running; `None` otherwise.
+    /// SKIM on and a slotted mode running, and SKIM CW/PSK/RTTY's signals
+    /// (decision 56); `None` with neither.
     pub(crate) fn skim_feed(&self, s: &DecodeSettings) -> Option<SkimFeed> {
-        if !s.skim {
-            return None;
+        let wsjt = match self.worker.as_ref() {
+            Some((kind, Worker::Wsjt(..))) if s.skim => kind.wsjt(),
+            _ => None,
+        };
+        let mut feed = match wsjt {
+            Some(m) => {
+                skim_feed(&self.rows, &self.wide_spots, m.period_s(), decoders::slot::utc_now())
+            }
+            None => SkimFeed::default(),
+        };
+        feed.key_audio_hz = s.audio_hz;
+        if let Some(k) = &self.keys {
+            feed.spots.extend(k.state().spots.iter().filter_map(key_spot));
         }
-        let (kind, Worker::Wsjt(..)) = self.worker.as_ref()? else { return None };
-        let period_s = kind.wsjt()?.period_s();
-        Some(skim_feed(&self.rows, &self.wide_spots, period_s, decoders::slot::utc_now()))
+        (wsjt.is_some() || self.keys.is_some()).then_some(feed)
+    }
+
+    /// SKIM CW/PSK/RTTY (decision 56): run the keyboard skimmer on the I/Q
+    /// while `on`, kept off the WSJT modes' sub-bands.
+    fn keys_frame(&mut self, s: &DecodeSettings, rx: &Rx, at: Where, on: bool) {
+        if !(on && s.skim_keys) {
+            if self.keys.take().is_some() {
+                rx.taps.set_iq("keyskim", None);
+                self.keys_cfg = None;
+            }
+            return;
+        }
+        let cfg = KeySkimConfig { exclude: wsjt_bands(at.xvtr_hz), ..KeySkimConfig::default() };
+        match &self.keys {
+            Some(k) if self.keys_cfg.as_ref() != Some(&cfg) => k.set_config(cfg.clone()),
+            Some(_) => return,
+            None => {
+                tracing::info!("keyboard skimmer started");
+                let k = Arc::new(KeySkimWorker::spawn(cfg.clone()));
+                let f = k.clone();
+                rx.taps.set_iq(
+                    "keyskim",
+                    Some(Box::new(move |b| f.push_iq(b.iq, b.rate, b.center, b.utc))),
+                );
+                self.keys = Some(k);
+            }
+        }
+        self.keys_cfg = Some(cfg);
     }
 
     /// Pick line `id` alone and bring it into view: a scope label clicked.
@@ -467,6 +516,7 @@ impl Decode {
                     text: d.message.clone(),
                     snr: d.snr_db,
                     utc: d.slot_utc as f64,
+                    key: None,
                 });
             }
         }
@@ -505,6 +555,7 @@ impl Decode {
     ) {
         // The uploaders follow their ticks whether or not anything decodes.
         self.spots.frame(&s.spots, me(st).as_ref());
+        self.keys_frame(s, rx, at, s.running && rx.active());
         let taps = &rx.taps;
         if !s.running || !rx.active() {
             if self.worker.is_some() {
@@ -837,10 +888,41 @@ fn skim_feed(rows: &VecDeque<Row>, wide: &VecDeque<SkimSpot>, period_s: f64, now
             text: r.text.clone(),
             snr: r.snr.unwrap_or(0.0),
             utc: r.utc,
+            key: None,
         })
     });
     let wide = wide.iter().take_while(|w| w.utc >= since).cloned();
-    SkimFeed { period_s, spots: own.chain(wide).collect() }
+    SkimFeed { period_s, spots: own.chain(wide).collect(), ..Default::default() }
+}
+
+/// A keyboard skimmer's signal as a scope label: those with a callsign read.
+fn key_spot(k: &KeySpot) -> Option<SkimSpot> {
+    Some(SkimSpot {
+        row: None,
+        hz: k.hz,
+        audio_hz: 0.0,
+        dial_hz: k.hz,
+        call: k.call.clone()?,
+        text: k.text.clone(),
+        snr: k.snr_db,
+        utc: k.heard_utc,
+        key: Some(KeyTag { mode: k.mode, wpm: k.wpm, active: k.active }),
+    })
+}
+
+/// The WSJT modes' sub-bands, the radio's own Hz (a converter's LO off the
+/// dials as shown): each dial and the 3 kHz above it, where the keyboard
+/// skimmer would read FT8 and the like as PSK31 garbage.
+fn wsjt_bands(xvtr_hz: f64) -> Vec<(f64, f64)> {
+    digimodes::DIGIS
+        .iter()
+        .filter(|d| Kind::of_digi(d).is_some_and(|k| k.wsjt().is_some()))
+        .flat_map(|d| d.dials.iter())
+        .map(|&f| {
+            let lo = f as f64 - xvtr_hz;
+            (lo, lo + 3000.0)
+        })
+        .collect()
 }
 
 /// The wide skimmer's mode and dials for DECODE's `kind`, with the receiver
@@ -1134,6 +1216,30 @@ fn body(
         }
         _ => {}
     });
+    ui.horizontal_wrapped(|ui| {
+        let r = chrome::chip(ui, s.skim_keys, "SKIM CW/PSK/RTTY").on_hover_text(
+            "Find every CW, PSK31 and RTTY signal in the I/Q window, read it, and label it \
+             on the scope by the callsign it sends, with its mode; the labels fade a few \
+             seconds after the signal stops. Hover a label for its text, click it to listen \
+             there in its mode. Whatever this window decodes; nothing is sent anywhere",
+        );
+        if r.clicked() {
+            s.skim_keys = !s.skim_keys;
+        }
+        if let Some(k) = &d.keys {
+            let st = k.state();
+            ui.label(
+                RichText::new(format!(
+                    "{} signals tracked · {} read · {:.0} % of a core",
+                    st.tracks,
+                    st.spots.iter().filter(|p| p.call.is_some()).count(),
+                    100.0 * st.load
+                ))
+                .size(11.5)
+                .color(theme::TEXT()),
+            );
+        }
+    });
     if s.kind.family() == Family::Wsjt
         && let Some(mode) = s.kind.wsjt()
     {
@@ -1153,7 +1259,8 @@ fn body(
         _ => format!("receiver audio, 48 kHz · {} at {:.3} kHz", rx.mode.label(), rx.rx_hz / 1e3),
     };
     let dropped = d.worker.as_ref().map_or(0, |(_, w)| w.dropped())
-        + d.wide.as_ref().map_or(0, |w| w.dropped());
+        + d.wide.as_ref().map_or(0, |w| w.dropped())
+        + d.keys.as_ref().map_or(0, |k| k.dropped());
     let mut line = format!("From the {src} · {dropped} blocks dropped");
     if let Some(w) = &d.wide {
         let dials: Vec<String> = w.dials().iter().map(|&h| format!("{:.3}", h / 1e6)).collect();
@@ -1562,6 +1669,7 @@ mod tests {
             text: "CQ JA1XYZ PM95".into(),
             snr: -15.0,
             utc: 1000.0,
+            key: None,
         }]
         .into();
         let f = skim_feed(&rows, &wide, 15.0, 1016.0);

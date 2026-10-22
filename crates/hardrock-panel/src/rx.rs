@@ -304,10 +304,12 @@ impl Taps {
 /// decision 26).
 /// The demo band: the `sdr` crate's made-up stations, and FT8 on 14.074 MHz
 /// whenever the span reaches it (decision 54), so DECODE and the skimmer's
-/// labels have something real to decode with no radio.
+/// labels have something real to decode with no radio; and a few CW,
+/// PSK31 and RTTY stations for the keyboard skimmer (decision 56).
 struct DemoBand {
     band: sdr::SyntheticSource,
     ft8: decoders::demo::DemoFt8,
+    keys: decoders::demo::DemoKeys,
 }
 
 impl sdr::IqSource for DemoBand {
@@ -327,6 +329,7 @@ impl sdr::IqSource for DemoBand {
             // Paced to real time: the block's last sample is now.
             let utc = utc_now() - (n / 2) as f64 / rate;
             self.ft8.add(&mut out[..n], rate, self.band.center_hz(), utc);
+            self.keys.add(&mut out[..n], rate, self.band.center_hz(), utc);
         }
         n
     }
@@ -505,6 +508,7 @@ impl Rx {
                 let src = DemoBand {
                     band: sdr::SyntheticSource::demo(s.rate as f64, centre),
                     ft8: decoders::demo::DemoFt8::new(),
+                    keys: decoders::demo::DemoKeys::new(),
                 };
                 self.spawn(Box::new(src), scope);
                 self.running = IqChoice::Demo;
