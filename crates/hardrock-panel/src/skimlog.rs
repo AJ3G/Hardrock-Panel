@@ -92,6 +92,7 @@ pub struct SkimLog {
 }
 
 impl SkimLog {
+    #[cfg(test)]
     pub fn lines(&self) -> &VecDeque<Line> {
         &self.lines
     }

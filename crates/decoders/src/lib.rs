@@ -10,6 +10,7 @@
 //! * [`keyskim`]: the keyboard skimmer, CW, PSK31 and RTTY across the I/Q,
 //!   with [`morse`] (CW's timing decoder) and [`callsign`].
 //! * [`demo`]: FT8, CW, PSK31 and RTTY stations for the panel's demo band.
+pub mod autoid;
 pub mod callsign;
 pub mod demo;
 pub mod freq;

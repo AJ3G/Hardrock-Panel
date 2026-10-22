@@ -521,6 +521,16 @@ For the WSJT modes:
   (WIDE), and SKIM CW/PSK/RTTY's stations (SKIM), each with its UTC, mode,
   RF, SNR and message. The chips across the top show one mode; COPY ALL
   copies the list. Every line is also kept in `SKIM.TXT`, beside `ALL.TXT`.
+- **AUTO ID** names the mode of the signal under the receiver's passband.
+  Set the passband over one signal and press it. After about 6 s it shows
+  what it measured (centre, width, tones and shift, keying speed), and below
+  that its guesses, best first, each with a score and why: RTTY, PSK31,
+  FT8, FT4, JT65, JT9, WSPR, MSK144, JTTY, NAVTEX, Olivia, THOR, Packet,
+  CW, SSTV, WEFAX, voice and more. A guess whose decoder read something is
+  near-certain and shows what it read. Give it 15 to 30 s for the slotted
+  modes. **USE** switches DECODE to that mode at that audio frequency
+  (Packet, CW and voice have no decoder here, so no USE). Moving the
+  passband or the dial starts it over.
 - **The offset bar on a station:** when the red bar crosses a labelled
   station's signal, that label's leader, pointer and box, and its tick on
   the spectrum, turn red, and the bar's readout adds its call.

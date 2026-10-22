@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use datalink::{LinkConfig, LinkEvent, LinkMode, LinkWorker, Tuning};
+use decoders::autoid::{AutoId, Pick, Report};
 use decoders::keyskim::{KeySkimConfig, KeySkimWorker, KeySpot};
 use decoders::modem::wefax::{Ioc, Lpm};
 use decoders::skim::WideSkimmer;
@@ -397,6 +398,59 @@ pub(crate) struct Decode {
     keys_cfg: Option<KeySkimConfig>,
     /// SKIM LOG: every mode skimmed, with its mode (decision 60).
     pub(crate) skim_log: SkimLog,
+    /// AUTO ID (decision 61): asked for, and at work.
+    pub(crate) autoid_on: bool,
+    autoid: Option<AutoIdRun>,
+}
+
+/// AUTO ID listening to one passband on one dial.
+struct AutoIdRun {
+    id: Arc<AutoId>,
+    /// The audio passband and the receiver's dial it was started on: moved,
+    /// it starts again on what is there now.
+    band: (f32, f32),
+    rx_hz: f64,
+    report: Report,
+    at: Instant,
+}
+
+/// The audio band, Hz, a receiver passband (Hz from the dial, below it
+/// negative on LSB) is heard in.
+fn audio_band(pb: (f32, f32)) -> (f32, f32) {
+    let (lo, hi) = (pb.0.min(pb.1), pb.0.max(pb.1));
+    if lo >= 0.0 {
+        (lo, hi)
+    } else if hi <= 0.0 {
+        (-hi, -lo)
+    } else {
+        (0.0, (-lo).max(hi))
+    }
+}
+
+/// DECODE's mode and set-up for what AUTO ID picked: (kind, audio Hz,
+/// reversed).
+fn kind_of_pick(p: Pick) -> Option<(Kind, Option<f64>, bool)> {
+    Some(match p {
+        Pick::Wsjt(m) => (
+            Kind::GROUPS
+                .iter()
+                .flat_map(|(_, k)| k.iter().copied())
+                .find(|k| k.wsjt() == Some(m))?,
+            None,
+            false,
+        ),
+        Pick::Jtty => (Kind::Jtty, None, false),
+        Pick::Text(TextMode::Rtty { center_hz, reverse, .. }) => {
+            (Kind::Rtty, Some(center_hz), reverse)
+        }
+        Pick::Text(TextMode::Psk31 { carrier_hz }) => (Kind::Psk31, Some(carrier_hz), false),
+        Pick::Text(TextMode::Navtex { reverse }) => (Kind::Navtex, None, reverse),
+        Pick::Text(TextMode::Olivia { audio_hz, .. }) => (Kind::Olivia, Some(audio_hz), false),
+        Pick::Text(TextMode::Thor { audio_hz, .. }) => (Kind::Thor, Some(audio_hz), false),
+        Pick::Kind("SSTV") => (Kind::Sstv, None, false),
+        Pick::Kind("WEFAX") => (Kind::Wefax, None, false),
+        _ => return None,
+    })
 }
 
 /// The most of the wide skimmer's decodes kept.
@@ -432,9 +486,50 @@ impl Decode {
         taps.set_audio("decode", None);
         taps.set_iq("decode", None);
         taps.set_iq("skim", None);
+        self.stop_autoid(taps);
         self.worker = None;
         self.wide.clear();
         self.started_utc = None;
+    }
+
+    fn stop_autoid(&mut self, taps: &rx::Taps) {
+        if self.autoid.take().is_some() {
+            taps.set_audio("autoid", None);
+        }
+    }
+
+    /// AUTO ID (decision 61): listen to the receiver's passband while it is
+    /// asked for, and start again when the passband or the dial moves.
+    fn autoid_frame(&mut self, st: &StationSettings, rx: &Rx, on: bool) {
+        if !(on && self.autoid_on) {
+            self.autoid_on &= on;
+            self.stop_autoid(&rx.taps);
+            return;
+        }
+        let band = audio_band(rx.passband);
+        let moved = self.autoid.as_ref().is_some_and(|r| {
+            (r.band.0 - band.0).abs() > 1.0
+                || (r.band.1 - band.1).abs() > 1.0
+                || (r.rx_hz - rx.rx_hz).abs() > 5.0
+        });
+        if moved {
+            self.stop_autoid(&rx.taps);
+        }
+        if self.autoid.is_none() {
+            let calls: Vec<String> = st.call().into_iter().collect();
+            tracing::info!("AUTO ID started on {:.0}–{:.0} Hz", band.0, band.1);
+            let id = AutoId::new(sdr::AUDIO_RATE, band, &calls);
+            let f = id.clone();
+            rx.taps.set_audio("autoid", Some(Box::new(move |a, utc| f.push(a, utc))));
+            let report = id.report();
+            self.autoid = Some(AutoIdRun { id, band, rx_hz: rx.rx_hz, report, at: Instant::now() });
+        }
+        if let Some(r) = self.autoid.as_mut()
+            && r.at.elapsed().as_secs_f32() >= 0.5
+        {
+            r.report = r.id.report();
+            r.at = Instant::now();
+        }
     }
 
     /// The scope's skimmer labels (decision 54): the newest decodes, with
@@ -624,6 +719,7 @@ impl Decode {
         self.spots.frame(&s.spots, me(st).as_ref());
         self.keys_frame(s, rx, at, s.running && rx.active());
         self.skim_log_frame(at);
+        self.autoid_frame(st, rx, s.running && rx.active());
         let taps = &rx.taps;
         if !s.running || !rx.active() {
             if self.worker.is_some() {
@@ -1172,6 +1268,88 @@ pub(crate) fn hms(utc: f64) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
 }
 
+/// AUTO ID (decision 61): its key, and while it listens what it has
+/// measured and its guesses, best first, each with USE where DECODE has the
+/// mode.
+fn autoid_box(ui: &mut egui::Ui, d: &mut Decode, s: &mut DecodeSettings, rx: &Rx) {
+    ui.horizontal_wrapped(|ui| {
+        let r = chrome::chip(ui, d.autoid_on, "AUTO ID").on_hover_text(
+            "Put the receiver's passband over one signal and press: it listens to the audio \
+             inside the passband, measures its width, tones, shift and keying speed, tries \
+             every decoder that could fit, and lists what it most likely is. USE switches \
+             DECODE to that mode there. Move the passband or the dial and it starts again",
+        );
+        if r.clicked() {
+            d.autoid_on = !d.autoid_on;
+        }
+        if d.autoid_on && d.autoid.is_none() {
+            ui.label(RichText::new("Starts with the receiver").size(11.5).color(theme::TEXT()));
+        }
+    });
+    let Some(run) = &d.autoid else { return };
+    let rep = &run.report;
+    let mut info =
+        format!("Listening {:.0} s to {:.0}–{:.0} Hz", rep.heard_s, run.band.0, run.band.1);
+    match &rep.features {
+        Some(f) => info.push_str(&format!(" · {}", decoders::autoid::describe(f))),
+        None if rep.heard_s < 6.0 => info.push_str(" · measuring after 6 s"),
+        None => info.push_str(" · no signal found in the passband"),
+    }
+    ui.label(RichText::new(info).size(11.5).color(theme::TEXT()));
+    let rx_hz = rx.rx_hz;
+    let mut used = None;
+    egui::Grid::new("autoid-list").num_columns(4).spacing([10.0, 3.0]).striped(true).show(
+        ui,
+        |ui| {
+            for (i, c) in rep.candidates.iter().enumerate() {
+                let name = RichText::new(c.name).size(12.5);
+                ui.label(if i == 0 {
+                    name.color(theme::TEXT_STRONG()).strong()
+                } else {
+                    name.color(theme::TEXT())
+                });
+                ui.label(
+                    RichText::new(format!("{:.0} %", 100.0 * c.score))
+                        .size(12.0)
+                        .color(theme::TEXT()),
+                );
+                let mut why = c.why.clone();
+                if let Some(t) = c.decoded.first() {
+                    let t: String = t.trim().chars().take(60).collect();
+                    why.push_str(&format!(" · read: {t}"));
+                }
+                ui.label(RichText::new(why).size(11.5).color(theme::TEXT()));
+                match c.pick.and_then(kind_of_pick) {
+                    Some(k) => {
+                        if chrome::chip(ui, false, "USE")
+                            .on_hover_text(format!("Decode {} here", k.0.label()))
+                            .clicked()
+                        {
+                            used = Some(k);
+                        }
+                    }
+                    None => {
+                        ui.label(RichText::new("no decoder").size(11.0).weak());
+                    }
+                }
+                ui.end_row();
+            }
+        },
+    );
+    if rep.candidates.is_empty() && rep.features.is_some() {
+        ui.label(RichText::new("Nothing it knows fits yet.").weak());
+    }
+    if let Some((kind, hz, reverse)) = used {
+        tracing::info!("AUTO ID: {} picked at {:.0} Hz", kind.label(), rx_hz);
+        s.kind = kind;
+        if let Some(hz) = hz {
+            s.audio_hz = hz.round();
+        }
+        s.reverse = reverse;
+        d.autoid_on = false;
+    }
+}
+
 fn caption(ui: &mut egui::Ui, t: &str) {
     ui.label(RichText::new(t.to_uppercase()).size(10.5).color(theme::CYAN_DIM()).strong());
 }
@@ -1425,6 +1603,7 @@ fn body(
             );
         }
     });
+    autoid_box(ui, d, s, rx);
     if s.kind.family() == Family::Wsjt
         && let Some(mode) = s.kind.wsjt()
     {
@@ -1818,6 +1997,29 @@ mod tests {
         assert_eq!(Kind::of_digi(digimodes::digi("JS8").unwrap()), None);
         assert_eq!(Kind::Olivia.audio_passband(1500.0), Some((1150.0, 1850.0)));
         assert_eq!(Kind::Ft8.audio_passband(1500.0), None);
+    }
+
+    #[test]
+    fn auto_id_hears_the_passband_on_either_sideband_and_its_picks_map_to_decode() {
+        assert_eq!(audio_band((300.0, 2700.0)), (300.0, 2700.0));
+        assert_eq!(audio_band((-2700.0, -300.0)), (300.0, 2700.0));
+        assert_eq!(audio_band((-3000.0, 3000.0)), (0.0, 3000.0));
+        assert_eq!(kind_of_pick(Pick::Wsjt(WsjtMode::Ft4)), Some((Kind::Ft4, None, false)));
+        assert_eq!(
+            kind_of_pick(Pick::Text(TextMode::Rtty {
+                center_hz: 2125.0,
+                baud: 45.45,
+                shift_hz: 170.0,
+                reverse: true
+            })),
+            Some((Kind::Rtty, Some(2125.0), true))
+        );
+        assert_eq!(
+            kind_of_pick(Pick::Text(TextMode::Psk31 { carrier_hz: 1000.0 })),
+            Some((Kind::Psk31, Some(1000.0), false))
+        );
+        assert_eq!(kind_of_pick(Pick::Kind("SSTV")), Some((Kind::Sstv, None, false)));
+        assert_eq!(kind_of_pick(Pick::Kind("Packet")), None);
         // An older settings file snaps.
         let s: DecodeSettings = serde_json::from_str("{\"running\": true}").unwrap();
         assert!(s.snap && s.running);
