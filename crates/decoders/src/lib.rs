@@ -7,11 +7,16 @@
 //! * [`resample`]: from the `sdr` crate's 48 kHz audio and wide I/Q to the
 //!   rates the decoders want.
 //! * [`skim`]: the wide skimmer, FT8 or FT4 on every other dial in the I/Q.
-//! * [`demo`]: FT8 stations for the panel's demo band.
+//! * [`keyskim`]: the keyboard skimmer, CW, PSK31 and RTTY across the I/Q,
+//!   with [`morse`] (CW's timing decoder) and [`callsign`].
+//! * [`demo`]: FT8, CW, PSK31 and RTTY stations for the panel's demo band.
+pub mod callsign;
 pub mod demo;
 pub mod freq;
 pub mod image;
+pub mod keyskim;
 pub mod modem;
+pub mod morse;
 pub mod resample;
 pub mod skim;
 pub mod slot;
