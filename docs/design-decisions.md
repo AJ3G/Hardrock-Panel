@@ -715,3 +715,13 @@ AJ3G: "Yes do skimmers", meaning SDRoxide's wide CW, PSK31 and RTTY skimmers.
 - **Toggle.** SKIM CW/PSK/RTTY in DECODE, off to start, saved, in any mode, while DECODE is open. Nothing it reads goes to PSK Reporter, WSPRnet, ALL.TXT or WSJT-X UDP.
 - **Demo.** The demo band has made-up CW, PSK31 and RTTY stations on 20 m (`decoders::demo::DemoKeys`).
 
+## 58. JTTY: WSJT-X 3.2's keyboard mode, from mfsk-core (22 Oct 2026)
+
+AJ3G: "We need to get a JTTY decoder … I want the best JTTY decoder available", and "use those frequency assignments and bandwidths to set the scope when that mode is invoked".
+
+- **The decoder.** mfsk-core's `jtty` (0.12 and later), by the author whose crate the panel already uses for every WSJT mode. It is a port of WSJT-X 3.2.0-rc1's `lib/jtty/`, and its author reports it agrees with WSJT-X's own decoder on every one of 360 trials, 7 to 9 times faster. The other candidates were weaker. An iPhone port (morria/jtty) has no licence. SDRoxide's PR 597 is unmerged and has no off-air decode. (Research: `notes/jtty-research.md` in the project files.)
+- **Two mfsk-cores.** The rest of the WSJT modes stay on mfsk-core 0.10, whose decode API later versions replaced. JTTY comes from 0.13.1 under the name `mfsk-jtty`, GPL-3.0-or-later as 0.10 is. Moving everything to one version is a separate change, with FT8, WSPR and the rest checked against their samples.
+- **Receiving.** `decoders::JttyDecoder` puts the receiver's 48 kHz audio into mfsk-core's `jtty::rx::Stream` at 12 kHz, on a thread behind the usual dropping queue. The stream times frames by its sample count, so a dropped block is filled with silence; a gap over 5 s starts it afresh. The defaults are WSJT-X's: Rx 1500 Hz ±50 (DECODE's Rx), side channels, 200 to 2800 Hz searched, subtraction and the re-sweep on. Each message is one DECODE line, rewritten as its frames come, ending "…" until its end-of-message frame. Tested on mfsk-core's own transmitter in noise (`a_jtty_over_in_the_receivers_audio_is_read_whole`). WSJT-X's sample recording couldn't be downloaded from this container; mfsk-core's own tests decode it.
+- **The dials.** WSJT-X 3.2's preliminary JTTY frequencies (DXZone, Sept 2026): 1.838, 3.575, 7.090, 10.140, 14.090, 18.100, 21.090, 24.920, 28.090, 50.160 and 144.160 MHz. They are a DATA key and band-plan markers on the scope, and DECODE's snap goes to them: USB, 200 to 2800 Hz. The keyboard skimmer leaves them out, as it does the other WSJT sub-bands.
+- **Not yet.** Transmit, skimmer labels for JTTY, ALL.TXT, and N1MM's MMTTY-style link.
+

@@ -26,7 +26,7 @@ pub mod wsjt;
 pub use freq::FreqCal;
 pub use image::{ImageUpdate, RgbaImage};
 pub use worker::{
-    ImageCmd, ImageDecoder, ImageEvent, ImageMode, TextDecoder, TextEvent, TextMode, WsjtConfig,
-    WsjtDecoder, WsjtSlot,
+    ImageCmd, ImageDecoder, ImageEvent, ImageMode, JttyDecoder, JttyEvent, TextDecoder, TextEvent,
+    TextMode, WsjtConfig, WsjtDecoder, WsjtSlot,
 };
 pub use wsjt::{Fst4Period, Q65Mode, WsjtDecode, WsjtMode, WsprSpot};
