@@ -22,6 +22,9 @@ use crate::wsjt::WsjtMode;
 
 /// The demo's FT8 dial, Hz.
 pub const DEMO_DIAL_HZ: f64 = 14_074_000.0;
+/// The demo's FT4 dial, Hz: on 20 m beside FT8, for SKIM WIDE (AJ3G: a
+/// spot of the other mode to click with no FT4 on the band).
+pub const DEMO_FT4_DIAL_HZ: f64 = 14_080_000.0;
 
 /// One made-up station.
 struct Station {
@@ -34,7 +37,7 @@ struct Station {
     /// What it sends, slot after slot in turn: the three words of each.
     messages: &'static [[&'static str; 3]],
     /// Its tones for each message.
-    tones: Vec<[u8; 79]>,
+    tones: Vec<Vec<u8>>,
     phase: f64,
 }
 
@@ -48,13 +51,20 @@ const STATIONS: &[(f64, f32, bool, &[[&str; 3]])] = &[
     (2475.0, -74.0, false, &[["CQ", "JA1XYZ", "PM95"], ["CQ", "JA1XYZ", "PM95"]]),
 ];
 
-/// FT8's symbol length, s; its 79 symbols, and where they start in a slot.
-const SYMBOL_S: f64 = 0.16;
+/// Where a transmission starts in its slot, s, as WSJT-X starts them.
 const START_S: f64 = 0.5;
 
-/// The demo band's FT8 stations.
+const FT4_STATIONS: &[(f64, f32, bool, &[[&str; 3]])] = &[
+    (850.0, -78.0, false, &[["CQ", "W1XYZ", "FN31"], ["CQ", "W1XYZ", "FN31"]]),
+    (1450.0, -82.0, true, &[["CQ", "K5ABC", "EM12"], ["W1XYZ", "K5ABC", "EM12"]]),
+    (2100.0, -80.0, false, &[["CQ", "DL1ABC", "JO62"], ["CQ", "DL1ABC", "JO62"]]),
+];
+
+/// The demo band's FT8 (or FT4) stations.
 pub struct DemoFt8 {
     stations: Vec<Station>,
+    mode: WsjtMode,
+    dial_hz: f64,
 }
 
 impl Default for DemoFt8 {
@@ -65,7 +75,20 @@ impl Default for DemoFt8 {
 
 impl DemoFt8 {
     pub fn new() -> Self {
-        let stations = STATIONS
+        Self::of(WsjtMode::Ft8, DEMO_DIAL_HZ, STATIONS)
+    }
+
+    /// FT4 on [`DEMO_FT4_DIAL_HZ`].
+    pub fn ft4() -> Self {
+        Self::of(WsjtMode::Ft4, DEMO_FT4_DIAL_HZ, FT4_STATIONS)
+    }
+
+    fn of(
+        mode: WsjtMode,
+        dial_hz: f64,
+        list: &[(f64, f32, bool, &'static [[&'static str; 3]])],
+    ) -> Self {
+        let stations = list
             .iter()
             .map(|&(audio_hz, level_dbfs, odd, messages)| Station {
                 audio_hz,
@@ -77,13 +100,16 @@ impl DemoFt8 {
                     .map(|[a, b, c]| {
                         let bits = mfsk_core::msg::wsjt77::pack77(a, b, c)
                             .expect("the demo's messages pack");
-                        mfsk_core::ft8::wave_gen::message_to_tones(&bits)
+                        match mode {
+                            WsjtMode::Ft4 => mfsk_core::ft4::encode::message_to_tones(&bits),
+                            _ => mfsk_core::ft8::wave_gen::message_to_tones(&bits).to_vec(),
+                        }
                     })
                     .collect(),
                 phase: 0.0,
             })
             .collect();
-        DemoFt8 { stations }
+        DemoFt8 { stations, mode, dial_hz }
     }
 
     /// The messages it sends, as the decoder prints them.
@@ -95,10 +121,17 @@ impl DemoFt8 {
     /// Hz, its first sample at `utc`). Stations outside the span are left
     /// out.
     pub fn add(&mut self, iq: &mut [f32], rate: f64, centre: f64, utc: f64) {
-        let period = WsjtMode::Ft8.period_s();
+        let period = self.mode.period_s();
+        // FT8: 79 symbols of 0.16 s, 6.25 Hz apart; FT4: 103 of 0.048 s,
+        // 20.833 Hz apart.
+        let (symbols, symbol_s) = match self.mode {
+            WsjtMode::Ft4 => (103usize, 0.048),
+            _ => (79usize, 0.16),
+        };
+        let spacing = 1.0 / symbol_s;
         let n = iq.len() / 2;
         for st in &mut self.stations {
-            let off = DEMO_DIAL_HZ + st.audio_hz - centre;
+            let off = self.dial_hz + st.audio_hz - centre;
             if off.abs() > 0.48 * rate {
                 continue;
             }
@@ -109,8 +142,8 @@ impl DemoFt8 {
                 if ((slot as i64).rem_euclid(2) == 1) != st.odd {
                     continue;
                 }
-                let pos = (t - slot * period - START_S) / SYMBOL_S;
-                if !(0.0..79.0).contains(&pos) {
+                let pos = (t - slot * period - START_S) / symbol_s;
+                if !(0.0..symbols as f64).contains(&pos) {
                     continue;
                 }
                 let k = pos as usize;
@@ -122,11 +155,11 @@ impl DemoFt8 {
                 // quarter, and the whole signal up and down over its first
                 // and last, as FT8's Gaussian shaping and ramps do: hard
                 // steps splatter, and the decoder reads the splatter.
-                let tone = |j: usize| tones[j.min(78)] as f64;
+                let tone = |j: usize| tones[j.min(symbols - 1)] as f64;
                 let ease = ((frac - 0.75) / 0.25).clamp(0.0, 1.0);
                 let ease = 0.5 - 0.5 * (PI * ease).cos();
-                let f = off + 6.25 * (tone(k) + (tone(k + 1) - tone(k)) * ease);
-                let ramp = (pos / 0.25).min((79.0 - pos) / 0.25).min(1.0);
+                let f = off + spacing * (tone(k) + (tone(k + 1) - tone(k)) * ease);
+                let ramp = (pos / 0.25).min((symbols as f64 - pos) / 0.25).min(1.0);
                 let ramp = (0.5 - 0.5 * (PI * ramp).cos()) as f32;
                 st.phase = (st.phase + 2.0 * PI * f / rate) % (2.0 * PI);
                 iq[2 * i] += amp * ramp * st.phase.cos() as f32;
@@ -364,10 +397,25 @@ impl DemoKeys {
     /// Add them to `iq` (interleaved, at `rate`, around `centre` Hz, its
     /// first sample at `utc`).
     pub fn add(&mut self, iq: &mut [f32], rate: f64, centre: f64, utc: f64) {
+        self.add_moved(iq, rate, centre, utc, |_| Some(0.0));
+    }
+
+    /// The same, each station moved by `shift(mode)` Hz from its place on
+    /// 20 m (to another band's), or left out where that is `None`.
+    pub fn add_moved(
+        &mut self,
+        iq: &mut [f32],
+        rate: f64,
+        centre: f64,
+        utc: f64,
+        shift: impl Fn(KeyMode) -> Option<f64>,
+    ) {
         let mut z: Vec<Complex32> =
             iq.chunks_exact(2).map(|p| Complex32::new(p[0], p[1])).collect();
         for s in &mut self.stations {
-            s.add_iq(&mut z, rate, centre, utc);
+            if let Some(d) = shift(s.mode) {
+                s.add_iq(&mut z, rate, centre - d, utc);
+            }
         }
         for (p, z) in iq.chunks_exact_mut(2).zip(z) {
             p[0] = z.re;
@@ -444,6 +492,46 @@ mod tests {
             .filter(|s| !s.2)
             .map(|s| s.3[((slot / 15.0) as i64 / 2) as usize % s.3.len()].join(" "))
             .collect();
+        want.sort();
+        assert_eq!(heard, want);
+    }
+
+    #[test]
+    fn the_demo_ft4_stations_on_14_080_are_decoded() {
+        // An even FT4 slot (7.5 s), through SKIM WIDE's lane and decoder.
+        let rate = 48_000.0;
+        let centre = DEMO_DIAL_HZ + 10_000.0;
+        let mut d = DemoFt8::ft4();
+        let sk = crate::skim::WideSkimmer::spawn(WsjtMode::Ft4, &[DEMO_FT4_DIAL_HZ], &[]);
+        let slot = 1_700_000_040.0;
+        assert_eq!((slot / 7.5) as i64 % 2, 0);
+        let start = slot - 1.0;
+        let mut rng = 7u32;
+        for b in 0..(10 * 10) {
+            let utc = start + b as f64 * 0.1;
+            let mut iq: Vec<f32> = (0..4800 * 2)
+                .map(|_| {
+                    rng ^= rng << 13;
+                    rng ^= rng >> 17;
+                    rng ^= rng << 5;
+                    (rng as f32 / u32::MAX as f32 - 0.5) * 2e-3
+                })
+                .collect();
+            d.add(&mut iq, rate, centre, utc);
+            sk.push_iq(&iq, rate, centre, utc);
+        }
+        let t = std::time::Instant::now();
+        let mut got = Vec::new();
+        while got.is_empty() && t.elapsed().as_secs() < 90 {
+            got.extend(sk.results().into_iter().filter(|s| !s.slot.decodes.is_empty()));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let mut heard: Vec<String> =
+            got.iter().flat_map(|s| s.slot.decodes.iter().map(|d| d.message.clone())).collect();
+        heard.sort();
+        let turn = ((slot / 7.5) as i64 / 2) as usize;
+        let mut want: Vec<String> =
+            FT4_STATIONS.iter().filter(|s| !s.2).map(|s| s.3[turn % s.3.len()].join(" ")).collect();
         want.sort();
         assert_eq!(heard, want);
     }

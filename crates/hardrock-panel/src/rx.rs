@@ -302,14 +302,34 @@ impl Taps {
 
 /// The system clock, UTC seconds since 1970 (NTP/GPS-disciplined at AJ3G's;
 /// decision 26).
-/// The demo band: the `sdr` crate's made-up stations, and FT8 on 14.074 MHz
-/// whenever the span reaches it (decision 54), so DECODE and the skimmer's
-/// labels have something real to decode with no radio; and a few CW,
-/// PSK31 and RTTY stations for the keyboard skimmer (decision 56).
+/// The demo band: the `sdr` crate's made-up stations, and FT8 (decision 54)
+/// and FT4 for DECODE and the skimmer's labels to decode with no radio; and
+/// a few CW, PSK31 and RTTY stations for the keyboard skimmer (decision 56).
+/// They are written for 20 m and moved to whichever band the span is on
+/// (AJ3G: "we should be able to see demo on all bands"), each mode to that
+/// band's own dial; a mode with none there is left out.
 struct DemoBand {
     band: sdr::SyntheticSource,
     ft8: decoders::demo::DemoFt8,
+    ft4: decoders::demo::DemoFt8,
     keys: decoders::demo::DemoKeys,
+}
+
+/// How far the demo's 20 m stations of mode `name` (`at` on 20 m) move for
+/// the band nearest `centre`: to that band's dial of the mode, or for CW the
+/// same distance up from the band's foot. `None`: no dial of it there.
+fn demo_shift(name: &str, at: f64, centre: f64) -> Option<f64> {
+    use crate::scope::{bandplan, digimodes};
+    let band = bandplan::nearest_band(centre);
+    if name == "CW" {
+        return Some(band.lo - 14_000_000.0);
+    }
+    let dial = digimodes::digi(name)?
+        .dials
+        .iter()
+        .map(|&d| d as f64)
+        .find(|&d| d >= band.lo && d <= band.hi)?;
+    Some(dial - at)
 }
 
 impl sdr::IqSource for DemoBand {
@@ -328,8 +348,19 @@ impl sdr::IqSource for DemoBand {
             let rate = self.band.sample_rate();
             // Paced to real time: the block's last sample is now.
             let utc = utc_now() - (n / 2) as f64 / rate;
-            self.ft8.add(&mut out[..n], rate, self.band.center_hz(), utc);
-            self.keys.add(&mut out[..n], rate, self.band.center_hz(), utc);
+            let c = self.band.center_hz();
+            use decoders::demo::{DEMO_DIAL_HZ, DEMO_FT4_DIAL_HZ};
+            if let Some(d) = demo_shift("FT8", DEMO_DIAL_HZ, c) {
+                self.ft8.add(&mut out[..n], rate, c - d, utc);
+            }
+            if let Some(d) = demo_shift("FT4", DEMO_FT4_DIAL_HZ, c) {
+                self.ft4.add(&mut out[..n], rate, c - d, utc);
+            }
+            self.keys.add_moved(&mut out[..n], rate, c, utc, |m| match m {
+                decoders::keyskim::KeyMode::Cw => demo_shift("CW", 0.0, c),
+                decoders::keyskim::KeyMode::Psk => demo_shift("PSK31", 14_070_000.0, c),
+                decoders::keyskim::KeyMode::Rtty => demo_shift("RTTY", 14_083_000.0, c),
+            });
         }
         n
     }
@@ -511,6 +542,7 @@ impl Rx {
                 let src = DemoBand {
                     band: sdr::SyntheticSource::demo(s.rate as f64, centre),
                     ft8: decoders::demo::DemoFt8::new(),
+                    ft4: decoders::demo::DemoFt8::ft4(),
                     keys: decoders::demo::DemoKeys::new(),
                 };
                 self.spawn(Box::new(src), scope);
@@ -1386,6 +1418,95 @@ mod tests {
         }
         let texts: Vec<_> = d.rows.iter().map(|r| r.text.clone()).collect();
         assert!(texts.iter().any(|t| t == "CQ K1ABC FN42"), "{texts:?} {:?}", d.error);
+    }
+
+    /// The demo band end to end, as the panel runs it: FT8 decoded on
+    /// `dial` and, with SKIM CW/PSK/RTTY, the keyboard stations read.
+    fn demo_band_decodes(centre: f64, dial: f64, rate: u32) -> (Vec<String>, Vec<String>) {
+        let scope = Scope::new(None, crate::scope::ScopeSettings::default());
+        let mut s = RxSettings { source: IqChoice::Demo, rate, ..RxSettings::default() };
+        let mut rx = Rx::new(&s);
+        rx.centre = centre;
+        rx.rx_hz = dial;
+        rx.passband = (100.0, 3_000.0);
+        rx.start(&s, &scope, now(false));
+        let ds = crate::decode::DecodeSettings {
+            kind: crate::decode::Kind::Ft8,
+            running: true,
+            skim_keys: true,
+            ..Default::default()
+        };
+        let st = crate::station::StationSettings::default();
+        let at = crate::decode::Where { dial_hz: dial, lsb: false, xvtr_hz: 0.0, ppm: 0.0 };
+        let mut d = crate::decode::Decode::default();
+        let mut keys = Vec::new();
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(40) && (d.rows.is_empty() || keys.is_empty()) {
+            rx.frame(&mut s, &scope, now(false));
+            d.frame(&ds, &st, &rx, at, None);
+            if let Some(f) = d.skim_feed(&ds) {
+                keys = f.spots.iter().filter(|p| p.key.is_some()).map(|p| p.call.clone()).collect();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        (d.rows.iter().map(|r| r.text.clone()).collect(), keys)
+    }
+
+    #[test]
+    #[ignore = "real time, up to 40 s: cargo test -- --ignored demo_band"]
+    fn demo_band_on_20_m_decodes() {
+        let (ft8, keys) = demo_band_decodes(14_050_000.0, 14_074_000.0, 192_000);
+        eprintln!("FT8 {ft8:?}\nkeys {keys:?}");
+        assert!(!ft8.is_empty() && !keys.is_empty());
+    }
+
+    #[test]
+    #[ignore = "real time, up to 60 s: cargo test -- --ignored demo_band"]
+    fn demo_band_followed_from_40_m_to_20_m_decodes() {
+        let scope = Scope::new(None, crate::scope::ScopeSettings::default());
+        let mut s = RxSettings { source: IqChoice::Demo, rate: 192_000, ..RxSettings::default() };
+        let mut rx = Rx::new(&s);
+        rx.centre = 7_050_000.0;
+        rx.rx_hz = 7_074_000.0;
+        rx.passband = (100.0, 3_000.0);
+        rx.start(&s, &scope, now(false));
+        let ds = crate::decode::DecodeSettings {
+            kind: crate::decode::Kind::Ft8,
+            running: true,
+            ..Default::default()
+        };
+        let st = crate::station::StationSettings::default();
+        let mut d = crate::decode::Decode::default();
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(3) {
+            rx.frame(&mut s, &scope, now(false));
+            let at = crate::decode::Where { dial_hz: rx.rx_hz, lsb: false, xvtr_hz: 0.0, ppm: 0.0 };
+            d.frame(&ds, &st, &rx, at, None);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // To 20 m: the receiver, then the centre after it, as the scope asks.
+        rx.tune(14_074_000.0, false);
+        rx.recentre(14_074_000.0, now(false));
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(50)
+            && !d.rows.iter().any(|r| r.rf_hz.is_some_and(|f| f > 14e6))
+        {
+            rx.frame(&mut s, &scope, now(false));
+            let at = crate::decode::Where { dial_hz: rx.rx_hz, lsb: false, xvtr_hz: 0.0, ppm: 0.0 };
+            d.frame(&ds, &st, &rx, at, None);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let rows: Vec<_> = d.rows.iter().map(|r| (r.rf_hz, r.text.clone())).collect();
+        eprintln!("{rows:?} centre {} rx {}", rx.centre(), rx.rx_hz);
+        assert!(d.rows.iter().any(|r| r.rf_hz.is_some_and(|f| f > 14e6)), "{rows:?}");
+    }
+
+    #[test]
+    #[ignore = "real time, up to 40 s: cargo test -- --ignored demo_band"]
+    fn demo_band_on_40_m_decodes() {
+        let (ft8, keys) = demo_band_decodes(7_050_000.0, 7_074_000.0, 192_000);
+        eprintln!("FT8 {ft8:?}\nkeys {keys:?}");
+        assert!(!ft8.is_empty() && !keys.is_empty());
     }
 
     #[test]
