@@ -78,7 +78,11 @@ pub struct Digi {
 }
 
 /// Every data mode, in the order the markers and keys list them.
-pub const DIGIS: &[Digi] = &[
+// A `static`, not a `const`: the scope and DECODE tell modes apart by
+// address (`std::ptr::eq`), and a `const` may be a different copy at each use,
+// as it was in the release build: picking a mode in one didn't show in the
+// other (AJ3G, 22 Oct 2026).
+pub static DIGIS: &[Digi] = &[
     Digi {
         name: "FT8",
         side: Side::Usb,

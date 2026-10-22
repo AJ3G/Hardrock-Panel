@@ -712,6 +712,11 @@ impl App {
         use radio::logic;
         use scope::digimodes::{Pick, mhz};
         let name = d.map(|d| d.name).or(kind.map(|k| k.label())).unwrap_or("That mode");
+        // The decoder follows the mode picked even when the radio can't be
+        // retuned now: the scope's DATA row and DECODE always agree.
+        if let Some(k) = kind {
+            self.saved.decode.kind = k;
+        }
         // SAFETY INTERLOCK (docs/safety-interlocks.md, #5 and #9): nothing
         // is retuned while the radio transmits; the link refuses it then
         // anyway (#5), and the receiver is where the radio transmits in
@@ -727,9 +732,6 @@ impl App {
         }
         let now = rx::RadioNow { link: self.rig.as_deref(), rig, transmitting };
         let cat = rig.filter(|r| r.connected);
-        if let Some(k) = kind {
-            self.saved.decode.kind = k;
-        }
         let Some(d) = d else {
             // Olivia, THOR, HFDL: no calling frequency, so only the passband.
             let pb = kind.and_then(|k| k.audio_passband(self.saved.decode.audio_hz));
@@ -1139,13 +1141,18 @@ impl eframe::App for App {
             if let Some(p) = o.pop {
                 self.saved.decode_popped = p;
             }
-            if let Some(k) = o.picked.filter(|_| self.saved.decode.snap) {
-                let (note, refused) =
-                    self.snap_to(k.digi(), Some(k), None, rig.as_ref(), transmitting, xvtr);
-                if !refused {
-                    self.scope.show_data(k.digi().filter(|d| d.key), Some(note.clone()));
+            if let Some(k) = o.picked {
+                // The scope's DATA row shows the mode picked here, whether
+                // or not the radio is taken to it.
+                let d = k.digi().filter(|d| d.key);
+                if self.saved.decode.snap {
+                    let (note, refused) =
+                        self.snap_to(k.digi(), Some(k), None, rig.as_ref(), transmitting, xvtr);
+                    self.scope.show_data(d, Some(note.clone()));
+                    self.decode.note = Some((note, refused));
+                } else {
+                    self.scope.show_data(d, None);
                 }
-                self.decode.note = Some((note, refused));
             }
             self.show_decode = open;
         }

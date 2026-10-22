@@ -1201,6 +1201,21 @@ fn picture(ui: &mut egui::Ui, d: &mut Decode) {
 mod tests {
     use super::*;
 
+    /// AJ3G: a mode picked in the scope didn't show in DECODE. Every DATA key
+    /// with a decoder finds it, and back.
+    #[test]
+    fn every_scope_mode_with_a_decoder_finds_it_and_back() {
+        for d in crate::scope::digimodes::keys() {
+            if let Some(k) = Kind::of_digi(d) {
+                assert!(std::ptr::eq(k.digi().unwrap(), d), "{}", d.name);
+            }
+        }
+        for name in ["FT8", "FT4", "WSPR"] {
+            let d = crate::scope::digimodes::digi(name).unwrap();
+            assert!(Kind::of_digi(d).is_some(), "{name}");
+        }
+    }
+
     #[test]
     fn every_mode_has_its_decoder() {
         for (_, kinds) in Kind::GROUPS {
