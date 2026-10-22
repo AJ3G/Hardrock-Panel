@@ -606,10 +606,18 @@ For the WSJT modes:
 ## The globe
 
 **GLOBE** opens a map of the world centred on your station (set your callsign
-and grid under SETTINGS → Station first). Drag to turn it, scroll to zoom;
-**HOME** brings your station back to the middle, **DX** centres the station
-picked and **PATH** the middle of its path. **GLOBE** and **FLAT** switch
+and grid under SETTINGS → Station first). Drag to turn it, and scroll or
+pinch to zoom; **HOME** brings your station back to the middle, **DX** centres
+the station picked and **PATH** the middle of its path, each with a smooth
+turn. Clicking a line in HEARD turns the map to show that path. **SPIN** turns
+the globe slowly east until you click it again. **GLOBE** and **FLAT** switch
 between the globe and a flat map. **POP OUT** puts it in a window of its own.
+
+- **SUN.** **LIVE** is the Sun where it is now. **PLAY** runs it on an hour a
+  second, so you can watch the grey line and the night go round, and the
+  slider moves it up to 12 hours either way; the time it shows is beside it.
+  Only the Sun moves: the paths, PROP, clouds, aurora and the clocks stay as
+  they are now. GLOBE always opens LIVE.
 
 - **Day and night.** The lit side is brighter and the night side dark, with
   city lights. The grey line, from sunset to the end of civil twilight, is a

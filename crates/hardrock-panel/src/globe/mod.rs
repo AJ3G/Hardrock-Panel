@@ -124,6 +124,19 @@ pub(crate) struct Globe {
     tex: Option<egui::TextureHandle>,
     painting: Option<mpsc::Receiver<Vec<u8>>>,
     painted: Option<(PicKey, f64)>,
+    /// Where the Sun is drawn, seconds from now (the SUN row); 0 is live.
+    /// Only the Sun moves: the paths, PROP, clouds and aurora stay as now.
+    sun_shift: f64,
+    /// PLAY: the Sun runs on an hour a second.
+    playing: bool,
+    /// SPIN: the globe turns east by itself.
+    spin: bool,
+    /// A smooth turn under way: from, to, and egui's clock when it began.
+    fly: Option<(V3, V3, f64)>,
+    /// The map is being dragged (SPIN waits).
+    held: bool,
+    /// egui's clock at the last frame, for PLAY, SPIN and the turns.
+    last_t: Option<f64>,
 }
 
 impl Default for Globe {
@@ -143,9 +156,22 @@ impl Default for Globe {
             tex: None,
             painting: None,
             painted: None,
+            sun_shift: 0.0,
+            playing: false,
+            spin: false,
+            fly: None,
+            held: false,
+            last_t: None,
         }
     }
 }
+
+/// How far the SUN row reaches either way, and how fast PLAY runs.
+const SHIFT_MAX_S: f64 = 12.0 * 3600.0;
+const PLAY_RATE: f64 = 3600.0;
+/// SPIN's turn, degrees a second, and how long a turn to a place takes.
+const SPIN_DEG_S: f64 = 6.0;
+const FLY_S: f64 = 0.7;
 
 /// What the operator asked of the rest of the panel.
 #[derive(Default)]
@@ -165,6 +191,36 @@ impl Globe {
     /// A station heard (or, from PSK Reporter, hearing AJ3G).
     pub(crate) fn add(&mut self, r: Reception) {
         self.history.add(r);
+    }
+
+    /// Turn smoothly to `to`, starting at egui's clock `t`.
+    fn fly_to(&mut self, to: LatLon, t: f64) {
+        self.fly = Some((vec_ll(self.centre), vec_ll(to), t));
+    }
+
+    /// Move PLAY's Sun, SPIN's turn and a turn under way on to egui's clock
+    /// `t`. True while any of them is moving, so the window keeps painting.
+    fn advance(&mut self, t: f64) -> bool {
+        let dt = self.last_t.map_or(0.0, |l| (t - l).clamp(0.0, 0.1));
+        self.last_t = Some(t);
+        if self.playing {
+            self.sun_shift += dt * PLAY_RATE;
+            // A day on is the same Sun, near enough: round to the start.
+            if self.sun_shift > SHIFT_MAX_S {
+                self.sun_shift -= 2.0 * SHIFT_MAX_S;
+            }
+        }
+        if let Some((a, b, t0)) = self.fly {
+            let k = ((t - t0) / FLY_S).clamp(0.0, 1.0);
+            let e = if k < 0.5 { 2.0 * k * k } else { 1.0 - (2.0 - 2.0 * k).powi(2) / 2.0 };
+            self.centre = sphere::ll_of(sphere::slerp(a, b, e));
+            if k >= 1.0 {
+                self.fly = None;
+            }
+        } else if self.spin && !self.held {
+            self.centre.lon = (self.centre.lon + SPIN_DEG_S * dt + 540.0).rem_euclid(360.0) - 180.0;
+        }
+        self.playing || self.spin || self.fly.is_some()
     }
 
     /// The window is closed: stop fetching.
@@ -221,6 +277,7 @@ impl Globe {
 
     /// Paint the picture again when what it shows has changed, on a thread.
     fn repaint_picture(&mut self, ctx: &egui::Context, s: &GlobeSettings, now: f64) {
+        let moving = self.sun_shift != 0.0 || self.playing;
         if let Some(rx) = &self.painting {
             match rx.try_recv() {
                 Ok(px) => {
@@ -237,7 +294,7 @@ impl Globe {
                 Err(mpsc::TryRecvError::Disconnected) => self.painting = None,
             }
         }
-        let sun = sun::subsolar(now);
+        let sun = sun::subsolar(now + self.sun_shift);
         let one = (!s.all_bands).then(|| band_static(&s.band));
         let key = PicKey {
             sun: ((sun.lat * 4.0).round() as i32, (sun.lon * 4.0).round() as i32),
@@ -245,7 +302,12 @@ impl Globe {
             prop: s.prop.then_some((one, self.fields_id)),
             fetched: self.got.serial,
         };
-        if self.painted.as_ref().is_some_and(|(k, at)| *k == key || now - at < PAINT_EVERY_S) {
+        // With the Sun moved by hand it is painted as fast as it can be.
+        if self
+            .painted
+            .as_ref()
+            .is_some_and(|(k, at)| *k == key || !moving && now - at < PAINT_EVERY_S)
+        {
             return;
         }
         let recipe = picture::Recipe {
@@ -310,6 +372,9 @@ pub(crate) fn window(
     let mut out = GlobeOut::default();
     let now = decoders::slot::utc_now();
     g.step(s, st, now);
+    if g.advance(ctx.input(|i| i.time)) {
+        ctx.request_repaint();
+    }
     g.repaint_picture(ctx, s, now);
     // The clocks tick, and the fetches land.
     crate::repaint::after(ctx, Duration::from_secs(1));
@@ -559,6 +624,50 @@ fn toolbar(ui: &mut egui::Ui, g: &mut Globe, s: &mut GlobeSettings) {
             egui::DragValue::new(&mut s.half_life_min).range(5.0..=180.0).speed(1.0).suffix(" min"),
         );
     });
+    ui.add_space(3.0);
+    sun_row(ui, g);
+}
+
+/// The SUN row: the Sun live, or moved up to 12 hours either way by hand or
+/// by PLAY, to watch the grey line and the night go round. It moves only the
+/// Sun: the paths, PROP, the clouds and the aurora stay as they are now.
+fn sun_row(ui: &mut egui::Ui, g: &mut Globe) {
+    const ONLY_SUN: &str =
+        "Only the Sun moves: the paths, PROP, clouds and aurora stay as they are now";
+    ui.horizontal(|ui| {
+        ui.label(caps("SUN"));
+        let live = g.sun_shift == 0.0 && !g.playing;
+        if chrome::chip(ui, live, "LIVE").on_hover_text("The Sun where it is now").clicked() {
+            g.sun_shift = 0.0;
+            g.playing = false;
+        }
+        let play = if g.playing { "PAUSE" } else { "PLAY" };
+        if chrome::chip(ui, g.playing, play)
+            .on_hover_text(format!("Run the Sun on an hour a second. {ONLY_SUN}"))
+            .clicked()
+        {
+            g.playing = !g.playing;
+        }
+        let mut h = g.sun_shift / 3600.0;
+        ui.spacing_mut().slider_width = 260.0;
+        let r = ui
+            .add(egui::Slider::new(&mut h, -12.0..=12.0).show_value(false))
+            .on_hover_text(format!("Move the Sun up to 12 hours either way. {ONLY_SUN}"));
+        if r.changed() {
+            g.sun_shift = h * 3600.0;
+            g.playing = false;
+        }
+        let text = if live {
+            "LIVE".to_string()
+        } else {
+            let at = decoders::slot::utc_now() + g.sun_shift;
+            let (_, _, _, hh, mm, _) = crate::decodelog::civil(at as i64);
+            let m = (g.sun_shift / 60.0).round() as i64;
+            let sign = if m < 0 { "−" } else { "+" };
+            format!("SUN AT {hh:02}:{mm:02}Z  ({sign}{}h{:02})", m.abs() / 60, m.abs() % 60)
+        };
+        ui.label(RichText::new(text).monospace().size(11.5).color(theme::TEXT_STRONG()));
+    });
 }
 
 fn age_text(now: f64, utc: f64) -> String {
@@ -634,6 +743,9 @@ fn heard_list(
             let tip = if r.src.reverse() { format!("{} heard you ({})", r.call, r.src.label()) } else { format!("Heard by {}", r.src.label()) };
             if ui.add(egui::Button::selectable(is_sel(g, r), text)).on_hover_text(tip).clicked() {
                 g.sel = Some((r.call.clone(), r.band(), r.src));
+                // The map turns to show the whole path.
+                let mid = qth.map_or(vec_ll(r.pos), |q| sphere::slerp(vec_ll(q), vec_ll(r.pos), 0.5));
+                g.fly_to(sphere::ll_of(mid), ui.input(|i| i.time));
                 // A station on another band: the map goes to its band.
                 if !on_map && !s.all_bands && let Some(b) = r.band() {
                     s.band = b.to_string();
@@ -677,7 +789,9 @@ fn map(
         h: rect.height() as f64,
     };
     // Turn and zoom.
+    g.held = resp.dragged();
     if resp.dragged() {
+        g.fly = None;
         let d = resp.drag_delta();
         g.centre = Projector::new(view(g)).dragged(d.x as f64, d.y as f64);
     }
@@ -685,6 +799,11 @@ fn map(
         let dy = ui.input(|i| i.smooth_scroll_delta.y);
         if dy != 0.0 {
             g.zoom = (g.zoom * (dy as f64 / 300.0).exp()).clamp(0.6, 6.0);
+        }
+        // A pinch on a touch screen or trackpad.
+        let pinch = ui.input(|i| i.zoom_delta());
+        if pinch != 1.0 {
+            g.zoom = (g.zoom * pinch as f64).clamp(0.6, 6.0);
         }
     }
     let p = Projector::new(view(g));
@@ -844,7 +963,7 @@ fn map(
     for l in &geo.coast {
         lines(l, cs);
     }
-    let sun_at = sun::subsolar(now);
+    let sun_at = sun::subsolar(now + g.sun_shift);
     let sun_v = vec_ll(sun_at);
     if s.grey {
         for run in p.runs(&small_circle(sun_v, -6.0, 240), None) {
@@ -1036,32 +1155,36 @@ fn map(
 
     // The view keys and the legend, over the map.
     let mut ui_over = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(10.0)));
+    let t = ui.input(|i| i.time);
     ui_over.horizontal(|ui| {
         ui.label(caps("VIEW"));
         let here = qth.map(vec_ll);
         if chrome::chip(ui, false, "HOME").on_hover_text("Centre on your station").clicked()
             && let Some(q) = qth
         {
-            g.centre = q;
+            g.fly_to(q, t);
         }
         let sel_v = sel.as_ref().map(|r| vec_ll(r.pos));
         if chrome::chip(ui, false, "DX").on_hover_text("Centre on the station picked").clicked()
             && let Some(v) = sel_v
         {
-            g.centre = sphere::ll_of(v);
+            g.fly_to(sphere::ll_of(v), t);
         }
         if chrome::chip(ui, false, "PATH")
             .on_hover_text("Centre on the middle of the path picked")
             .clicked()
             && let (Some(a), Some(b)) = (here, sel_v)
         {
-            g.centre = sphere::ll_of(sphere::slerp(a, b, 0.5));
+            g.fly_to(sphere::ll_of(sphere::slerp(a, b, 0.5)), t);
         }
         if chrome::chip(ui, false, "−").on_hover_text("Zoom out").clicked() {
             g.zoom = (g.zoom / 1.25).max(0.6);
         }
         if chrome::chip(ui, false, "+").on_hover_text("Zoom in").clicked() {
             g.zoom = (g.zoom * 1.25).min(6.0);
+        }
+        if chrome::chip(ui, g.spin, "SPIN").on_hover_text("Turn the globe slowly east").clicked() {
+            g.spin = !g.spin;
         }
     });
     legend(&painter, rect, g, s);
@@ -1584,5 +1707,43 @@ mod tests {
         assert_eq!(compass(0.0), "N");
         assert_eq!(compass(359.0), "N");
         assert_eq!(compass(135.0), "SE");
+    }
+
+    #[test]
+    fn play_runs_the_sun_an_hour_a_second_and_comes_round() {
+        let mut g = Globe { playing: true, ..Globe::default() };
+        g.advance(10.0);
+        for k in 1..=10 {
+            g.advance(10.0 + k as f64 * 0.1);
+        }
+        assert!((g.sun_shift - 3600.0).abs() < 1.0, "{}", g.sun_shift);
+        g.sun_shift = SHIFT_MAX_S - 1.0;
+        g.advance(11.1);
+        assert!(g.sun_shift < -SHIFT_MAX_S + 400.0, "{}", g.sun_shift);
+        // A long gap between frames is not a jump.
+        g.advance(100.0);
+        assert!(g.sun_shift < -SHIFT_MAX_S + 800.0, "{}", g.sun_shift);
+    }
+
+    #[test]
+    fn a_turn_ends_where_it_was_sent_and_spin_waits_for_it() {
+        let mut g = Globe { spin: true, ..Globe::default() };
+        g.advance(0.0);
+        let to = LatLon { lat: 38.7, lon: -77.0 };
+        g.fly_to(to, 0.0);
+        let mut t = 0.0;
+        while g.fly.is_some() {
+            t += 0.05;
+            assert!(g.advance(t));
+        }
+        assert!((g.centre.lat - to.lat).abs() < 1e-6 && (g.centre.lon - to.lon).abs() < 1e-6);
+        g.advance(t + 0.1);
+        assert!((g.centre.lon - (to.lon + SPIN_DEG_S * 0.1)).abs() < 1e-6);
+        g.held = true;
+        g.advance(t + 0.2);
+        assert!((g.centre.lon - (to.lon + SPIN_DEG_S * 0.1)).abs() < 1e-6);
+        g.spin = false;
+        g.held = false;
+        assert!(!g.advance(t + 0.3));
     }
 }
