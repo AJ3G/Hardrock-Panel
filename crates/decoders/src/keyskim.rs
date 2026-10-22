@@ -117,6 +117,8 @@ pub struct KeySkimConfig {
     /// Stretches never tracked, Hz: the WSJT modes' sub-bands, whose
     /// signals would read as PSK31 garbage.
     pub exclude: Vec<(f64, f64)>,
+    /// CW's speeds, WPM: searched, and a spot outside them left out.
+    pub cw_wpm: (u16, u16),
 }
 
 impl Default for KeySkimConfig {
@@ -128,6 +130,7 @@ impl Default for KeySkimConfig {
             max_channels: MAX_CHANNELS,
             view: None,
             exclude: Vec::new(),
+            cw_wpm: CW_WPM,
         }
     }
 }
@@ -209,8 +212,8 @@ const PROBE_MAX: u32 = 3 * PROBE;
 const RTTY_BAUD: f64 = 45.45;
 /// CW's timing decoder re-fits this often per track, s.
 const CW_HOP_S: f32 = 0.5;
-/// A CW spot's speed must be in this range.
-const CW_WPM: std::ops::RangeInclusive<u16> = 8..=45;
+/// CW's speeds by default, WPM (AJ3G: faster stations were left out at 45).
+pub const CW_WPM: (u16, u16) = (8, 60);
 /// Share of the window either side of its centre that is skimmed: past
 /// this the decimating filters roll off.
 const USABLE: f64 = 0.45;
@@ -513,7 +516,11 @@ impl KeySkimmer {
         }
         let moved = cfg.view != self.cfg.view;
         self.cfg = cfg;
+        let (lo, hi) = self.cfg.cw_wpm;
         for t in &mut self.tracks {
+            if let Reader::Cw(cw) = &mut t.reader {
+                cw.set_speed_range(lo as f32, hi as f32);
+            }
             if let Some(m) = t.mode()
                 && !self.cfg.enabled(m)
             {
@@ -896,6 +903,7 @@ impl KeySkimmer {
         let rtty = self.cfg.rtty.then(|| (Lane::rtty(self.rate, rtty_at), String::new()));
         let mut cw = CwDecoder::new((self.rate / st.hop as f64) as f32);
         cw.set_hop_s(CW_HOP_S);
+        cw.set_speed_range(self.cfg.cw_wpm.0 as f32, self.cfg.cw_wpm.1 as f32);
         let id = self.next_id;
         self.next_id += 1;
         self.tracks.push(Track {
@@ -939,7 +947,7 @@ impl KeySkimmer {
                 let (hz, wpm) = match &t.reader {
                     Reader::Cw(cw) => {
                         let wpm = cw.wpm().round().clamp(0.0, 99.0) as u16;
-                        if !CW_WPM.contains(&wpm) {
+                        if !(self.cfg.cw_wpm.0..=self.cfg.cw_wpm.1).contains(&wpm) {
                             return None;
                         }
                         // Noise reads as runs of E, I and T.
@@ -1310,6 +1318,81 @@ mod tests {
         assert!(w.cq());
         let g = spots.iter().find(|p| p.call.as_deref() == Some("G4XYZ")).unwrap();
         assert!(!g.cq() && g.wpm == 0);
+    }
+
+    #[test]
+    fn cw_from_15_to_60_wpm_is_read_and_the_range_set_leaves_the_rest_out() {
+        let c = CENTRE;
+        let speeds = [15.0, 20.0, 30.0, 40.0, 50.0, 60.0];
+        let sigs = || -> Vec<KeySignal> {
+            speeds
+                .iter()
+                .enumerate()
+                .map(|(i, &w)| {
+                    let text = "CQ TEST DE N9XYZ N9XYZ N9XYZ TEST";
+                    KeySignal::cw(c - 75_000.0 + i as f64 * 30_000.0, 0.0, w, text, 60.0)
+                })
+                .collect()
+        };
+        let read = |cfg: KeySkimConfig| -> Vec<Option<u16>> {
+            let mut s = sigs();
+            let spots = skim(&mut s, sigma_for(10.0, 1.0), 30.0, cfg);
+            report(&spots);
+            s.iter()
+                .map(|k| {
+                    spots
+                        .iter()
+                        .find(|p| (p.hz - k.hz).abs() < 30.0 && p.call.as_deref() == Some("N9XYZ"))
+                        .map(|p| p.wpm)
+                })
+                .collect()
+        };
+        let all = read(KeySkimConfig::default());
+        for (w, got) in speeds.iter().zip(&all) {
+            let got = got.unwrap_or_else(|| panic!("{w} WPM not read"));
+            assert!((got as f32 - w).abs() <= 0.1 * w + 1.0, "{w} WPM read as {got}");
+        }
+        // 20 to 40 only: the slow and the fast are left out.
+        let some = read(KeySkimConfig { cw_wpm: (20, 40), ..KeySkimConfig::default() });
+        let kept: Vec<bool> = some.iter().map(Option::is_some).collect();
+        assert_eq!(kept, [false, true, true, true, false, false]);
+    }
+
+    #[test]
+    fn in_a_wide_span_the_signals_in_the_scopes_view_are_read() {
+        // 768 kHz around 14.050 MHz, CW 250 kHz up: outside a cut around
+        // the centre, inside one around the view.
+        let rate = 768_000.0;
+        let hz = CENTRE + 250_000.0;
+        let run = |view: Option<(f64, f64)>| -> Vec<KeySpot> {
+            let mut s = KeySignal::cw(hz, 0.0, 24.0, "CQ CQ DE K4ABC K4ABC K", 60.0);
+            let mut sk = KeySkimmer::new(KeySkimConfig { view, ..KeySkimConfig::default() });
+            let mut noise = Noise(0x0bad_cafe_1234_5678);
+            let sigma = sigma_for(10.0, 1.0) * (rate / RATE).sqrt() as f32;
+            let block = (rate * 0.02) as usize;
+            let mut seen: Vec<KeySpot> = Vec::new();
+            for b in 0..(14.0 / 0.02) as usize {
+                let t0 = b as f64 * 0.02;
+                let mut iq = vec![Complex32::default(); block];
+                s.add_iq(&mut iq, rate, CENTRE, t0);
+                noise.add(&mut iq, sigma);
+                sk.push(&iq, rate, CENTRE, 1_000.0 + t0);
+                if b % 12 == 0 {
+                    for p in sk.spots() {
+                        match seen.iter_mut().find(|o| o.id == p.id) {
+                            Some(o) => *o = p,
+                            None => seen.push(p),
+                        }
+                    }
+                }
+            }
+            seen
+        };
+        let heard = |v: &[KeySpot]| {
+            v.iter().any(|p| p.call.as_deref() == Some("K4ABC") && (p.hz - hz).abs() < 30.0)
+        };
+        assert!(!heard(&run(None)), "read with the cut about the centre");
+        assert!(heard(&run(Some((hz - 20_000.0, hz + 20_000.0)))), "not read in the view");
     }
 
     /// Callsigns read against SNR (in 2.5 kHz), for the report; run with

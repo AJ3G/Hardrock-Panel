@@ -230,6 +230,8 @@ pub struct Scope {
     rows: Rows,
     /// The zoom (`None`: the whole span), the radio's own frequency.
     want_view: Option<View>,
+    /// What was last drawn, the radio's own Hz.
+    shown_view: Option<View>,
     drag: Option<Drag>,
     /// A drag of a measurement marker (its index).
     marker_drag: Option<usize>,
@@ -339,6 +341,7 @@ impl Scope {
             gpu,
             rows: Rows::new(tex_w),
             want_view: None,
+            shown_view: None,
             drag: None,
             marker_drag: None,
             grip: None,
@@ -510,6 +513,11 @@ impl Scope {
 
     /// Each frame: DECODE's newest decodes for the skimmer's labels (`None`
     /// when SKIM is off or no slotted mode runs: no labels).
+    /// The stretch of the band last drawn, the radio's own Hz.
+    pub fn view_hz(&self) -> Option<(f64, f64)> {
+        self.shown_view.map(|v| (v.lo, v.hi))
+    }
+
     pub fn skim(&mut self, feed: Option<SkimFeed>) {
         self.skim = feed.unwrap_or_default();
     }
@@ -535,6 +543,7 @@ impl Scope {
         self.follow(span, &rig, now, &mut out);
         let span = self.span(snap);
         let v = view::view(span, self.want_view);
+        self.shown_view = Some(v);
 
         let cx = paint::Ctx { span, view: v, map: self.map(), rig, now };
         if scf_on {

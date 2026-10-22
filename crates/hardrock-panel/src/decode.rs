@@ -259,6 +259,8 @@ pub(crate) struct DecodeSettings {
     pub skim_keys: bool,
     /// The SKIM LOG window is open (decision 60).
     pub skim_log: bool,
+    /// SKIM CW/PSK/RTTY's CW speeds, WPM.
+    pub skim_cw_wpm: (u16, u16),
 }
 
 impl Default for DecodeSettings {
@@ -276,6 +278,7 @@ impl Default for DecodeSettings {
             skim_wide: false,
             skim_keys: false,
             skim_log: false,
+            skim_cw_wpm: decoders::keyskim::CW_WPM,
         }
     }
 }
@@ -396,6 +399,11 @@ pub(crate) struct Decode {
     /// SKIM CW/PSK/RTTY's skimmer, and the exclusions it was given.
     keys: Option<Arc<KeySkimWorker>>,
     keys_cfg: Option<KeySkimConfig>,
+    /// Its signals, each kept until its label has faded: the skimmer drops
+    /// a track sooner than CW's label fades.
+    key_held: Vec<KeySpot>,
+    /// What the scope shows, Hz, to the nearest 5 kHz.
+    key_view: Option<(f64, f64)>,
     /// SKIM LOG: every mode skimmed, with its mode (decision 60).
     pub(crate) skim_log: SkimLog,
     /// AUTO ID (decision 61): asked for, and at work.
@@ -498,6 +506,13 @@ impl Decode {
         }
     }
 
+    /// The scope's view (the radio's own Hz), for SKIM CW/PSK/RTTY's window
+    /// in a span wider than it reads.
+    pub(crate) fn set_view(&mut self, v: Option<(f64, f64)>) {
+        const STEP: f64 = 5_000.0;
+        self.key_view = v.map(|(lo, hi)| ((lo / STEP).floor() * STEP, (hi / STEP).ceil() * STEP));
+    }
+
     /// AUTO ID (decision 61): listen to the receiver's passband while it is
     /// asked for, and start again when the passband or the dial moves.
     fn autoid_frame(&mut self, st: &StationSettings, rx: &Rx, on: bool) {
@@ -545,8 +560,8 @@ impl Decode {
             None => SkimFeed::default(),
         };
         feed.key_audio_hz = s.audio_hz;
-        if let Some(k) = &self.keys {
-            feed.spots.extend(k.state().spots.iter().filter_map(key_spot));
+        if self.keys.is_some() {
+            feed.spots.extend(self.key_held.iter().filter_map(key_spot));
         }
         (wsjt.is_some() || self.keys.is_some()).then_some(feed)
     }
@@ -561,7 +576,15 @@ impl Decode {
             }
             return;
         }
-        let cfg = KeySkimConfig { exclude: wsjt_bands(at.xvtr_hz), ..KeySkimConfig::default() };
+        let cfg = KeySkimConfig {
+            exclude: wsjt_bands(at.xvtr_hz),
+            cw_wpm: s.skim_cw_wpm,
+            // Wider than 192 kHz the skimmer reads a 192 kHz cut of the
+            // span: around what the scope shows, not the span's centre.
+            // At 192 kHz or less it reads it all, as before.
+            view: self.key_view.filter(|_| rx.rate() > decoders::keyskim::SKIM_RATE * 1.01),
+            ..KeySkimConfig::default()
+        };
         match &self.keys {
             Some(k) if self.keys_cfg.as_ref() != Some(&cfg) => k.set_config(cfg.clone()),
             Some(_) => return,
@@ -584,6 +607,18 @@ impl Decode {
     fn skim_log_frame(&mut self, at: Where) {
         if let Some(k) = &self.keys {
             let st = k.state();
+            let now = decoders::slot::utc_now();
+            for p in &st.spots {
+                match self.key_held.iter_mut().find(|h| h.id == p.id) {
+                    Some(h) => *h = p.clone(),
+                    None => self.key_held.push(p.clone()),
+                }
+            }
+            for h in &mut self.key_held {
+                // Its track gone: heard no more.
+                h.active &= st.spots.iter().any(|p| p.id == h.id);
+            }
+            self.key_held.retain(|h| now - h.heard_utc < crate::scope::skim::key_fade_s(h.mode));
             for p in &st.spots {
                 self.skim_log.key(
                     p.id,
@@ -603,6 +638,7 @@ impl Decode {
             let alive: Vec<u64> = st.spots.iter().map(|p| p.id).collect();
             self.skim_log.end_tracks(&alive);
         } else {
+            self.key_held.clear();
             self.skim_log.end_tracks(&[]);
         }
         self.skim_log.flush();
@@ -1580,6 +1616,14 @@ fn body(
         );
         if r.clicked() {
             s.skim_keys = !s.skim_keys;
+        }
+        if s.skim_keys {
+            caption(ui, "CW WPM");
+            let (lo, hi) = &mut s.skim_cw_wpm;
+            ui.add(egui::DragValue::new(lo).range(6..=*hi).suffix(" –"))
+                .on_hover_text("The slowest CW the skimmer reads and labels, WPM");
+            ui.add(egui::DragValue::new(hi).range(*lo..=70))
+                .on_hover_text("The fastest CW the skimmer reads and labels, WPM");
         }
         let r = chrome::chip(ui, s.skim_log, "SKIM LOG").on_hover_text(
             "Open a window listing everything heard, of every mode, with the mode and where \

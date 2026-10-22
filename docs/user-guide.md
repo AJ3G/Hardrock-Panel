@@ -535,6 +535,11 @@ For the WSJT modes:
   station's signal, that label's leader, pointer and box, and its tick on
   the spectrum, turn red, and the bar's readout adds its call.
 - **Slot lines** are drawn dim, so the waterfall shows through them.
+- **CW WPM** (beside SKIM CW/PSK/RTTY, 8 to 60 to start) is the range of
+  CW speeds the skimmer reads and labels; narrow it to what is on the band.
+  A CW label stays 10 s after its signal stops, PSK31 and RTTY 5 s. In a
+  SPAN wider than 192 kHz the skimmer reads the 192 kHz around what the
+  scope shows.
 - **SKIM CW/PSK/RTTY** (off to start), in any mode, finds every CW, PSK31
   and RTTY (45.45 baud, 170 Hz shift) signal in the I/Q window, up to 192
   kHz of it, reads each one and picks out the callsign it sends. Each is

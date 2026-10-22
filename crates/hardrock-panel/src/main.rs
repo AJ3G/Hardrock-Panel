@@ -595,6 +595,7 @@ impl App {
         };
         // The decoder runs while its window is open.
         self.saved.decode.running = self.show_decode;
+        self.decode.set_view(self.scope.view_hz());
         self.decode.frame(
             &self.saved.decode,
             &self.saved.station,

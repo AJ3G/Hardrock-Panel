@@ -10,7 +10,7 @@
 //!
 //! The keyboard skimmer's signals (decision 56) come in the same feed, each
 //! with a [`KeyTag`]: their labels carry the mode, and fade over
-//! [`KEY_FADE_S`] once the signal stops rather than by slots.
+//! [`key_fade_s`] once the signal stops rather than by slots.
 
 pub use decoders::WsjtMode;
 pub use decoders::keyskim::KeyMode;
@@ -80,17 +80,24 @@ pub struct SkimFeed {
     pub key_audio_hz: f64,
 }
 
-/// How long a keyboard signal's label fades once it stops, s.
+/// How long a keyboard signal's label fades once it stops, s: CW's twice
+/// PSK31's and RTTY's (AJ3G: "Increase persistence on the spot by double…
+/// Just double on CW").
 pub const KEY_FADE_S: f64 = 5.0;
+pub const CW_FADE_S: f64 = 2.0 * KEY_FADE_S;
+
+pub fn key_fade_s(mode: KeyMode) -> f64 {
+    if mode == KeyMode::Cw { CW_FADE_S } else { KEY_FADE_S }
+}
 
 /// A keyboard signal's label's opacity: full while it is heard, then fading
-/// over [`KEY_FADE_S`] from when it was last heard, then gone.
-pub fn key_alpha(heard_utc: f64, active: bool, now: f64) -> Option<f32> {
+/// over [`key_fade_s`] from when it was last heard, then gone.
+pub fn key_alpha(mode: KeyMode, heard_utc: f64, active: bool, now: f64) -> Option<f32> {
     if active {
         return Some(1.0);
     }
-    let t = (now - heard_utc).max(0.0);
-    (t < KEY_FADE_S).then(|| (1.0 - 0.8 * t / KEY_FADE_S) as f32)
+    let (t, fade) = ((now - heard_utc).max(0.0), key_fade_s(mode));
+    (t < fade).then(|| (1.0 - 0.8 * t / fade) as f32)
 }
 
 /// Slots a label stays for: the newest slot's, and two before it, fading.
@@ -123,7 +130,7 @@ pub fn labels(feed: &SkimFeed, now: f64) -> Vec<(SkimSpot, f32)> {
     let mut out: Vec<(SkimSpot, f32)> = Vec::new();
     for s in &feed.spots {
         let a = match s.key {
-            Some(k) => key_alpha(s.utc, k.active, now),
+            Some(k) => key_alpha(k.mode, s.utc, k.active, now),
             // By its own mode's slots: SKIM WIDE's FT8 beside FT4 fades
             // as FT8 does.
             None => alpha(age_slots(s.utc, now, s.wsjt.map_or(feed.period_s, |m| m.period_s()))),
@@ -320,12 +327,17 @@ mod tests {
         let feed = SkimFeed { period_s: 15.0, spots: vec![k.clone()], ..Default::default() };
         // Heard now: full, however long ago the slots went by.
         assert_eq!(labels(&feed, 500.0)[0].1, 1.0);
-        // Stopped: fading, then gone after KEY_FADE_S.
+        // Stopped: fading, then gone after CW_FADE_S, twice PSK31's.
         k.key = Some(KeyTag { active: false, ..k.key.unwrap() });
+        let mut psk = k.clone();
+        psk.key = Some(KeyTag { mode: KeyMode::Psk, ..k.key.unwrap() });
         let feed = SkimFeed { spots: vec![k], ..feed };
         let a = labels(&feed, 102.0)[0].1;
         assert!(a < 1.0 && a > 0.2, "{a}");
-        assert!(labels(&feed, 100.0 + KEY_FADE_S).is_empty());
+        assert_eq!(labels(&feed, 100.0 + KEY_FADE_S + 1.0).len(), 1);
+        assert!(labels(&feed, 100.0 + CW_FADE_S).is_empty());
+        let p = SkimFeed { spots: vec![psk], ..feed.clone() };
+        assert!(labels(&p, 100.0 + KEY_FADE_S).is_empty());
         // "CQ" must be a word of its own in a keyboard signal's text.
         let mut q = feed.spots[0].clone();
         q.text = "TNX QSO CQX".into();

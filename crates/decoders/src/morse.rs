@@ -357,6 +357,8 @@ pub struct CwDecoder {
     space_ratio: Option<f32>,
     /// Operator-locked speed, when the panel's speed control is not on auto.
     lock_wpm: Option<f32>,
+    /// The speeds searched with no lock, WPM.
+    range: (f32, f32),
 }
 
 impl CwDecoder {
@@ -385,6 +387,7 @@ impl CwDecoder {
             good_hops: 0,
             space_ratio: None,
             lock_wpm: None,
+            range: (WPM_MIN, WPM_MAX),
         }
     }
 
@@ -398,6 +401,13 @@ impl CwDecoder {
     /// Pin the speed search to `wpm` (±10%), or `None` to search the full range.
     pub fn set_speed_lock(&mut self, wpm: Option<f32>) {
         self.lock_wpm = wpm.map(|w| w.clamp(WPM_MIN, WPM_MAX));
+    }
+
+    /// Search only `lo` to `hi` WPM (within the decoder's own 6 to 70)
+    /// when the speed is not locked.
+    pub fn set_speed_range(&mut self, lo: f32, hi: f32) {
+        let lo = lo.clamp(WPM_MIN, WPM_MAX);
+        self.range = (lo, hi.clamp(lo, WPM_MAX));
     }
 
     /// Forget everything: the window, the emitted-index bookkeeping and the
@@ -476,7 +486,7 @@ impl CwDecoder {
         // for every (speed, threshold) pair.
         let (wpm_lo, wpm_hi) = match self.lock_wpm {
             Some(w) => (w * 0.9, w * 1.1),
-            None => (WPM_MIN, WPM_MAX),
+            None => self.range,
         };
         // The speed does not change between hops, so last hop's unit sets how
         // short a run has to be to be a glitch. Before there is one, nothing is
