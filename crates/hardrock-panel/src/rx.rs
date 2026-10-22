@@ -312,6 +312,8 @@ struct DemoBand {
     band: sdr::SyntheticSource,
     ft8: decoders::demo::DemoFt8,
     ft4: decoders::demo::DemoFt8,
+    /// JT9 and JTTY, made by their own transmitters.
+    audio: Vec<decoders::demo::DemoAudio>,
     keys: decoders::demo::DemoKeys,
 }
 
@@ -355,6 +357,11 @@ impl sdr::IqSource for DemoBand {
             }
             if let Some(d) = demo_shift("FT4", DEMO_FT4_DIAL_HZ, c) {
                 self.ft4.add(&mut out[..n], rate, c - d, utc);
+            }
+            for a in &self.audio {
+                if let Some(d) = demo_shift(a.name, a.dial_hz, c) {
+                    a.add(&mut out[..n], rate, c, utc, d);
+                }
             }
             self.keys.add_moved(&mut out[..n], rate, c, utc, |m| match m {
                 decoders::keyskim::KeyMode::Cw => demo_shift("CW", 0.0, c),
@@ -502,6 +509,23 @@ impl Rx {
         self.running
     }
 
+    /// The demo's filler signals, where they are now (the radio's own Hz),
+    /// with their labels: AJ3G, of the pulsing voice in the middle, "May
+    /// want to label that as SSB FAKE". Empty unless the demo runs.
+    pub(crate) fn demo_fakes(&self) -> Vec<(f64, &'static str)> {
+        if self.running != IqChoice::Demo || self.pipeline.is_none() {
+            return Vec::new();
+        }
+        let c = self.centre();
+        sdr::DEMO_SIGNALS
+            .iter()
+            .map(|&(off, _, kind)| {
+                let (label, mid) = kind.fake_label();
+                (c + off + mid, label)
+            })
+            .collect()
+    }
+
     pub(crate) fn opening(&self) -> bool {
         self.opening.is_some()
     }
@@ -543,6 +567,10 @@ impl Rx {
                     band: sdr::SyntheticSource::demo(s.rate as f64, centre),
                     ft8: decoders::demo::DemoFt8::new(),
                     ft4: decoders::demo::DemoFt8::ft4(),
+                    audio: vec![
+                        decoders::demo::DemoAudio::jt9(),
+                        decoders::demo::DemoAudio::jtty(),
+                    ],
                     keys: decoders::demo::DemoKeys::new(),
                 };
                 self.spawn(Box::new(src), scope);
@@ -1499,6 +1527,38 @@ mod tests {
         let rows: Vec<_> = d.rows.iter().map(|r| (r.rf_hz, r.text.clone())).collect();
         eprintln!("{rows:?} centre {} rx {}", rx.centre(), rx.rx_hz);
         assert!(d.rows.iter().any(|r| r.rf_hz.is_some_and(|f| f > 14e6)), "{rows:?}");
+    }
+
+    #[test]
+    #[ignore = "real time, up to 40 s: cargo test -- --ignored demo_band"]
+    fn demo_band_in_psk31_still_labels_ft8_and_ft4() {
+        let scope = Scope::new(None, crate::scope::ScopeSettings::default());
+        let mut s = RxSettings { source: IqChoice::Demo, rate: 192_000, ..RxSettings::default() };
+        let mut rx = Rx::new(&s);
+        rx.centre = 14_050_000.0;
+        rx.rx_hz = 14_070_000.0;
+        rx.passband = (100.0, 3_000.0);
+        rx.start(&s, &scope, now(false));
+        let ds = crate::decode::DecodeSettings {
+            kind: crate::decode::Kind::Psk31,
+            running: true,
+            audio_hz: 1000.0,
+            ..Default::default()
+        };
+        let st = crate::station::StationSettings::default();
+        let at = crate::decode::Where { dial_hz: rx.rx_hz, lsb: false, xvtr_hz: 0.0, ppm: 0.0 };
+        let mut d = crate::decode::Decode::default();
+        let mut modes = std::collections::BTreeSet::new();
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(40) && modes.len() < 2 {
+            rx.frame(&mut s, &scope, now(false));
+            d.frame(&ds, &st, &rx, at, None);
+            if let Some(f) = d.skim_feed(&ds) {
+                modes.extend(f.spots.iter().filter_map(|p| p.wsjt).map(|m| m.label()));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(modes.into_iter().collect::<Vec<_>>(), ["FT4", "FT8"]);
     }
 
     #[test]

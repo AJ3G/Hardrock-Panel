@@ -107,6 +107,29 @@ pub struct SynthSignal {
     pub kind: SynthKind,
 }
 
+/// The demo's filler signals: (offset from the centre Hz, level dBFS, kind).
+/// They carry nothing to decode and follow the centre.
+pub const DEMO_SIGNALS: [(f64, f32, SynthKind); 5] = [
+    (-61_000.0, -50.0, SynthKind::Usb),
+    (12_500.0, -40.0, SynthKind::Usb),
+    (-25_300.0, -65.0, SynthKind::Cw),
+    (43_000.0, -75.0, SynthKind::Lsb),
+    (80_000.0, -85.0, SynthKind::Carrier),
+];
+
+impl SynthKind {
+    /// Its label on the scope in the demo, and where its energy is from
+    /// its offset, Hz.
+    pub fn fake_label(self) -> (&'static str, f64) {
+        match self {
+            SynthKind::Usb => ("SSB FAKE", 1100.0),
+            SynthKind::Lsb => ("SSB FAKE", -1100.0),
+            SynthKind::Cw => ("CW FAKE", 0.0),
+            SynthKind::Carrier => ("CARRIER FAKE", 0.0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SynthKind {
     /// An unmodulated carrier.
@@ -227,14 +250,12 @@ impl SyntheticSource {
 
     /// The panel's demo band: 192 kHz around 14.200 MHz with a few stations.
     pub fn demo(rate: f64, center_hz: f64) -> Self {
-        let sigs = vec![
-            SynthSignal::usb(-61_000.0, -50.0),
-            SynthSignal::usb(12_500.0, -40.0),
-            SynthSignal::cw(-25_300.0, -65.0),
-            SynthSignal::lsb(43_000.0, -75.0),
-            SynthSignal::carrier(80_000.0, -85.0),
-        ];
-        SyntheticSource::new(rate, center_hz, -60.0, sigs).paced()
+        let sigs = DEMO_SIGNALS.iter().map(|&(offset_hz, level_dbfs, kind)| SynthSignal {
+            offset_hz,
+            level_dbfs,
+            kind,
+        });
+        SyntheticSource::new(rate, center_hz, -60.0, sigs.collect()).paced()
     }
 
     /// Deliver samples no faster than real time.

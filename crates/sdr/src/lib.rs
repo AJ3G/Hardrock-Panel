@@ -42,7 +42,8 @@ pub use passband::FilterShape;
 pub use pipeline::{AudioTap, Command, IqTap, Pipeline, PipelineConfig, Snapshot};
 pub use receiver::{AUDIO_RATE, Receiver, SUPPORTED_RATES, decimation_plan};
 pub use source::{
-    EladSource, IqSource, SynthSignal, SyntheticSource, TxEffects, TxSim, plausible_dial,
+    DEMO_SIGNALS, EladSource, IqSource, SynthKind, SynthSignal, SyntheticSource, TxEffects, TxSim,
+    plausible_dial,
 };
 pub use spectrum::{
     Averaging, MAX_FFT_SIZE, MIN_FFT_SIZE, Overlap, Peak, Spectrum, SpectrumConfig, SpectrumFrame,

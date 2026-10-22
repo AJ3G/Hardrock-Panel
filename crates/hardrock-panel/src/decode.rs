@@ -584,15 +584,19 @@ impl Decode {
             Some((kind, Worker::Wsjt(..))) if s.skim => kind.wsjt(),
             _ => None,
         };
+        let now = decoders::slot::utc_now();
+        let wide = s.skim && !self.wide.is_empty();
         let mut feed = match wsjt {
-            Some(m) => skim_feed(&self.rows, &self.wide_spots, m, decoders::slot::utc_now()),
+            Some(m) => skim_feed(&self.rows, &self.wide_spots, m, now),
+            // Another mode: the skimmers' FT8 and FT4 alone.
+            None if wide => skim_feed(&VecDeque::new(), &self.wide_spots, WsjtMode::Ft8, now),
             None => SkimFeed::default(),
         };
         feed.key_audio_hz = s.audio_hz;
         if self.keys.is_some() {
             feed.spots.extend(self.key_held.iter().filter_map(key_spot));
         }
-        (wsjt.is_some() || self.keys.is_some()).then_some(feed)
+        (wsjt.is_some() || wide || self.keys.is_some()).then_some(feed)
     }
 
     /// SKIM CW/PSK/RTTY (decision 56): run the keyboard skimmer on the I/Q
@@ -1260,19 +1264,24 @@ fn wide_dials(
     centre: f64,
     rate: f64,
 ) -> Vec<(WsjtMode, Vec<f64>)> {
-    let other = match kind {
-        Kind::Ft8 => Kind::Ft4,
-        Kind::Ft4 => Kind::Ft8,
-        _ => return Vec::new(),
+    // In FT8 or FT4 with SKIM WIDE, the dials besides the receiver's. In
+    // any other mode with SKIM on, every FT8 and FT4 dial in the span, the
+    // receiver's too, so their labels stay (AJ3G: "Even if I click on PSK,
+    // you should still continue to demod and report other modes").
+    let (modes, skip) = match kind {
+        Kind::Ft8 if s.skim_wide => ([Kind::Ft8, Kind::Ft4], Some(dial_hz)),
+        Kind::Ft4 if s.skim_wide => ([Kind::Ft4, Kind::Ft8], Some(dial_hz)),
+        Kind::Ft8 | Kind::Ft4 => return Vec::new(),
+        _ => ([Kind::Ft8, Kind::Ft4], None),
     };
-    if !(s.skim && s.skim_wide) || rate <= 0.0 {
+    if !s.skim || rate <= 0.0 {
         return Vec::new();
     }
-    [kind, other]
+    modes
         .into_iter()
         .filter_map(|k| {
             let all: Vec<f64> = k.digi()?.dials.iter().map(|&d| d as f64 - xvtr_hz).collect();
-            let dials = decoders::skim::dials_in_span(&all, centre, rate, Some(dial_hz));
+            let dials = decoders::skim::dials_in_span(&all, centre, rate, skip);
             (!dials.is_empty()).then_some((k.wsjt()?, dials))
         })
         .collect()
@@ -2217,8 +2226,17 @@ mod tests {
         // Behind a converter the dials are where the radio hears them.
         let w = wide_dials(Kind::Ft8, &s, 28_000_000.0, 116e6, 28.1e6, 192_000.0);
         assert_eq!(w[0], (WsjtMode::Ft8, vec![28_174_000.0]));
-        // Off, or another mode: none.
-        assert!(wide_dials(Kind::Wspr, &s, 14_095_600.0, 0.0, 16e6, 6_144_000.0).is_empty());
+        // Another mode (a PSK31 label clicked): FT8 and FT4 go on being
+        // skimmed on every dial in the span, SKIM WIDE or not.
+        let psk = DecodeSettings { skim_wide: false, ..s.clone() };
+        let w = wide_dials(Kind::Psk31, &psk, 14_070_000.0, 0.0, 14.07e6, 192_000.0);
+        assert_eq!(
+            w,
+            vec![(WsjtMode::Ft8, vec![14_074_000.0]), (WsjtMode::Ft4, vec![14_080_000.0])]
+        );
+        // FT8 with SKIM WIDE off: none beside its own.
+        assert!(wide_dials(Kind::Ft8, &psk, 14_074_000.0, 0.0, 14.07e6, 192_000.0).is_empty());
+        // SKIM off: none.
         s.skim = false;
         assert!(wide_dials(Kind::Ft8, &s, 14_074_000.0, 0.0, 16e6, 6_144_000.0).is_empty());
         let d = DecodeSettings::default();

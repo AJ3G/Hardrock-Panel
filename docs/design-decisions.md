@@ -771,3 +771,13 @@ Each of 25 signatures (CW, PSK31/63/125, RTTY, NAVTEX, Packet 300/1200, the WSJT
 **Why.** AJ3G: "When I switch bands from 40M to 20M I believe the spots from 40M carried over to 20M." They did. A slot's decodes come a second or two after it ends, and DECODE put them on the dial as it was then. So the slot heard on 40 m before a change to 20 m was labelled on 20 m, written to ALL.TXT at 20 m's dial and spotted to PSK Reporter there.
 
 **What.** DECODE keeps where the receiver's dial has been over the last ten minutes (`DialLog`). Each slot goes on the dial it was on for the whole slot. A slot the dial moved during, half on one band and half on another, is dropped and logged rather than labelled, written or spotted anywhere. Tested by `a_slot_goes_on_the_dial_it_was_heard_on_and_one_heard_across_a_band_change_is_dropped`.
+
+## 64. The demo band on every band, with more modes; SKIM's FT8 and FT4 in every mode (22 Oct 2026)
+
+**Why.** AJ3G: "we should be able to see demo on all bands, unless there is a compelling reason not to"; the demo had no FT4, JT9 or JTTY; of the pulsing voice in the middle, "May want to label that as SSB FAKE"; and "Even if I click on PSK, you should still continue to demod and report other modes … skims, and tag them as you had been."
+
+**What.**
+- **Every band.** The demo's stations are written for 20 m and moved to the band nearest the centre, each mode to that band's own dial from the band plan (`demo_shift` in `rx.rs`). CW goes the same distance up from the band's foot. A mode with no dial on a band is left out there.
+- **More modes.** FT4 on 14.080 (three stations), JT9 on 14.078 (a CQ in even minutes) and JTTY on 14.090 (an over every 30 s) join FT8, CW, PSK31 and RTTY. JT9 and JTTY are made by mfsk-core's own transmitters as audio and put on the band as an upper sideband (`decoders::demo::DemoAudio`). Tested decoding: `the_demo_ft4_stations_on_14_080_are_decoded`, `the_demo_jt9_station_is_decoded`, `the_demo_jtty_station_is_read`, and end to end `demo_band_on_20_m_decodes`, `demo_band_on_40_m_decodes`, `demo_band_followed_from_40_m_to_20_m_decodes` (real time, ignored by default).
+- **Fakes labelled.** The five filler signals (two USB voices, one LSB, a CW beacon, a carrier) carry nothing to decode. In the demo they are labelled SSB FAKE, CW FAKE and CARRIER FAKE where they are.
+- **SKIM in any mode.** With DECODE in a mode other than FT8 or FT4 (a PSK31 label clicked, say) and SKIM on, the wide skimmer decodes every FT8 and FT4 dial in the span, the receiver's included, so their labels stay. In FT8 or FT4 it is SKIM WIDE as before (decision 54). Tested by `skim_wide_takes_the_modes_other_dials_and_the_other_modes_in_the_span` and `demo_band_in_psk31_still_labels_ft8_and_ft4`.

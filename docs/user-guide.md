@@ -347,9 +347,13 @@ with APPLY:
   scope's I/Q line says why in the driver's words, with **TRY AGAIN**. The
   panel waits a few seconds for the CAT link to read VFO A and opens the I/Q
   there, so opening doesn't move the radio.
-- **Demo signals**: a made-up band around 14.2 MHz with a few stations and
-  noise, and FT8 on 14.074 MHz (pick FT8 in DECODE to go there), to try the
-  scope, DECODE and the skimmer with no radio.
+- **Demo signals**: a made-up band to try the scope, DECODE and the
+  skimmers with no radio. On whichever band you tune to there are made-up
+  FT8, FT4, JT9 and JTTY stations on that band's dials (14.074, 14.080,
+  14.078 and 14.090 on 20 m), and CW, PSK31 and RTTY stations near the
+  band's foot and its PSK31 and RTTY dials. A few filler signals that follow
+  the centre and carry nothing are labelled SSB FAKE, CW FAKE and CARRIER
+  FAKE.
 
 **Tuning.** As in SDR Console, the span stays centred on the DUO's VFO A
 while the panel's receiver moves inside it. Click a signal to tune to it, drag
@@ -523,6 +527,9 @@ For the WSJT modes:
   transmitting) but are not added to this list, ALL.TXT or the spots. The
   line above the list says which dials are skimmed. For CW, PSK31 and RTTY,
   turn on SKIM CW/PSK/RTTY as well.
+- **In another mode** (DECODE on PSK31, RTTY, JT9 and so on) with SKIM on,
+  FT8 and FT4 go on being skimmed on every dial of theirs in the span and
+  labelled as before.
 - **SKIM LOG** opens a window listing everything heard, of every mode: the
   receiver's own decodes (RX), SKIM WIDE's FT8 and FT4 on the other dials
   (WIDE), and SKIM CW/PSK/RTTY's stations (SKIM), each with its UTC, mode,

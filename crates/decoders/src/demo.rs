@@ -169,6 +169,107 @@ impl DemoFt8 {
     }
 }
 
+/// A made-up station whose transmission is made as audio by its mode's own
+/// transmitter (JT9, JTTY), put on the band as its upper sideband: sent
+/// `start_s` into every `every_s`, on alternate turns when `alternate`.
+pub struct DemoAudio {
+    pub name: &'static str,
+    /// Its dial on 20 m, Hz; the audio is above it.
+    pub dial_hz: f64,
+    every_s: f64,
+    start_s: f64,
+    /// The transmission as analytic audio at [`AUDIO_UP`] Hz.
+    z: Vec<Complex32>,
+    amp: f32,
+}
+
+/// The rate the demo's audio stations are held at.
+const AUDIO_UP: f64 = 48_000.0;
+
+impl DemoAudio {
+    /// JT9 on 14.078 MHz: a CQ at 1500 Hz in every other minute.
+    pub fn jt9() -> Self {
+        let a = mfsk_core::jt9::synthesize_standard("CQ", "W3ABC", "FM19", 12_000, 1500.0, 1.0)
+            .expect("the demo's JT9 message packs");
+        Self::of("JT9", 14_078_000.0, 120.0, 1.0, &a, -76.0)
+    }
+
+    /// JTTY on 14.090 MHz: an over at 1500 Hz every 30 s.
+    pub fn jtty() -> Self {
+        use mfsk_jtty::jtty::pack::{ExchangeProfile, tones};
+        let t = tones("CQ CQ DE K2XYZ K2XYZ K", ExchangeProfile::Unknown)
+            .expect("the demo's JTTY text packs")
+            .expect("the demo's JTTY text has tones");
+        let a = mfsk_jtty::jtty::tx::synth_f32(&t, 1500.0, 1.0);
+        Self::of("JTTY", 14_090_000.0, 30.0, 2.0, &a, -76.0)
+    }
+
+    /// `audio`: real audio at 12 kHz, its signal above 0 Hz as heard in USB.
+    fn of(
+        name: &'static str,
+        dial_hz: f64,
+        every_s: f64,
+        start_s: f64,
+        audio: &[f32],
+        dbfs: f32,
+    ) -> Self {
+        DemoAudio {
+            name,
+            dial_hz,
+            every_s,
+            start_s,
+            z: analytic_48k(audio),
+            amp: 10f32.powf(dbfs / 20.0),
+        }
+    }
+
+    /// Add it to `iq` (interleaved, at `rate`, around `centre` Hz, its
+    /// first sample at `utc`), moved `shift` Hz from 20 m.
+    pub fn add(&self, iq: &mut [f32], rate: f64, centre: f64, utc: f64, shift: f64) {
+        let off = self.dial_hz + shift - centre;
+        if off.abs() > 0.48 * rate - 3000.0 {
+            return;
+        }
+        for (i, p) in iq.chunks_exact_mut(2).enumerate() {
+            let t = utc + i as f64 / rate;
+            let turn = (t / self.every_s).floor();
+            let local = t - turn * self.every_s - self.start_s;
+            let k = local * AUDIO_UP;
+            if k < 0.0 || k >= (self.z.len() - 1) as f64 {
+                continue;
+            }
+            let (j, f) = (k as usize, (k - k.floor()) as f32);
+            let a = self.z[j] * (1.0 - f) + self.z[j + 1] * f;
+            // The dial's offset, its phase from the transmission's start.
+            let ph = 2.0 * PI * off * local;
+            let r = Complex32::new(ph.cos() as f32, ph.sin() as f32);
+            let v = a * r * self.amp;
+            p[0] += v.re;
+            p[1] += v.im;
+        }
+    }
+}
+
+/// Real 12 kHz audio as its analytic signal (positive frequencies only) at
+/// [`AUDIO_UP`], by the FFT: what an upper sideband of it is about its dial.
+fn analytic_48k(audio: &[f32]) -> Vec<Complex32> {
+    let n = audio.len().next_power_of_two();
+    let up = (AUDIO_UP / 12_000.0) as usize;
+    let mut planner = rustfft::FftPlanner::<f32>::new();
+    let mut x: Vec<Complex32> = audio.iter().map(|&v| Complex32::new(v, 0.0)).collect();
+    x.resize(n, Complex32::default());
+    planner.plan_fft_forward(n).process(&mut x);
+    let mut y = vec![Complex32::default(); n * up];
+    for k in 1..n / 2 {
+        y[k] = x[k] * 2.0;
+    }
+    planner.plan_fft_inverse(n * up).process(&mut y);
+    let s = 1.0 / n as f32;
+    y.truncate(audio.len() * up);
+    y.iter_mut().for_each(|v| *v *= s);
+    y
+}
+
 /// One made-up keyboard-mode station: CW, PSK31 or RTTY sending `text` in
 /// overs, `period_s` apart, `skew_s` into the period. Its modulation is a
 /// function of the time, so it can be written into blocks of any length;
@@ -534,5 +635,71 @@ mod tests {
             FT4_STATIONS.iter().filter(|s| !s.2).map(|s| s.3[turn % s.3.len()].join(" ")).collect();
         want.sort();
         assert_eq!(heard, want);
+    }
+
+    /// `st` through a USB lane on its dial and `decode`, as the panel's
+    /// receiver would hear it: 48 kHz I/Q with noise, 10 kHz off the dial,
+    /// `secs` from `start`.
+    fn lane_audio(st: &DemoAudio, start: f64, secs: f64, mut sink: impl FnMut(&[f32], f64)) {
+        let rate = 48_000.0;
+        let centre = st.dial_hz - 10_000.0;
+        let mut lane = crate::skim::SsbLane::new(rate, st.dial_hz - centre);
+        let mut rng = 11u32;
+        let mut audio = Vec::new();
+        for b in 0..(secs * 10.0) as usize {
+            let utc = start + b as f64 * 0.1;
+            let mut iq: Vec<f32> = (0..4800 * 2)
+                .map(|_| {
+                    rng ^= rng << 13;
+                    rng ^= rng >> 17;
+                    rng ^= rng << 5;
+                    (rng as f32 / u32::MAX as f32 - 0.5) * 2e-3
+                })
+                .collect();
+            st.add(&mut iq, rate, centre, utc, 0.0);
+            let z: Vec<Complex32> =
+                iq.chunks_exact(2).map(|p| Complex32::new(p[0], p[1])).collect();
+            audio.clear();
+            lane.process(&z, &mut audio);
+            sink(&audio, utc);
+        }
+    }
+
+    #[test]
+    fn the_demo_jt9_station_is_decoded() {
+        let st = DemoAudio::jt9();
+        let mut cfg = crate::worker::WsjtConfig::new(WsjtMode::Jt9);
+        cfg.input_rate = crate::wsjt::RATE;
+        let d = crate::worker::WsjtDecoder::spawn(cfg);
+        // An even minute: it sends.
+        let slot = 1_700_000_040.0 - 1_700_000_040.0 % 120.0;
+        lane_audio(&st, slot - 1.0, 63.0, |a, utc| d.push(a, utc));
+        let t = std::time::Instant::now();
+        let mut heard = Vec::new();
+        while heard.is_empty() && t.elapsed().as_secs() < 90 {
+            for s in d.results().try_iter() {
+                heard.extend(s.decodes.iter().map(|x| x.message.clone()));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(heard, ["CQ W3ABC FM19"]);
+    }
+
+    #[test]
+    fn the_demo_jtty_station_is_read() {
+        let st = DemoAudio::jtty();
+        let d = crate::worker::JttyDecoder::spawn(crate::wsjt::RATE, 1500.0);
+        let start = 1_700_000_010.0 - 1_700_000_010.0 % st.every_s;
+        lane_audio(&st, start - 1.0, st.every_s + 4.0, |a, utc| d.push(a, utc));
+        let t = std::time::Instant::now();
+        let (mut text, mut done) = (String::new(), false);
+        while !done && t.elapsed().as_secs() < 60 {
+            for e in d.events().try_iter() {
+                text = e.text.clone();
+                done |= e.complete;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(text.contains("CQ CQ DE K2XYZ K2XYZ"), "{text:?}");
     }
 }

@@ -606,7 +606,26 @@ impl App {
         // The scope's slot lines follow the decoder's slots (decision 51).
         self.scope.decode_slots(self.decode.slots());
         // And its labels, DECODE's decodes (decision 54).
-        self.scope.skim(self.decode.skim_feed(&self.saved.decode));
+        let mut feed = self.decode.skim_feed(&self.saved.decode);
+        let fakes = self.rx.demo_fakes();
+        if !fakes.is_empty() {
+            let f = feed
+                .get_or_insert_with(|| scope::SkimFeed { period_s: 15.0, ..Default::default() });
+            let now = decoders::slot::utc_now();
+            f.spots.extend(fakes.into_iter().map(|(hz, label)| scope::SkimSpot {
+                row: None,
+                hz,
+                audio_hz: 0.0,
+                dial_hz: hz,
+                call: label.to_string(),
+                text: "Not a real station: one of the demo's made-up fillers".into(),
+                snr: 0.0,
+                utc: now,
+                wsjt: None,
+                key: None,
+            }));
+        }
+        self.scope.skim(feed);
     }
 
     /// Make a change an outside program asked for, as the panel's own
