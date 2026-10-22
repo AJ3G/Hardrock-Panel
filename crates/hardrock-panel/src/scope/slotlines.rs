@@ -28,10 +28,10 @@ pub const START_INK: Color32 = Color32::from_rgb(0x3c, 0xe0, 0x5a);
 /// The signal end's red: part of the named exception to "red for warnings
 /// only".
 pub const END_INK: Color32 = Color32::from_rgb(0xff, 0x48, 0x48);
-/// The dead time's yellow, 18 % over the rows (chosen by eye: at 15 % it
-/// read as grey on the ELAD palette's navy) so a late or long signal still
-/// shows through it: part of the same exception.
-pub const DEAD_TINT: Color32 = Color32::from_rgba_premultiplied(0x2e, 0x29, 0x00, 0x2e);
+/// The dead time's yellow, 9 % over the rows, so signals and the
+/// skimmer's labels show through it (AJ3G, 22 Oct 2026: 18 % hid them):
+/// part of the same exception.
+pub const DEAD_TINT: Color32 = Color32::from_rgba_premultiplied(0x17, 0x15, 0x00, 0x17);
 
 /// The most decoder runs remembered (each start, stop or change of mode is
 /// one).
