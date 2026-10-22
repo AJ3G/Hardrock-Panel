@@ -394,6 +394,13 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
             sc.offset =
                 if on { None } else { Some(OffsetBar::at_receiver(cx.rig.rx_hz, cx.rig.passband)) };
         }
+        if on
+            && chip(ui, false, "CENTRE")
+                .on_hover_text("Put the offset bar in the middle of the receiver's passband")
+                .clicked()
+        {
+            sc.offset = Some(OffsetBar::at_receiver(cx.rig.rx_hz, cx.rig.passband));
+        }
         if let Some(b) = sc.offset {
             note(
                 ui,

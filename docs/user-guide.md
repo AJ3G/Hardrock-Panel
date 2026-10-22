@@ -436,7 +436,8 @@ signal and measures how far it is from the dial, in the same hertz DECODE
 shows in its AF column. It doesn't set the transmit frequency itself. **Shift-click** the spectrum or the
 waterfall to drop it there (keep the button down to slide it), or press
 **OFFSET** in the Markers row to drop it in the middle of the receiver's
-passband. Drag it to move it. Its flag at the top of the spectrum reads the
+passband. Drag it to move it; **CENTRE**, beside OFFSET while the bar is
+up, puts it back in the middle of the passband. Its flag at the top of the spectrum reads the
 offset and the frequency (*+1 315 Hz · 14.075 315.2*), and the waterfall's
 foot repeats the offset. Put near a station DECODE has labelled, it jumps onto
 that station's frequency, so it reads exactly DECODE's figure. The **×** on
