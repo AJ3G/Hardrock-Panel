@@ -697,7 +697,7 @@ impl App {
             if so.settings_changed {
                 self.saved.scope = self.scope.settings().clone();
             }
-            let picked = so.data_mode.take();
+            let mut picked = so.data_mode.take();
             if let Some(id) = so.skim_pick.take() {
                 self.decode.pick_row(id);
             }
@@ -711,11 +711,20 @@ impl App {
                 }
                 _ => {}
             }
-            // A SKIM WIDE label: DECODE runs the mode it was heard in.
-            match so.wide_pick.take() {
-                Some(decoders::WsjtMode::Ft8) => self.saved.decode.kind = decode::Kind::Ft8,
-                Some(decoders::WsjtMode::Ft4) => self.saved.decode.kind = decode::Kind::Ft4,
-                _ => {}
+            // A SKIM WIDE label: its mode on the dial it was heard on, as that
+            // mode's DATA key would (sideband, passband, the radio's filter,
+            // DECODE and its note); AJ3G found the note still saying FT8
+            // after an FT4 label.
+            let wide = match so.wide_pick.take() {
+                Some(decoders::WsjtMode::Ft8) => scope::digimodes::digi("FT8"),
+                Some(decoders::WsjtMode::Ft4) => scope::digimodes::digi("FT4"),
+                _ => None,
+            };
+            if let (Some(digi), Some(dial)) = (wide, so.tune_to) {
+                let xvtr = radio::xvtr_hz(ctx) as f64;
+                so.tune_to = None;
+                picked =
+                    Some(scope::DataPick { digi, dial: (dial + xvtr).round() as u64, note: None });
             }
             let now = rx::RadioNow { link: self.rig.as_deref(), rig, transmitting };
             self.rx.apply_scope(so, &mut self.saved.rx, now);

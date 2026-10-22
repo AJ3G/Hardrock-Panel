@@ -61,10 +61,13 @@ impl SkimSpot {
     }
 
     /// The label's text: the callsign, and a keyboard signal's mode.
+    /// Its label: the call and the mode it was heard in (AJ3G: label the
+    /// FT4 station "as FT4"), for WSJT's as for the keyboard skimmer's.
     pub fn tag(&self) -> String {
-        match self.key {
-            Some(k) => format!("{} {}", self.call, k.mode.label()),
-            None => self.call.clone(),
+        match (self.key, self.wsjt) {
+            (Some(k), _) => format!("{} {}", self.call, k.mode.label()),
+            (None, Some(m)) => format!("{} {}", self.call, m.label()),
+            (None, None) => self.call.clone(),
         }
     }
 }
@@ -323,6 +326,10 @@ mod tests {
         k.text = "CQ CQ DE W2XYZ W2XYZ K".into();
         k.key = Some(KeyTag { mode: KeyMode::Cw, wpm: 22, active: true });
         assert_eq!(k.tag(), "W2XYZ CW");
+        let mut f = k.clone();
+        f.key = None;
+        f.wsjt = Some(WsjtMode::Ft4);
+        assert_eq!(f.tag(), "W2XYZ FT4");
         assert!(k.cq());
         let feed = SkimFeed { period_s: 15.0, spots: vec![k.clone()], ..Default::default() };
         // Heard now: full, however long ago the slots went by.

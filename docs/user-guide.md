@@ -527,6 +527,10 @@ For the WSJT modes:
   transmitting) but are not added to this list, ALL.TXT or the spots. The
   line above the list says which dials are skimmed. For CW, PSK31 and RTTY,
   turn on SKIM CW/PSK/RTTY as well.
+- **Labels name the mode** for FT8 and FT4 as for the keyboard modes
+  ("W9ML FT4"). Clicking an FT8 or FT4 label goes to its dial as that mode's
+  DATA key does: USB, the passband and the radio's filter, DECODE in that
+  mode and its note line saying so.
 - **In another mode** (DECODE on PSK31, RTTY, JT9 and so on) with SKIM on,
   FT8 and FT4 go on being skimmed on every dial of theirs in the span and
   labelled as before.
