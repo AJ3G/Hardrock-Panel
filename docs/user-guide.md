@@ -115,6 +115,25 @@ has a CAT command for, grouped, with the ones that can't be changed shown as
 read only, and the panel's own display settings: the LCD backlight in receive
 and in transmit, and a transverter offset.
 
+**The knobs.** The silver knobs beside the LCD work as the radio's own. Scroll
+over one to turn it (the main knob can also be dragged round), click it for the
+radio's push, and hold it down for the radio's push and hold (menu 71 HOLD
+TIME, 1 s as shipped). The line under each says what it does now, and hovering
+says more.
+
+- **Main knob.** Turning tunes the receive VFO by the step shown under it, or
+  in MEM picks the next or previous memory channel. A click opens STEP: turn
+  to choose the step (1 Hz to 1 MHz, the dial's digits), click again to go
+  back. A hold starts digit by digit: turn to change the lit digit, use E1 or
+  E2 to move along, and click or hold to go back.
+- **E1.** Turning changes VOL, SQL, AGC (AGC or manual gain), NR or NB, the
+  one named under it; a click picks the next.
+- **E2.** Turning changes the receive filter, the CW pitch (in CW) or the RIT
+  offset (while RIT is on); a click picks the next.
+- **Lock.** Holding E1 or E2 locks the knobs and the dial, as pressing both
+  together does on the radio, and LOCKED shows. Hold either again to unlock.
+  The lock is the panel's: the radio's own lock has no CAT command.
+
 Everything shows what the radio reads back, not what was asked for, and greys
 while the radio transmits. A stored CW message is sent only when RIG TUNE
 could be keyed.

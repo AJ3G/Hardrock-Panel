@@ -15,6 +15,8 @@ menu 34 (`TPnn;`) and menu 32 to USB audio (`TI1;`), keys its TUNE carrier
 on `TX2;` and an ordinary transmission on `TX;`, both at menu 34's power,
 unkeys on `RX;`, takes the dial, VFO B, split, mode and receive filter
 (`FA`, `FB`, `SP`, `MD`, `RF`), as the panel's scope and receiver set them,
+and the settings RADIO's main knob, E1 and E2 turn (`VM`, `SQ`, `GC`, `NR`,
+`NC`, `NB`, `NK`, `PI`, `MC`, with `HT` read),
 and answers `?;` to anything else. It prints every command that changes
 something, and flags any it should never be sent.
 """
@@ -33,6 +35,19 @@ state = {
     "fb": 7_074_000,
     "sp": 0,
     "rf": "208",
+}
+# The settings the face's knobs turn, as the radio answers them.
+KNOBS = {
+    "VM": "035",
+    "SQ": "000",
+    "GC": "0",
+    "NR": "0",
+    "NC": "000",
+    "NB": "0",
+    "NK": "000",
+    "PI": "0600",
+    "HT": "1000",
+    "MC": "000",
 }
 STEPS_MW = [300, 500, 1000, 1200, 1500, 2000, 3000, 4000, 5000, 8000]
 freq = int(sys.argv[sys.argv.index("--freq") + 1]) if "--freq" in sys.argv else 14_074_000
@@ -59,6 +74,8 @@ READS = {
     "RP": lambda: f"RP {STEPS_MW[state['tp']] // 50:06}" if state["keyed"] else "RP!000000",
     "WR": lambda: "WR0 01.32" if state["keyed"] else "WR0!00.00",
 }
+for _k in KNOBS:
+    READS[_k] = lambda k=_k: k + KNOBS[k]
 
 
 def arg(name):
@@ -113,6 +130,14 @@ while True:
         elif cmd[:2] == "RF" and len(cmd) == 5:
             state["rf"] = cmd[2:]
             print(f"filter set to {cmd[2:]}", file=sys.stderr, flush=True)
+        elif (
+            cmd[:2] in KNOBS
+            and cmd[:2] != "HT"
+            and len(cmd) == 2 + len(KNOBS[cmd[:2]])
+            and cmd[2:].isdigit()
+        ):
+            KNOBS[cmd[:2]] = cmd[2:]
+            print(f"{cmd[:2]} set to {cmd[2:]}", file=sys.stderr, flush=True)
         elif cmd == "RX":
             state["keyed"] = False
             print("unkeyed", file=sys.stderr, flush=True)
