@@ -91,7 +91,10 @@ fn key_help(k: &str) -> &'static str {
         "AVG" => "Average four frames",
         "PEAK" => "Peak-hold trace",
         "PERSIST" => "Phosphor trace: where the trace has been, fading",
-        "MKR" => "Put the active marker on the strongest signal in view, and follow it",
+        "MKR" => {
+            "Put the active marker on the strongest signal in view, and follow it; \
+             lit, it takes the markers away"
+        }
         "PAUSE" => "Freeze the display; the stream and the receiver keep running",
         _ => "",
     }
@@ -115,6 +118,7 @@ fn press(sc: &mut Scope, k: &str, snap: &sdr::Snapshot, out: &mut ScopeOut) {
             s.persist = !s.persist;
             sc.persist.clear();
         }
+        "MKR" if sc.markers.any() => sc.markers.clear(),
         "MKR" => {
             if let Some(f) = sc.shown().cloned() {
                 let v = view::view(super::span_of(snap), sc.want_view);
@@ -355,8 +359,14 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
     ui.horizontal_wrapped(|ui| {
         caption(ui, "Markers");
         for i in 0..2 {
-            if chip(ui, sc.markers.active == i, &format!("M{}", i + 1))
-                .on_hover_text("The marker the next right-click places")
+            // Lit while placed (AJ3G: Clear left a marker key lit); the one
+            // the next right-click places is marked ›.
+            let next = if sc.markers.active == i { "›" } else { "" };
+            if chip(ui, sc.markers.m[i].is_some(), &format!("{next}M{}", i + 1))
+                .on_hover_text(
+                    "Lit while it is placed; › marks the one the next right-click places. \
+                     Click to make it that one",
+                )
                 .clicked()
             {
                 sc.markers.active = i;

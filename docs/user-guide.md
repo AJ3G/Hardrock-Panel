@@ -425,6 +425,12 @@ itself and says so under the I/Q line.
 **Transverter.** The radio window's transverter offset and the scope's
 *Transverter LO* are the same setting: change either and the other follows.
 
+**Markers.** Right-click the scope to place M1, then M2; drag one to move
+it. M1 and M2 in the Markers row light while placed, and › marks the one the
+next right-click places. **MKR→PEAK** on the top bar puts it on the
+strongest signal in view and follows it. Pressed again while lit, or with
+**Clear**, the markers go and nothing stays lit.
+
 **The offset bar**, a thin red line, marks where you will put your transmit
 signal and measures how far it is from the dial, in the same hertz DECODE
 shows in its AF column. It doesn't set the transmit frequency itself. **Shift-click** the spectrum or the
