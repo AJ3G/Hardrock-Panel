@@ -13,7 +13,7 @@ use super::digimodes;
 use super::gpu::{self, SurfaceParams, TraceParams, WfParams};
 use super::levels::{self, level_text, s_unit};
 use super::markers::{fmt_delta, fmt_tenth};
-use super::offset::{OffsetBar, fmt_offset};
+use super::offset::{BAR_INK, OffsetBar, fmt_offset};
 use super::pointer::{self, Drag, DragKind, Grab, drag_edge, grab_at, wheel_zoom};
 use super::rows::Upload;
 use super::settings::{Scale, TopView};
@@ -668,7 +668,7 @@ fn paint_skim_waterfall(sc: &mut Scope, ui: &egui::Ui, p: &egui::Painter, rect: 
 }
 
 /// The offset bar (decision 55): a line down the spectrum (`spectrum`) or
-/// the waterfall, in the neutral blue, with its readout. On the spectrum
+/// the waterfall, in red (`BAR_INK`, AJ3G's transmit marker), with its readout. On the spectrum
 /// the readout is a flag at the bar's top: the offset from the dial, as
 /// DECODE's AF column, and the bar's frequency, with a × that takes it away;
 /// on the waterfall, the offset alone along the foot. Off the view, the
@@ -678,9 +678,9 @@ fn paint_offset(sc: &mut Scope, p: &egui::Painter, rect: Rect, cx: &Ctx, spectru
     let v = cx.view;
     let xx = v.x_of(bar.hz, rect.left(), rect.width());
     let inside = (rect.left()..=rect.right()).contains(&xx);
-    let lit = accent();
+    let lit = BAR_INK;
     if inside {
-        let w = if sc.offset_drag { 2.0 } else { 1.5 };
+        let w = if sc.offset_drag { 1.5 } else { 1.0 };
         p.vline(xx.round() + 0.5, rect.y_range(), Stroke::new(w, lit));
     }
     let off = bar.offset_hz(cx.rig.rx_hz, cx.rig.mode.is_lower());

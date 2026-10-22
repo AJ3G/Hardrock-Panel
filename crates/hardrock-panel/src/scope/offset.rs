@@ -30,6 +30,11 @@ impl OffsetBar {
 /// An offset as the bar's readout writes it: whole hertz as DECODE's AF
 /// column does, with its sign, and the thousands apart so a figure read
 /// across the waterfall is read right ("+1 234 Hz", "-56 Hz").
+/// The bar's colour: red, where AJ3G will place his transmit signal (22 Oct
+/// 2026: "change that to RED, and thin it up a bit"). A named exception to
+/// red-for-warnings-only, as the slot lines are (`slotlines.rs`).
+pub const BAR_INK: eframe::egui::Color32 = eframe::egui::Color32::from_rgb(0xff, 0x48, 0x48);
+
 pub fn fmt_offset(hz: f64) -> String {
     let r = hz.round();
     let sign = if r < 0.0 { "-" } else { "+" };

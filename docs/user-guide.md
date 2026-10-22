@@ -422,8 +422,9 @@ itself and says so under the I/Q line.
 **Transverter.** The radio window's transverter offset and the scope's
 *Transverter LO* are the same setting: change either and the other follows.
 
-**The offset bar** measures how far a signal is from the dial, in the same
-hertz DECODE shows in its AF column. **Shift-click** the spectrum or the
+**The offset bar**, a thin red line, marks where you will put your transmit
+signal and measures how far it is from the dial, in the same hertz DECODE
+shows in its AF column. It doesn't set the transmit frequency itself. **Shift-click** the spectrum or the
 waterfall to drop it there (keep the button down to slide it), or press
 **OFFSET** in the Markers row to drop it in the middle of the receiver's
 passband. Drag it to move it. Its flag at the top of the spectrum reads the
