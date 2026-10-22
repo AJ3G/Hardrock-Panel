@@ -122,17 +122,62 @@ fn figure_code(c: char) -> Option<u8> {
     (0u8..32).find(|&v| figure_char(v) == Some(c))
 }
 
+/// `text` as the Baudot codes a transmitter sends, LTRS and FIGS shifts
+/// put in as needed (starting in letters), unrepresentable characters left
+/// out. For the demo band's and the skimmer tests' made-up stations.
+pub(crate) fn baudot_codes(text: &str) -> Vec<u8> {
+    let mut out = vec![LTRS];
+    let mut figs = false;
+    for ch in text.chars() {
+        let c = ch.to_ascii_uppercase();
+        match c {
+            ' ' => {
+                // Sent for a receiver that unshifts on space: figures after
+                // a space are shifted to again.
+                out.push(BAUDOT_SPACE);
+                figs = false;
+            }
+            '\n' => out.push(BAUDOT_LF),
+            '\r' => out.push(BAUDOT_CR),
+            _ => {
+                if let Some(v) = letter_code(c) {
+                    if figs {
+                        figs = false;
+                        out.push(LTRS);
+                    }
+                    out.push(v);
+                } else if let Some(v) = figure_code(c) {
+                    if !figs {
+                        figs = true;
+                        out.push(FIGS);
+                    }
+                    out.push(v);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Baudot value → character with LTRS/FIGS shift state. Shared by the audio
 /// [`RttyRx`] and the wideband skimmer (both frame characters themselves and
 /// hand the 5-bit value here).
 #[derive(Default)]
 pub struct BaudotRx {
     figs: bool,
+    /// Unshift on space: a space puts it back in letters, as MMTTY's UOS
+    /// and most RTTY programs do, so a FIGS shift read out of the noise (or
+    /// a LTRS missed in it) garbles one word, not the rest of the over.
+    usos: bool,
 }
 
 impl BaudotRx {
     pub fn new() -> Self {
-        BaudotRx { figs: false }
+        BaudotRx { figs: false, usos: false }
+    }
+
+    pub fn set_usos(&mut self, on: bool) {
+        self.usos = on;
     }
 
     /// Decode a 5-bit Baudot value; returns the character, or `None` for shift
@@ -147,7 +192,12 @@ impl BaudotRx {
                 self.figs = true;
                 None
             }
-            BAUDOT_SPACE => Some(' '),
+            BAUDOT_SPACE => {
+                if self.usos {
+                    self.figs = false;
+                }
+                Some(' ')
+            }
             BAUDOT_LF => Some('\n'),
             BAUDOT_CR => None, // ignore CR; LF drives newlines
             0 => None,
@@ -593,6 +643,11 @@ impl RttyRx {
         self.mag
     }
 
+    /// Unshift on space (see [`BaudotRx::set_usos`]).
+    pub fn set_usos(&mut self, on: bool) {
+        self.baudot.set_usos(on);
+    }
+
     /// Current AFC pull in Hz — how far off the cursor the signal actually is.
     pub fn afc_offset_hz(&self) -> f32 {
         self.afc_hz
@@ -612,18 +667,41 @@ impl RttyRx {
     }
 
     pub fn process(&mut self, audio: &[f32]) -> String {
-        let mut out = String::new();
         let mut mixed = Vec::with_capacity(audio.len());
         for &a in audio {
             let z = Complex32::new(a * self.ph.cos(), -a * self.ph.sin());
-            self.ph += self.ph_inc;
-            if self.ph > std::f32::consts::TAU {
-                self.ph -= std::f32::consts::TAU;
-            }
+            self.advance_mixer();
             mixed.push(z);
         }
-        let mut bb = Vec::with_capacity(audio.len());
-        self.lpf.process(&mixed, &mut bb);
+        self.demod(&mixed)
+    }
+
+    /// Feed complex baseband instead of audio: the wide skimmer's lane, cut
+    /// from the I/Q with the signal's centre at `center_hz` (0 for a lane
+    /// centred on it). Mark is the upper tone, as on USB. The AFC turns the
+    /// lane as it turns the audio mixer.
+    pub fn process_iq(&mut self, iq: &[Complex32]) -> String {
+        let mut mixed = Vec::with_capacity(iq.len());
+        for &x in iq {
+            mixed.push(x * Complex32::new(self.ph.cos(), -self.ph.sin()));
+            self.advance_mixer();
+        }
+        self.demod(&mixed)
+    }
+
+    fn advance_mixer(&mut self) {
+        self.ph += self.ph_inc;
+        if self.ph > std::f32::consts::TAU {
+            self.ph -= std::f32::consts::TAU;
+        } else if self.ph < -std::f32::consts::TAU {
+            self.ph += std::f32::consts::TAU;
+        }
+    }
+
+    fn demod(&mut self, mixed: &[Complex32]) -> String {
+        let mut out = String::new();
+        let mut bb = Vec::with_capacity(mixed.len());
+        self.lpf.process(mixed, &mut bb);
 
         let hz_per_rad = (self.rate / TAU) as f32;
 

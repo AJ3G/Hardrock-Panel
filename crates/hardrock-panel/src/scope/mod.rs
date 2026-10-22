@@ -85,7 +85,7 @@ use sdr::{SpectrumFrame, ZoomRequest};
 
 pub use digimodes::Digi;
 pub use settings::ScopeSettings;
-pub use skim::{SkimFeed, SkimSpot};
+pub use skim::{KeyTag, SkimFeed, SkimSpot};
 pub use slotlines::DecodeSlots;
 
 use gpu_run::{Ask, GpuRun, TraceGeom};
@@ -143,6 +143,10 @@ pub struct ScopeOut {
     pub settings_changed: bool,
     /// A skimmer label of DECODE's own was clicked: pick its line there.
     pub skim_pick: Option<u64>,
+    /// A keyboard skimmer's label was clicked (decision 56): `tune_to`,
+    /// `mode` and `passband` carry the receiver's part; DECODE takes this
+    /// mode where it has it.
+    pub key_pick: Option<skim::KeyMode>,
 }
 
 /// A data mode picked on the scope.
@@ -1044,6 +1048,7 @@ mod tests {
             snr: -8.0,
             // Heard in the slot that has just ended.
             utc: utc_now() - 16.0,
+            key: None,
         }
     }
 
@@ -1108,6 +1113,7 @@ mod tests {
                 spot(Some(7), "K1ABC", 14_075_200.0, 14_074_000.0),
                 spot(None, "W9XYZ", 14_131_000.0, 14_130_000.0),
             ],
+            ..Default::default()
         };
         sc.skim(Some(feed.clone()));
         frames(&mut sc, ft8_rig(false), vec![vec![]]);
@@ -1153,6 +1159,58 @@ mod tests {
         sc.skim(None);
         frames(&mut sc, ft8_rig(false), vec![vec![]]);
         assert!(sc.skim_shown.is_empty() && sc.skim_boxes.is_empty());
+    }
+
+    #[test]
+    fn a_keyboard_label_tunes_onto_its_signal_in_its_mode_but_not_in_tx() {
+        let mut sc = Scope::new(None, ScopeSettings::default());
+        let key = |call: &str, hz: f64, mode: skim::KeyMode| SkimSpot {
+            row: None,
+            dial_hz: hz,
+            audio_hz: 0.0,
+            utc: utc_now(),
+            key: Some(KeyTag { mode, wpm: 22, active: true }),
+            ..spot(None, call, hz, hz)
+        };
+        let feed = SkimFeed {
+            period_s: 15.0,
+            spots: vec![
+                key("W2XYZ", 14_090_000.0, skim::KeyMode::Cw),
+                key("KB1XYZ", 14_110_000.0, skim::KeyMode::Psk),
+            ],
+            key_audio_hz: 1500.0,
+        };
+        sc.skim(Some(feed));
+        frames(&mut sc, ft8_rig(false), vec![vec![]]);
+        let at = |sc: &Scope, call: &str| {
+            sc.skim_boxes
+                .iter()
+                .find(|(_, i)| sc.skim_shown[*i].0.call == call)
+                .map(|(r, _)| r.center())
+                .expect("the label is drawn")
+        };
+        // SAFETY INTERLOCK 9: nothing while transmitting.
+        let c = at(&sc, "W2XYZ");
+        let outs =
+            frames(&mut sc, ft8_rig(true), vec![press(c, true, false), press(c, false, false)]);
+        assert!(
+            outs.iter().all(|o| o.tune_to.is_none() && o.mode.is_none() && o.key_pick.is_none())
+        );
+        // CW: the receiver in CW with the carrier at the passband's middle.
+        let outs =
+            frames(&mut sc, ft8_rig(false), vec![press(c, true, false), press(c, false, false)]);
+        assert_eq!(outs[1].mode, Some(sdr::Mode::Cw));
+        assert_eq!(outs[1].tune_to, Some(14_090_000.0 - 600.0));
+        assert_eq!(outs[1].key_pick, Some(skim::KeyMode::Cw));
+        // PSK31: USB, the carrier at DECODE's audio frequency.
+        let p = at(&sc, "KB1XYZ");
+        let outs =
+            frames(&mut sc, ft8_rig(false), vec![press(p, true, false), press(p, false, false)]);
+        assert_eq!(outs[1].mode, Some(sdr::Mode::Usb));
+        assert_eq!(outs[1].tune_to, Some(14_110_000.0 - 1500.0));
+        assert_eq!(outs[1].passband, Some((1250.0, 1750.0)));
+        assert_eq!(outs[1].key_pick, Some(skim::KeyMode::Psk));
+        assert!(sc.skim_shown.iter().any(|(s, _)| s.tag() == "KB1XYZ PSK"));
     }
 
     /// The whole scope on the CPU spectrum (no GPU), drawn by egui with no
