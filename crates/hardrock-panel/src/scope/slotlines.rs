@@ -2,7 +2,7 @@
 //! runs a mode with T/R slots, a green line across the waterfall where each
 //! slot starts, a red one where the mode's transmissions end inside it (an
 //! on-time signal's last symbol: FT8 13.14 s in, FT4 5.54 s, WSPR 111.6 s),
-//! and a faint yellow tint over the dead time from there to the next slot's
+//! and a faint blue tint over the dead time from there to the next slot's
 //! green, where no on-time signal is. AJ3G: "Green TX Start, RED when finish,
 //! and yellow for the no information". WSJT-X draws one line per T/R period
 //! at its boundary, labelled with the UTC; the green lines are drawn the same
@@ -28,10 +28,10 @@ pub const START_INK: Color32 = Color32::from_rgb(0x3c, 0xe0, 0x5a);
 /// The signal end's red: part of the named exception to "red for warnings
 /// only".
 pub const END_INK: Color32 = Color32::from_rgb(0xff, 0x48, 0x48);
-/// The dead time's yellow, 9 % over the rows, so signals and the
-/// skimmer's labels show through it (AJ3G, 22 Oct 2026: 18 % hid them):
-/// part of the same exception.
-pub const DEAD_TINT: Color32 = Color32::from_rgba_premultiplied(0x17, 0x15, 0x00, 0x17);
+/// The dead time's tint: a blue, 6 % over the rows, almost clear, so
+/// signals and the skimmer's labels show through it (AJ3G, 22 Oct 2026:
+/// the yellow at 18 % hid them; blue, as a neutral state is).
+pub const DEAD_TINT: Color32 = Color32::from_rgba_premultiplied(0x04, 0x09, 0x10, 0x10);
 
 /// The most decoder runs remembered (each start, stop or change of mode is
 /// one).

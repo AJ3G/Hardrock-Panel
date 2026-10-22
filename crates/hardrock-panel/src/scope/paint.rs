@@ -1046,7 +1046,7 @@ fn paint_waterfall(
 
     // The decoder's slot lines (decision 51): green at each slot's start,
     // with its UTC at the left, red where its transmissions end, and a faint
-    // yellow over the dead time between, all across the whole width.
+    // blue over the dead time between, all across the whole width.
     let mut labels: Vec<f32> = Vec::new();
     if sc.settings.slot_lines
         && let (Some(&newest), Some(&oldest)) = (times.first(), times.last())
