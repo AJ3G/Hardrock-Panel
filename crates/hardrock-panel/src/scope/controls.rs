@@ -364,11 +364,13 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
             let next = if sc.markers.active == i { "›" } else { "" };
             if chip(ui, sc.markers.m[i].is_some(), &format!("{next}M{}", i + 1))
                 .on_hover_text(
-                    "Lit while it is placed; › marks the one the next right-click places. \
-                     Click to make it that one",
+                    "Lit while it is placed: click to take it away. › marks the one the next \
+                     right-click places; click an unlit one to make it that one",
                 )
                 .clicked()
             {
+                // AJ3G: "Simply pressing it again should remove marker."
+                sc.markers.m[i] = None;
                 sc.markers.active = i;
             }
         }

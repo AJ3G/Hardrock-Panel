@@ -426,8 +426,8 @@ itself and says so under the I/Q line.
 *Transverter LO* are the same setting: change either and the other follows.
 
 **Markers.** Right-click the scope to place M1, then M2; drag one to move
-it. M1 and M2 in the Markers row light while placed, and › marks the one the
-next right-click places. **MKR→PEAK** on the top bar puts it on the
+it. M1 and M2 in the Markers row light while placed; press a lit one to take
+that marker away. › marks the one the next right-click places. **MKR→PEAK** on the top bar puts it on the
 strongest signal in view and follows it. Pressed again while lit, or with
 **Clear**, the markers go and nothing stays lit.
 
