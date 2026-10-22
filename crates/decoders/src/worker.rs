@@ -484,6 +484,129 @@ impl TextDecoder {
     }
 }
 
+// ─────────────────────────────── JTTY ───────────────────────────────
+
+/// A JTTY message as it grows (decision 58): one is sent each time a frame
+/// adds to it, and once more when it ends.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JttyEvent {
+    /// The same for every update of one message.
+    pub id: u64,
+    /// UTC its first frame started.
+    pub utc: f64,
+    /// Its newest frame's audio frequency, Hz.
+    pub audio_hz: f32,
+    /// The text so far, as WSJT-X shows it (a missed frame as " ... ").
+    pub text: String,
+    /// The last callsign-shaped word of it.
+    pub call: Option<String>,
+    /// Its end-of-message frame has come.
+    pub complete: bool,
+}
+
+/// Gaps in the audio up to this long are filled with silence, so the
+/// receiver's sample count keeps to the clock (it times frames by it);
+/// longer, it starts afresh.
+const JTTY_FILL_S: f64 = 5.0;
+
+/// JTTY (WSJT-X 3.2's asynchronous keyboard mode) on its own thread:
+/// mfsk-core's port of WSJT-X's receiver (`jtty::rx::Stream`), at its 12 kHz.
+pub struct JttyDecoder {
+    feed: Feed<f32>,
+    events: Receiver<JttyEvent>,
+}
+
+impl JttyDecoder {
+    /// `rate` is the rate of the audio pushed in; `f0_hz` the audio
+    /// frequency listened at most closely (WSJT-X's Rx frequency), the
+    /// rest of 200 to 2800 Hz searched too.
+    pub fn spawn(rate: f64, f0_hz: f32) -> Self {
+        use mfsk_jtty::jtty::rx::{Params, Receiver as JRx, Stream};
+        let (mut feed, input) = Feed::<f32>::new();
+        let (tx, events) = unbounded();
+        feed.threads.push(
+            std::thread::Builder::new()
+                .name("jtty-decoder".into())
+                .spawn(move || {
+                    let jrate = mfsk_jtty::jtty::SAMPLE_RATE as f64;
+                    let params = |f0: f32| Params { f0_hz: f0, ..Params::default() };
+                    let rx = Arc::new(JRx::new());
+                    let mut p = params(f0_hz);
+                    let mut stream = Stream::new(rx.clone(), p);
+                    let mut rs = Resampler::<f32>::new(rate, jrate);
+                    let mut out = Vec::new();
+                    let mut pcm: Vec<i16> = Vec::new();
+                    // The UTC of the stream's sample 0, and where the next
+                    // block should start.
+                    let mut utc0: Option<f64> = None;
+                    let mut next_utc = 0.0;
+                    for msg in input.iter() {
+                        let (audio, utc) = match msg {
+                            Input::Cmd(f0) => {
+                                p = params(f0);
+                                stream.set_params(p);
+                                continue;
+                            }
+                            Input::Audio(a, utc) => (a, utc),
+                        };
+                        let gap = utc - next_utc;
+                        if utc0.is_none() || !(-1.0..JTTY_FILL_S).contains(&gap) {
+                            stream = Stream::new(rx.clone(), p);
+                            rs = Resampler::<f32>::new(rate, jrate);
+                            utc0 = Some(utc);
+                        } else if gap > 0.05 {
+                            // A block dropped on the way: silence in its place.
+                            let n = (gap * jrate) as usize;
+                            stream.push(&vec![0; n], &mut |_| {});
+                        }
+                        next_utc = utc + audio.len() as f64 / rate;
+                        out.clear();
+                        rs.process(&audio, &mut out);
+                        pcm.clear();
+                        pcm.extend(
+                            out.iter().map(|&x| (x * 32767.0).clamp(-32768.0, 32767.0) as i16),
+                        );
+                        let t0 = utc0.unwrap_or(utc);
+                        let mut gone = false;
+                        stream.push(&pcm, &mut |m| {
+                            let e = JttyEvent {
+                                id: m.id,
+                                utc: t0 + m.start_s as f64,
+                                audio_hz: m.f1_hz,
+                                call: crate::callsign::find_callsign(&m.text),
+                                text: m.text,
+                                complete: m.complete,
+                            };
+                            gone |= tx.send(e).is_err();
+                        });
+                        if gone {
+                            return;
+                        }
+                    }
+                })
+                .expect("spawn JTTY decoder"),
+        );
+        JttyDecoder { feed, events }
+    }
+
+    pub fn push(&self, audio: &[f32], utc: f64) {
+        self.feed.audio(audio, utc);
+    }
+
+    /// Listen most closely at `f0_hz` from the next window.
+    pub fn retune(&self, f0_hz: f32) {
+        self.feed.cmd(f0_hz);
+    }
+
+    pub fn events(&self) -> &Receiver<JttyEvent> {
+        &self.events
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.feed.dropped.load(Ordering::Relaxed)
+    }
+}
+
 // ─────────────────────────────── pictures ───────────────────────────────
 
 /// A picture mode.
@@ -830,5 +953,65 @@ mod tests {
         assert!(top[0] > 150 && top[2] < 100, "{top:?}");
         assert!(bottom[2] > 150 && bottom[0] < 100, "{bottom:?}");
         assert_eq!(top[3], 255);
+    }
+}
+
+#[cfg(test)]
+mod jtty_tests {
+    use super::*;
+
+    /// A JTTY over made by mfsk-core's transmitter, at 48 kHz in noise as the
+    /// receiver's audio comes, in 20 ms blocks: its text and callsign come
+    /// out, whole.
+    #[test]
+    fn a_jtty_over_in_the_receivers_audio_is_read_whole() {
+        use mfsk_jtty::jtty::pack::{ExchangeProfile, tones};
+        use mfsk_jtty::jtty::tx::synth_f32;
+        let t = tones("CQ CQ K1ABC K1ABC", ExchangeProfile::Unknown).unwrap().unwrap();
+        let sig12 = synth_f32(&t, 1500.0, 0.1);
+        let mut up = Resampler::<f32>::new(12_000.0, 48_000.0);
+        let mut sig = Vec::new();
+        up.process(&sig12, &mut sig);
+        // 2 s of noise, the over, 4 s of noise.
+        let lead = 96_000;
+        let n = lead + sig.len() + 192_000;
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut audio: Vec<f32> = (0..n)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.02
+            })
+            .collect();
+        for (a, s) in audio[lead..].iter_mut().zip(&sig) {
+            *a += s;
+        }
+        let d = JttyDecoder::spawn(48_000.0, 1500.0);
+        let utc0 = 1_000_000.0;
+        for (i, b) in audio.chunks(960).enumerate() {
+            d.push(b, utc0 + i as f64 * 0.02);
+            if i % 50 == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        let mut last: Option<JttyEvent> = None;
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while Instant::now() < deadline {
+            if let Ok(e) = d.events().recv_timeout(std::time::Duration::from_millis(200)) {
+                let done = e.complete;
+                last = Some(e);
+                if done {
+                    break;
+                }
+            }
+        }
+        let e = last.expect("decoded");
+        assert!(e.complete, "{e:?}");
+        assert!(e.text.contains("K1ABC"), "{:?}", e.text);
+        assert_eq!(e.call.as_deref(), Some("K1ABC"));
+        assert!((e.audio_hz - 1500.0).abs() < 60.0, "{}", e.audio_hz);
+        assert!((e.utc - (utc0 + 2.0)).abs() < 0.5, "{}", e.utc - utc0);
+        assert_eq!(d.dropped(), 0);
     }
 }

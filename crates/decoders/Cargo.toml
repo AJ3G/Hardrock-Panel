@@ -14,3 +14,4 @@ rustfft.workspace = true
 crossbeam-channel.workspace = true
 tracing.workspace = true
 mfsk-core.workspace = true
+mfsk-jtty.workspace = true

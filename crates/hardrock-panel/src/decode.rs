@@ -37,8 +37,8 @@ use decoders::keyskim::{KeySkimConfig, KeySkimWorker, KeySpot};
 use decoders::modem::wefax::{Ioc, Lpm};
 use decoders::skim::WideSkimmer;
 use decoders::{
-    Fst4Period, ImageCmd, ImageDecoder, ImageMode, ImageUpdate, Q65Mode, RgbaImage, TextDecoder,
-    TextMode, WsjtConfig, WsjtDecoder, WsjtMode,
+    Fst4Period, ImageCmd, ImageDecoder, ImageMode, ImageUpdate, JttyDecoder, Q65Mode, RgbaImage,
+    TextDecoder, TextMode, WsjtConfig, WsjtDecoder, WsjtMode,
 };
 use eframe::egui::{self, RichText};
 use links::WsjtxUdp;
@@ -64,6 +64,7 @@ pub(crate) enum Kind {
     Fst4,
     Q65,
     Msk144,
+    Jtty,
     Rtty,
     Psk31,
     Navtex,
@@ -85,6 +86,8 @@ enum Family {
     Text,
     Picture,
     Link,
+    /// JTTY: a line a message, growing as its frames come (decision 58).
+    Chat,
 }
 
 impl Kind {
@@ -102,7 +105,10 @@ impl Kind {
                 Kind::Msk144,
             ],
         ),
-        ("Keyboard", &[Kind::Rtty, Kind::Psk31, Kind::Navtex, Kind::Olivia, Kind::Thor]),
+        (
+            "Keyboard",
+            &[Kind::Jtty, Kind::Rtty, Kind::Psk31, Kind::Navtex, Kind::Olivia, Kind::Thor],
+        ),
         ("Pictures", &[Kind::Sstv, Kind::Wefax]),
         ("From I/Q", &[Kind::Hfdl, Kind::Acars, Kind::Vdl2, Kind::Ais, Kind::ModeS]),
     ];
@@ -117,6 +123,7 @@ impl Kind {
             Kind::Fst4 => "FST4-60",
             Kind::Q65 => "Q65-30A",
             Kind::Msk144 => "MSK144",
+            Kind::Jtty => "JTTY",
             Kind::Rtty => "RTTY",
             Kind::Psk31 => "PSK31",
             Kind::Navtex => "NAVTEX",
@@ -145,6 +152,7 @@ impl Kind {
             Kind::Rtty | Kind::Psk31 | Kind::Navtex | Kind::Olivia | Kind::Thor => Family::Text,
             Kind::Sstv | Kind::Wefax => Family::Picture,
             Kind::Hfdl | Kind::Acars | Kind::Vdl2 | Kind::Ais | Kind::ModeS => Family::Link,
+            Kind::Jtty => Family::Chat,
         }
     }
 
@@ -174,6 +182,7 @@ impl Kind {
             Kind::Fst4 => "FST4",
             Kind::Q65 => "Q65",
             Kind::Msk144 => "MSK144",
+            Kind::Jtty => "JTTY",
             Kind::Rtty => "RTTY",
             Kind::Psk31 => "PSK31",
             Kind::Navtex => "NAVTEX",
@@ -320,6 +329,8 @@ pub(crate) struct Row {
 enum Worker {
     Wsjt(Arc<WsjtDecoder>, WsjtMode),
     Text(Arc<TextDecoder>, TextMode),
+    /// JTTY, and the audio frequency it listens at most closely.
+    Jtty(Arc<JttyDecoder>, f32),
     Picture(Arc<ImageDecoder>, ImageMode),
     Link(Arc<LinkWorker>, LinkConfig),
 }
@@ -329,6 +340,7 @@ impl Worker {
         match self {
             Worker::Wsjt(w, _) => w.dropped(),
             Worker::Text(w, _) => w.dropped(),
+            Worker::Jtty(w, _) => w.dropped(),
             Worker::Picture(w, _) => w.dropped(),
             Worker::Link(w, _) => w.dropped(),
         }
@@ -374,6 +386,8 @@ pub(crate) struct Decode {
     /// SKIM WIDE's decoders, and what they heard, newest first.
     wide: Option<Arc<WideSkimmer>>,
     wide_spots: VecDeque<SkimSpot>,
+    /// JTTY's messages and their lines: (message, row id), newest first.
+    jtty_rows: VecDeque<(u64, u64)>,
     /// SKIM CW/PSK/RTTY's skimmer, and the exclusions it was given.
     keys: Option<Arc<KeySkimWorker>>,
     keys_cfg: Option<KeySkimConfig>,
@@ -541,6 +555,7 @@ impl Decode {
         self.selected.clear();
         self.anchor = None;
         self.wide_spots.clear();
+        self.jtty_rows.clear();
     }
 
     /// Once a frame: start, retune or stop the decoder as asked, and take
@@ -574,6 +589,13 @@ impl Decode {
         }
         // Retune what can be retuned in place.
         match self.worker.as_mut() {
+            Some((_, Worker::Jtty(w, f0))) => {
+                let want = s.audio_hz as f32;
+                if want != *f0 {
+                    w.retune(want);
+                    *f0 = want;
+                }
+            }
             Some((_, Worker::Text(w, m))) => {
                 if let Some(want) = s.text_mode()
                     && want != *m
@@ -639,6 +661,14 @@ impl Decode {
                 taps.set_audio("decode", Some(Box::new(move |a, utc| f.push(a, utc))));
                 Some(Worker::Text(w, mode))
             }
+            Family::Chat => {
+                let f0 = s.audio_hz as f32;
+                tracing::info!("JTTY decoder started, listening at {f0:.0} Hz");
+                let w = Arc::new(JttyDecoder::spawn(sdr::AUDIO_RATE, f0));
+                let f = w.clone();
+                taps.set_audio("decode", Some(Box::new(move |a, utc| f.push(a, utc))));
+                Some(Worker::Jtty(w, f0))
+            }
             Family::Picture => {
                 let mode = s.image_mode()?;
                 let w = Arc::new(ImageDecoder::spawn(mode, sdr::AUDIO_RATE));
@@ -691,6 +721,33 @@ impl Decode {
                         .find(|&i| self.text.is_char_boundary(i))
                         .unwrap_or(0);
                     self.text.drain(..cut);
+                }
+            }
+            Worker::Jtty(w, _) => {
+                let events: Vec<_> = w.events().try_iter().collect();
+                for e in events {
+                    let r = Row {
+                        id: 0,
+                        utc: e.utc,
+                        snr: None,
+                        dt: None,
+                        audio_hz: Some(e.audio_hz),
+                        rf_hz: Some(at.rf_of_audio(e.audio_hz as f64)),
+                        radio_hz: Some((at.radio_of_audio(e.audio_hz as f64), at.dial_hz)),
+                        text: if e.complete { e.text } else { format!("{} …", e.text) },
+                        call: e.call,
+                        grid: None,
+                    };
+                    // One line a message, rewritten as it grows.
+                    let line = self.jtty_rows.iter().find(|(m, _)| *m == e.id).map(|&(_, id)| id);
+                    match line.and_then(|id| self.rows.iter_mut().find(|x| x.id == id)) {
+                        Some(x) => *x = Row { id: x.id, ..r },
+                        None => {
+                            push_row(&mut self.rows, &mut self.next_id, r);
+                            self.jtty_rows.push_front((e.id, self.next_id));
+                            self.jtty_rows.truncate(ROWS);
+                        }
+                    }
                 }
             }
             Worker::Picture(w, _) => {
@@ -916,7 +973,7 @@ fn key_spot(k: &KeySpot) -> Option<SkimSpot> {
 fn wsjt_bands(xvtr_hz: f64) -> Vec<(f64, f64)> {
     digimodes::DIGIS
         .iter()
-        .filter(|d| Kind::of_digi(d).is_some_and(|k| k.wsjt().is_some()))
+        .filter(|d| Kind::of_digi(d).is_some_and(|k| k.wsjt().is_some() || k == Kind::Jtty))
         .flat_map(|d| d.dials.iter())
         .map(|&f| {
             let lo = f as f64 - xvtr_hz;
@@ -1136,6 +1193,23 @@ fn body(
         });
     }
     ui.horizontal_wrapped(|ui| match s.kind.family() {
+        Family::Chat => {
+            caption(ui, "Rx");
+            ui.add(
+                egui::DragValue::new(&mut s.audio_hz)
+                    .range(300.0..=2800.0)
+                    .speed(5.0)
+                    .suffix(" Hz"),
+            )
+            .on_hover_text(
+                "The audio frequency listened at most closely, as WSJT-X's Rx frequency; \
+                 the rest of 200 to 2800 Hz is searched too",
+            );
+            if chrome::chip(ui, false, "Clear").clicked() {
+                d.rows.clear();
+                d.selected.clear();
+            }
+        }
         Family::Text => {
             if s.kind != Kind::Navtex {
                 caption(ui, "Audio");
@@ -1293,7 +1367,7 @@ fn body(
     ui.separator();
 
     match s.kind.family() {
-        Family::Wsjt | Family::Link => rows(ui, d, s.kind.family(), st),
+        Family::Wsjt | Family::Link | Family::Chat => rows(ui, d, s.kind.family(), st),
         Family::Text => {
             egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).show(ui, |ui| {
                 ui.label(RichText::new(&d.text).monospace().size(13.0));
@@ -1318,6 +1392,10 @@ fn dist_az(r: &Row, heard: &Heard, me: Option<station::LatLon>) -> Option<(f64, 
 fn row_text(r: &Row, fam: Family, heard: &Heard, st: &StationSettings) -> String {
     let snr = r.snr.map_or("—".into(), |v| format!("{v:+.0}"));
     let rf = r.rf_hz.map_or("—".into(), |v| format!("{:.6}", v / 1e6));
+    if fam == Family::Chat {
+        let af = r.audio_hz.map_or("—".into(), |v| format!("{v:.0}"));
+        return format!("{}  {af:>5}  {rf:>11}  {}", hms(r.utc), r.text);
+    }
     if fam != Family::Wsjt {
         return format!("{}  {snr:>4}  {rf:>11}  {}", hms(r.utc), r.text);
     }
@@ -1334,6 +1412,9 @@ fn row_text(r: &Row, fam: Family, heard: &Heard, st: &StationSettings) -> String
 
 /// The header, in the same columns.
 fn header_text(fam: Family, st: &StationSettings) -> String {
+    if fam == Family::Chat {
+        return format!("{:8}  {:>5}  {:>11}  Message", "UTC", "AF Hz", "RF MHz");
+    }
     if fam != Family::Wsjt {
         return format!("{:8}  {:>4}  {:>11}  Message", "UTC", "SNR", "RF MHz");
     }
@@ -1510,6 +1591,7 @@ mod tests {
                     Family::Text => s.text_mode().is_some(),
                     Family::Picture => s.image_mode().is_some(),
                     Family::Link => k.link().is_some(),
+                    Family::Chat => true,
                 };
                 assert!(ok, "{k:?}");
             }

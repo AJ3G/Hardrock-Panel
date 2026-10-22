@@ -10,6 +10,9 @@
 //!   frequency list (IARU Region 2 entries; WSJT-X 2.6 "Frequencies" table)
 //!   and WSPRnet's band list. FST4W shares WSPR's dials.
 //! * JS8: JS8Call's default frequency list.
+//! * JTTY: WSJT-X 3.2's preliminary dials (DXZone's JTTY frequencies, Sept
+//!   2026), 14.090 MHz the main meeting place; USB, its decoder searching
+//!   200 to 2800 Hz as WSJT-X's does (AJ3G: the scope set from these).
 //! * PSK31 and RTTY: common practice on each band (the ARRL's and IARU
 //!   Region 2's band plans give the segments; the dials are where activity
 //!   is usually found, RTTY with a 2125/2295 Hz tone pair on USB).
@@ -222,6 +225,28 @@ pub static DIGIS: &[Digi] = &[
         audio_hz: None,
         dials: &[50_260_000, 144_150_000],
         key: false,
+    },
+    Digi {
+        name: "JTTY",
+        side: Side::Usb,
+        kind: Kind::Weak,
+        lo: 200,
+        hi: 2800,
+        audio_hz: None,
+        dials: &[
+            1_838_000,
+            3_575_000,
+            7_090_000,
+            10_140_000,
+            14_090_000,
+            18_100_000,
+            21_090_000,
+            24_920_000,
+            28_090_000,
+            50_160_000,
+            144_160_000,
+        ],
+        key: true,
     },
     Digi {
         name: "JS8",
@@ -558,7 +583,7 @@ mod tests {
             assert_eq!(digi(d.name).map(|x| x.name), Some(d.name));
         }
         let keys: Vec<&str> = keys().map(|d| d.name).collect();
-        assert_eq!(keys, ["FT8", "FT4", "WSPR", "JS8", "PSK31", "RTTY"]);
+        assert_eq!(keys, ["FT8", "FT4", "WSPR", "JTTY", "JS8", "PSK31", "RTTY"]);
     }
 
     #[test]

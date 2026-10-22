@@ -48,6 +48,9 @@ decoders = { path = "crates/decoders" }
 datalink = { path = "crates/datalink" }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 mfsk-core = { version = "0.10.0", default-features = false, features = ["std", "ft8", "ft4", "wspr", "jt65", "jt9", "fst4", "q65", "msk144", "parallel", "fft-rustfft"] }
+# JTTY (WSJT-X 3.2) from a later mfsk-core, beside 0.10 for the modes above
+# until those move to its new decode API (decision 58).
+mfsk-jtty = { package = "mfsk-core", version = "0.13.1", default-features = false, features = ["std", "jtty", "fft-rustfft"] }
 rayon = "1"
 xng-mode-hfdl = { path = "vendor/xng/crates/xng-mode-hfdl" }
 xng-mode-acars = { path = "vendor/xng/crates/xng-mode-acars" }

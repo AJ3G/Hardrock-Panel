@@ -463,6 +463,16 @@ window of its own, **DOCK** brings it back.
   the mode puts the receiver on its dial frequency in USB (see above).
 - **Keyboard**: RTTY (45.45 baud, 170 Hz), PSK31, NAVTEX, Olivia 8/500 and
   THOR16, as running text. Set the audio frequency the signal sits at.
+- **JTTY** (WSJT-X 3.2's keyboard mode, no time slots): a line a message,
+  with its UTC, audio and RF frequency, growing as each 1.9 s frame comes
+  (an unfinished one ends in "…"; a missed frame shows as " ... "). Frames
+  that fail their check are dropped, so noise never prints. **Rx** is the
+  audio frequency listened at most closely, as WSJT-X's; the rest of 200 to
+  2800 Hz is searched too. JTTY's key on the scope's DATA row, and picking
+  it here, goes to its dial on the band: 1.838, 3.575, 7.090, 10.140,
+  14.090 (the main one), 18.100, 21.090, 24.920, 28.090, 50.160 or 144.160
+  MHz, USB, 200 to 2800 Hz. Receive only for now; nothing is sent to PSK
+  Reporter or ALL.TXT.
 - **Pictures**: SSTV (its mode from the picture's header) and WEFAX (choose
   the LPM; it starts and stops on the tones, or with **Start now** and
   **Stop**).
