@@ -18,6 +18,12 @@
 //! ([`crate::slotclock`]), DIST and AZ to each station from SETTINGS →
 //! Station's grid ([`crate::station`]), lines to select and copy, the running
 //! `ALL.TXT` ([`crate::decodelog`]) and the SPOTS box ([`crate::spots`]).
+//!
+//! **SKIM** (decision 54) labels each station heard on the scope, at its
+//! frequency, from this window's lines ([`Decode::skim_feed`]); a label
+//! clicked there picks its line here. **SKIM WIDE** (decision 54) also
+//! decodes FT8 or FT4 on every other dial of the mode in the I/Q span
+//! ([`decoders::skim::WideSkimmer`]); those are labelled on the scope only.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -25,6 +31,7 @@ use std::time::Instant;
 
 use datalink::{LinkConfig, LinkEvent, LinkMode, LinkWorker, Tuning};
 use decoders::modem::wefax::{Ioc, Lpm};
+use decoders::skim::WideSkimmer;
 use decoders::{
     Fst4Period, ImageCmd, ImageDecoder, ImageMode, ImageUpdate, Q65Mode, RgbaImage, TextDecoder,
     TextMode, WsjtConfig, WsjtDecoder, WsjtMode,
@@ -36,6 +43,7 @@ use serde::{Deserialize, Serialize};
 use crate::decodelog::{self, DecodeLog};
 use crate::rx::{self, Rx};
 use crate::scope::digimodes::{self, Digi};
+use crate::scope::{SkimFeed, SkimSpot};
 use crate::spots::{self, SpotSettings, Spots, pskreporter, wsprnet};
 use crate::station::{self, Heard, StationSettings};
 use crate::{chrome, slotclock, theme};
@@ -226,6 +234,11 @@ pub(crate) struct DecodeSettings {
     pub snap: bool,
     /// SPOTS' ticks.
     pub spots: SpotSettings,
+    /// SKIM: label the stations heard on the scope (decision 54).
+    pub skim: bool,
+    /// SKIM WIDE: with FT8 or FT4, decode every other dial of the mode in
+    /// the I/Q span too (decision 54).
+    pub skim_wide: bool,
 }
 
 impl Default for DecodeSettings {
@@ -239,6 +252,8 @@ impl Default for DecodeSettings {
             ioc_288: false,
             snap: true,
             spots: SpotSettings::default(),
+            skim: true,
+            skim_wide: false,
         }
     }
 }
@@ -284,6 +299,10 @@ pub(crate) struct Row {
     pub audio_hz: Option<f32>,
     /// True RF, Hz.
     pub rf_hz: Option<f64>,
+    /// Where the signal is and the dial it was heard on, the radio's own
+    /// frequencies (before the converter and the calibration), Hz: where the
+    /// scope labels it.
+    pub radio_hz: Option<(f64, f64)>,
     pub text: String,
     /// Who sent it, and the grid it gave (WSJT modes).
     pub call: Option<String>,
@@ -342,7 +361,15 @@ pub(crate) struct Decode {
     selected: HashSet<u64>,
     anchor: Option<u64>,
     next_id: u64,
+    /// A line to bring into view (picked from a scope label).
+    scroll_to: Option<u64>,
+    /// SKIM WIDE's decoders, and what they heard, newest first.
+    wide: Option<Arc<WideSkimmer>>,
+    wide_spots: VecDeque<SkimSpot>,
 }
+
+/// The most of the wide skimmer's decodes kept.
+const WIDE_SPOTS: usize = 400;
 
 /// Where the receiver is, for the RF of each decode.
 #[derive(Clone, Copy)]
@@ -356,6 +383,12 @@ pub(crate) struct Where {
 }
 
 impl Where {
+    /// The radio's own frequency of a signal at `audio_hz`: the dial and
+    /// the audio, on the receiver's sideband.
+    fn radio_of_audio(&self, audio_hz: f64) -> f64 {
+        if self.lsb { self.dial_hz - audio_hz } else { self.dial_hz + audio_hz }
+    }
+
     fn rf_of_audio(&self, audio_hz: f64) -> f64 {
         decoders::FreqCal { ppm: self.ppm }.rf_of_audio(self.dial_hz, audio_hz, self.lsb)
             + self.xvtr_hz
@@ -367,8 +400,77 @@ impl Decode {
     pub(crate) fn stop(&mut self, taps: &rx::Taps) {
         taps.set_audio("decode", None);
         taps.set_iq("decode", None);
+        taps.set_iq("skim", None);
         self.worker = None;
+        self.wide = None;
         self.started_utc = None;
+    }
+
+    /// The scope's skimmer labels (decision 54): the newest decodes, with
+    /// SKIM on and a slotted mode running; `None` otherwise.
+    pub(crate) fn skim_feed(&self, s: &DecodeSettings) -> Option<SkimFeed> {
+        if !s.skim {
+            return None;
+        }
+        let (kind, Worker::Wsjt(..)) = self.worker.as_ref()? else { return None };
+        let period_s = kind.wsjt()?.period_s();
+        Some(skim_feed(&self.rows, &self.wide_spots, period_s, decoders::slot::utc_now()))
+    }
+
+    /// Pick line `id` alone and bring it into view: a scope label clicked.
+    pub(crate) fn pick_row(&mut self, id: u64) {
+        if self.rows.iter().any(|r| r.id == id) {
+            self.selected.clear();
+            self.selected.insert(id);
+            self.anchor = Some(id);
+            self.scroll_to = Some(id);
+        }
+    }
+
+    /// SKIM WIDE (decision 54): run a skimmer on every other dial of the
+    /// mode in the span, started again whenever the dials change, and take
+    /// what it heard.
+    fn wide_frame(&mut self, s: &DecodeSettings, st: &StationSettings, rx: &Rx, at: Where) {
+        let want = self.worker.as_ref().and_then(|(kind, _)| {
+            wide_dials(*kind, s, at.dial_hz, at.xvtr_hz, rx.centre(), rx.rate())
+        });
+        let same = match (&self.wide, &want) {
+            (Some(w), Some((m, d))) => w.mode() == *m && w.dials() == &d[..],
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            rx.taps.set_iq("skim", None);
+            self.wide = None;
+            if let Some((mode, dials)) = want {
+                let mine: Vec<String> = st.call().into_iter().collect();
+                tracing::info!("{} skimmer started on {dials:?}", mode.label());
+                let w = Arc::new(WideSkimmer::spawn(mode, &dials, &mine));
+                let f = w.clone();
+                rx.taps.set_iq(
+                    "skim",
+                    Some(Box::new(move |b| f.push_iq(b.iq, b.rate, b.center, b.utc))),
+                );
+                self.wide = Some(w);
+            }
+        }
+        let Some(w) = &self.wide else { return };
+        for r in w.results() {
+            for d in &r.slot.decodes {
+                let Some(call) = station::sender_of(&d.message).0 else { continue };
+                self.wide_spots.push_front(SkimSpot {
+                    row: None,
+                    hz: r.dial_hz + d.audio_hz as f64,
+                    audio_hz: d.audio_hz,
+                    dial_hz: r.dial_hz,
+                    call,
+                    text: d.message.clone(),
+                    snr: d.snr_db,
+                    utc: d.slot_utc as f64,
+                });
+            }
+        }
+        self.wide_spots.truncate(WIDE_SPOTS);
     }
 
     /// The decoder's slots for the scope's slot lines (decision 51): the
@@ -388,6 +490,7 @@ impl Decode {
         self.last_slot = None;
         self.selected.clear();
         self.anchor = None;
+        self.wide_spots.clear();
     }
 
     /// Once a frame: start, retune or stop the decoder as asked, and take
@@ -450,6 +553,7 @@ impl Decode {
             _ => {}
         }
         self.take(at, wsjtx);
+        self.wide_frame(s, st, rx, at);
     }
 
     fn spawn(
@@ -586,6 +690,7 @@ impl Decode {
                                 dt: None,
                                 audio_hz: None,
                                 rf_hz: Some(d.rf_hz as f64),
+                                radio_hz: None,
                                 text: d.summary.clone(),
                                 call: None,
                                 grid: None,
@@ -634,6 +739,7 @@ impl Decode {
                 dt: Some(d.dt_s),
                 audio_hz: Some(d.audio_hz),
                 rf_hz: Some(rf),
+                radio_hz: Some((at.radio_of_audio(d.audio_hz as f64), at.dial_hz)),
                 text: d.message.clone(),
                 call: call.clone(),
                 grid: grid.clone(),
@@ -713,6 +819,49 @@ fn link_config(mode: LinkMode, rx: &Rx, at: Where) -> LinkConfig {
         cal: decoders::FreqCal { ppm: at.ppm },
     };
     LinkConfig::new(mode, rx.rate(), tuning)
+}
+
+/// The skimmer's labels at `now` from DECODE's lines (newest first) and the
+/// wide skimmer's decodes: those of the last few slots that name who sent
+/// them, at the radio's own frequency.
+fn skim_feed(rows: &VecDeque<Row>, wide: &VecDeque<SkimSpot>, period_s: f64, now: f64) -> SkimFeed {
+    let since = now - (crate::scope::skim::SLOTS_SHOWN as f64 + 1.0) * period_s;
+    let own = rows.iter().take_while(|r| r.utc >= since).filter_map(|r| {
+        let (hz, dial_hz) = r.radio_hz?;
+        Some(SkimSpot {
+            row: Some(r.id),
+            hz,
+            audio_hz: r.audio_hz?,
+            dial_hz,
+            call: r.call.clone()?,
+            text: r.text.clone(),
+            snr: r.snr.unwrap_or(0.0),
+            utc: r.utc,
+        })
+    });
+    let wide = wide.iter().take_while(|w| w.utc >= since).cloned();
+    SkimFeed { period_s, spots: own.chain(wide).collect() }
+}
+
+/// The wide skimmer's mode and dials for DECODE's `kind`, with the receiver
+/// at `dial_hz` in a span `rate` wide around `centre` (all the radio's own
+/// Hz; the mode's dials are as shown, so the converter's `xvtr_hz` comes
+/// off them): every other dial of FT8 or FT4 whose lane is in the span.
+/// `None` with SKIM or SKIM WIDE off, another mode, or no dial in reach.
+fn wide_dials(
+    kind: Kind,
+    s: &DecodeSettings,
+    dial_hz: f64,
+    xvtr_hz: f64,
+    centre: f64,
+    rate: f64,
+) -> Option<(WsjtMode, Vec<f64>)> {
+    if !(s.skim && s.skim_wide) || !matches!(kind, Kind::Ft8 | Kind::Ft4) || rate <= 0.0 {
+        return None;
+    }
+    let all: Vec<f64> = kind.digi()?.dials.iter().map(|&d| d as f64 - xvtr_hz).collect();
+    let dials = decoders::skim::dials_in_span(&all, centre, rate, Some(dial_hz));
+    (!dials.is_empty()).then_some((kind.wsjt()?, dials))
 }
 
 fn push_row(rows: &mut VecDeque<Row>, next_id: &mut u64, mut r: Row) {
@@ -958,6 +1107,30 @@ fn body(
             if all {
                 ui.ctx().copy_text(copy_text(d, s.kind.family(), st, false));
             }
+            if s.kind.family() == Family::Wsjt {
+                let r = chrome::chip(ui, s.skim, "SKIM").on_hover_text(
+                    "Label each station heard on the scope, by its callsign at its frequency, \
+                     on the spectrum and the waterfall; the labels fade over three slots. \
+                     Click a label to pick its line here",
+                );
+                if r.clicked() {
+                    s.skim = !s.skim;
+                }
+                let can = s.skim && matches!(s.kind, Kind::Ft8 | Kind::Ft4);
+                let r = ui
+                    .add_enabled_ui(can, |ui| chrome::chip(ui, s.skim_wide && can, "SKIM WIDE"))
+                    .inner
+                    .on_hover_text(
+                        "Also decode the mode on every other one of its dials in the I/Q span \
+                         (FT8 or FT4, up to 8 dials: a wide SPAN takes in other bands), and \
+                         label those stations on the scope too. Click one of those labels to \
+                         tune there. Their lines are not added here",
+                    )
+                    .on_disabled_hover_text("With SKIM on, for FT8 and FT4");
+                if r.clicked() {
+                    s.skim_wide = !s.skim_wide;
+                }
+            }
         }
         _ => {}
     });
@@ -979,8 +1152,13 @@ fn body(
         }
         _ => format!("receiver audio, 48 kHz · {} at {:.3} kHz", rx.mode.label(), rx.rx_hz / 1e3),
     };
-    let dropped = d.worker.as_ref().map_or(0, |(_, w)| w.dropped());
+    let dropped = d.worker.as_ref().map_or(0, |(_, w)| w.dropped())
+        + d.wide.as_ref().map_or(0, |w| w.dropped());
     let mut line = format!("From the {src} · {dropped} blocks dropped");
+    if let Some(w) = &d.wide {
+        let dials: Vec<String> = w.dials().iter().map(|&h| format!("{:.3}", h / 1e6)).collect();
+        line.push_str(&format!(" · skimming {} MHz too", dials.join(", ")));
+    }
     if let Some((slot, n, ms)) = d.last_slot {
         line.push_str(&format!(" · slot {} : {n} decoded in {ms} ms", hms(slot as f64)));
     }
@@ -1088,45 +1266,44 @@ fn rows(ui: &mut egui::Ui, d: &mut Decode, fam: Family, st: &StationSettings) {
     );
     let line_h = ui.fonts_mut(|f| f.row_height(&font)) + 2.0;
     let mut click: Option<(u64, egui::Modifiers)> = None;
-    egui::ScrollArea::vertical().auto_shrink(false).show_rows(
-        ui,
-        line_h,
-        d.rows.len(),
-        |ui, range| {
-            for (i, r) in d.rows.iter().enumerate().skip(range.start).take(range.len()) {
-                let w = ui.available_width();
-                let (rect, resp) =
-                    ui.allocate_exact_size(egui::vec2(w, line_h), egui::Sense::click());
-                let picked = d.selected.contains(&r.id);
-                let bg = if picked {
-                    Some(theme::FILL_ACTIVE())
-                } else if resp.hovered() {
-                    Some(theme::ROW_HOVER())
-                } else if i % 2 == 1 {
-                    Some(theme::ROW_BG())
-                } else {
-                    None
-                };
-                if let Some(bg) = bg {
-                    ui.painter().rect_filled(rect, 0.0, bg);
-                }
-                let col = if picked { theme::TEXT_STRONG() } else { theme::TEXT() };
-                ui.painter().text(
-                    rect.left_center() + egui::vec2(2.0, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    row_text(r, fam, &d.heard, st),
-                    font.clone(),
-                    col,
-                );
-                if resp.clicked() {
-                    click = Some((r.id, ui.input(|i| i.modifiers)));
-                }
+    let mut area = egui::ScrollArea::vertical().auto_shrink(false);
+    // A line picked from a scope label: scrolled to, a line above it showing.
+    if let Some(i) = d.scroll_to.take().and_then(|id| d.rows.iter().position(|r| r.id == id)) {
+        area = area.vertical_scroll_offset((i.saturating_sub(1)) as f32 * line_h);
+    }
+    area.show_rows(ui, line_h, d.rows.len(), |ui, range| {
+        for (i, r) in d.rows.iter().enumerate().skip(range.start).take(range.len()) {
+            let w = ui.available_width();
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, line_h), egui::Sense::click());
+            let picked = d.selected.contains(&r.id);
+            let bg = if picked {
+                Some(theme::FILL_ACTIVE())
+            } else if resp.hovered() {
+                Some(theme::ROW_HOVER())
+            } else if i % 2 == 1 {
+                Some(theme::ROW_BG())
+            } else {
+                None
+            };
+            if let Some(bg) = bg {
+                ui.painter().rect_filled(rect, 0.0, bg);
             }
-            if d.rows.is_empty() {
-                ui.label(RichText::new("Nothing decoded yet.").weak());
+            let col = if picked { theme::TEXT_STRONG() } else { theme::TEXT() };
+            ui.painter().text(
+                rect.left_center() + egui::vec2(2.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                row_text(r, fam, &d.heard, st),
+                font.clone(),
+                col,
+            );
+            if resp.clicked() {
+                click = Some((r.id, ui.input(|i| i.modifiers)));
             }
-        },
-    );
+        }
+        if d.rows.is_empty() {
+            ui.label(RichText::new("Nothing decoded yet.").weak());
+        }
+    });
     if let Some((id, m)) = click {
         let order: Vec<u64> = d.rows.iter().map(|r| r.id).collect();
         pick(&mut d.selected, &mut d.anchor, &order, id, m.command, m.shift);
@@ -1272,6 +1449,7 @@ mod tests {
                 dt: Some(0.2),
                 audio_hz: Some(1234.0),
                 rf_hz: Some(14_075_234.0),
+                radio_hz: Some((14_075_234.0, 14_074_000.0)),
                 text: text.into(),
                 call,
                 grid,
@@ -1343,6 +1521,92 @@ mod tests {
         // An older settings file snaps.
         let s: DecodeSettings = serde_json::from_str("{\"running\": true}").unwrap();
         assert!(s.snap && s.running);
+    }
+
+    #[test]
+    fn the_scope_labels_the_last_few_slots_stations_where_they_were_heard() {
+        let at = Where { dial_hz: 14_074_000.0, lsb: false, xvtr_hz: 0.0, ppm: 0.0 };
+        assert_eq!(at.radio_of_audio(1234.0), 14_075_234.0);
+        let lsb = Where { lsb: true, dial_hz: 7_175_000.0, ..at };
+        assert_eq!(lsb.radio_of_audio(1500.0), 7_173_500.0);
+        let row = |id: u64, utc: f64, text: &str| {
+            let (call, grid) = station::sender_of(text);
+            Row {
+                id,
+                utc,
+                snr: Some(-7.0),
+                dt: Some(0.1),
+                audio_hz: Some(1234.0),
+                rf_hz: Some(at.rf_of_audio(1234.0)),
+                radio_hz: Some((at.radio_of_audio(1234.0), at.dial_hz)),
+                text: text.into(),
+                call,
+                grid,
+            }
+        };
+        // Newest first, as the list keeps them.
+        let rows: VecDeque<Row> = [
+            row(3, 1000.0, "CQ K1ABC FN42"),
+            row(2, 985.0, "W9XYZ G4ABC -12"),
+            // A message naming no sender: no label.
+            row(9, 985.0, "TNX 73 GL"),
+            row(1, 900.0, "CQ VE3ABC FN03"),
+        ]
+        .into();
+        let wide: VecDeque<SkimSpot> = [SkimSpot {
+            row: None,
+            hz: 18_101_000.0,
+            audio_hz: 1000.0,
+            dial_hz: 18_100_000.0,
+            call: "JA1XYZ".into(),
+            text: "CQ JA1XYZ PM95".into(),
+            snr: -15.0,
+            utc: 1000.0,
+        }]
+        .into();
+        let f = skim_feed(&rows, &wide, 15.0, 1016.0);
+        assert_eq!(f.period_s, 15.0);
+        let calls: Vec<&str> = f.spots.iter().map(|s| s.call.as_str()).collect();
+        // VE3ABC's slot is too long ago.
+        assert_eq!(calls, ["K1ABC", "G4ABC", "JA1XYZ"]);
+        let k = &f.spots[0];
+        assert_eq!(
+            (k.row, k.hz, k.dial_hz, k.audio_hz),
+            (Some(3), 14_075_234.0, 14_074_000.0, 1234.0)
+        );
+        assert_eq!(f.spots[2].row, None);
+        // A label clicked on the scope picks its line alone; a line since
+        // dropped from the list picks nothing.
+        let mut d = Decode { rows, ..Default::default() };
+        d.selected.insert(1);
+        d.pick_row(2);
+        assert_eq!(d.selected, HashSet::from([2]));
+        assert_eq!(d.scroll_to, Some(2));
+        d.pick_row(42);
+        assert_eq!(d.selected, HashSet::from([2]));
+    }
+
+    #[test]
+    fn skim_wide_takes_the_modes_other_dials_in_the_span() {
+        let mut s = DecodeSettings { skim_wide: true, ..Default::default() };
+        // 6.144 MHz around 16 MHz with the receiver on 14.074: 18.100 too.
+        let w = wide_dials(Kind::Ft8, &s, 14_074_000.0, 0.0, 16e6, 6_144_000.0);
+        assert_eq!(w, Some((WsjtMode::Ft8, vec![18_100_000.0])));
+        let w = wide_dials(Kind::Ft4, &s, 14_080_000.0, 0.0, 16e6, 6_144_000.0);
+        assert_eq!(w, Some((WsjtMode::Ft4, vec![18_104_000.0])));
+        // 192 kHz: nothing else in reach.
+        assert_eq!(wide_dials(Kind::Ft8, &s, 14_074_000.0, 0.0, 14.1e6, 192_000.0), None);
+        // Behind a converter the dials are where the radio hears them.
+        let w = wide_dials(Kind::Ft8, &s, 28_174_000.0, 116e6, 28.2e6, 192_000.0);
+        assert_eq!(w, None);
+        let w = wide_dials(Kind::Ft8, &s, 28_000_000.0, 116e6, 28.1e6, 192_000.0);
+        assert_eq!(w, Some((WsjtMode::Ft8, vec![28_174_000.0])));
+        // Off, or another mode: none.
+        assert_eq!(wide_dials(Kind::Wspr, &s, 14_095_600.0, 0.0, 16e6, 6_144_000.0), None);
+        s.skim = false;
+        assert_eq!(wide_dials(Kind::Ft8, &s, 14_074_000.0, 0.0, 16e6, 6_144_000.0), None);
+        let d = DecodeSettings::default();
+        assert!(d.skim && !d.skim_wide);
     }
 
     #[test]

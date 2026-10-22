@@ -302,6 +302,39 @@ impl Taps {
 
 /// The system clock, UTC seconds since 1970 (NTP/GPS-disciplined at AJ3G's;
 /// decision 26).
+/// The demo band: the `sdr` crate's made-up stations, and FT8 on 14.074 MHz
+/// whenever the span reaches it (decision 54), so DECODE and the skimmer's
+/// labels have something real to decode with no radio.
+struct DemoBand {
+    band: sdr::SyntheticSource,
+    ft8: decoders::demo::DemoFt8,
+}
+
+impl sdr::IqSource for DemoBand {
+    fn sample_rate(&self) -> f64 {
+        self.band.sample_rate()
+    }
+    fn center_hz(&self) -> f64 {
+        self.band.center_hz()
+    }
+    fn set_center_hz(&mut self, hz: f64) {
+        self.band.set_center_hz(hz);
+    }
+    fn read(&mut self, out: &mut [f32]) -> usize {
+        let n = self.band.read(out);
+        if n > 0 {
+            let rate = self.band.sample_rate();
+            // Paced to real time: the block's last sample is now.
+            let utc = utc_now() - (n / 2) as f64 / rate;
+            self.ft8.add(&mut out[..n], rate, self.band.center_hz(), utc);
+        }
+        n
+    }
+    fn label(&self) -> String {
+        self.band.label()
+    }
+}
+
 pub(crate) fn utc_now() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -469,7 +502,10 @@ impl Rx {
             IqChoice::Off => {}
             IqChoice::Demo => {
                 let centre = self.centre;
-                let src = sdr::SyntheticSource::demo(s.rate as f64, centre);
+                let src = DemoBand {
+                    band: sdr::SyntheticSource::demo(s.rate as f64, centre),
+                    ft8: decoders::demo::DemoFt8::new(),
+                };
                 self.spawn(Box::new(src), scope);
                 self.running = IqChoice::Demo;
             }

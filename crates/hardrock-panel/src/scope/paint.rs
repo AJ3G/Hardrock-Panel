@@ -13,9 +13,11 @@ use super::digimodes;
 use super::gpu::{self, SurfaceParams, TraceParams, WfParams};
 use super::levels::{self, level_text, s_unit};
 use super::markers::{fmt_delta, fmt_tenth};
+use super::offset::{OffsetBar, fmt_offset};
 use super::pointer::{self, Drag, DragKind, Grab, drag_edge, grab_at, wheel_zoom};
 use super::rows::Upload;
 use super::settings::{Scale, TopView};
+use super::skim;
 use super::slotlines;
 use super::view::{self, FreqMap, Span, View, grid_lines, grid_step};
 use super::{Scope, ScopeOut, ScopeRig};
@@ -109,6 +111,10 @@ pub(super) fn tft(
     let (spec_plot, spec_gut) = split_gutter(spec);
     let (bp_plot, bp_gut) = split_gutter(bp);
     let (wf_plot, wf_gut) = split_gutter(wf);
+
+    // The skimmer's labels this frame (decision 54).
+    sc.skim_shown = skim::labels(&sc.skim, super::utc_now());
+    sc.offset_close = None;
 
     // Which callback carries this frame's rows: the first one on screen.
     let mut upload = upload;
@@ -366,6 +372,10 @@ fn paint_spectrum(
         sc.markers = m;
         paint_markers(sc, &p, all, trace, cx, f);
     }
+    if has_trace {
+        paint_skim_spectrum(sc, &p, all, trace, cx);
+    }
+    paint_offset(sc, &p, all, cx, true);
 
     // The radio's centre, dashed.
     let xc = x(cx.span.center);
@@ -559,6 +569,151 @@ fn paint_markers(
     for l in lines {
         p.text(pos2(all.left() + 6.0, yy), Align2::LEFT_TOP, l, mono(10.5), ink());
         yy += 14.0;
+    }
+}
+
+/// A skimmer label's ink: blue for a station calling CQ, the screen's ink
+/// for the rest (neutral states are blue, AJ3G's rule), at its fade.
+fn skim_ink(s: &skim::SkimSpot, alpha: f32) -> Color32 {
+    let c = if s.cq() { accent() } else { ink() };
+    c.gamma_multiply(alpha)
+}
+
+/// The skimmer's labels up the spectrum's foot: each station's callsign,
+/// standing on its frequency, over the grid's labels.
+fn paint_skim_spectrum(sc: &Scope, p: &egui::Painter, all: Rect, trace: Rect, cx: &Ctx) {
+    if trace.height() < 60.0 {
+        return;
+    }
+    let v = cx.view;
+    let font = mono(9.5 * theme::skimmer_font_scale());
+    let foot = all.bottom() - 15.0;
+    for (s, a) in &sc.skim_shown {
+        if !v.contains(s.hz) {
+            continue;
+        }
+        let xx = v.x_of(s.hz, all.left(), all.width()).round() + 0.5;
+        let col = skim_ink(s, *a);
+        let g = p.layout_no_wrap(s.call.clone(), font.clone(), col);
+        let (w, h) = (g.size().x, g.size().y);
+        p.vline(xx, foot - 3.0..=foot, Stroke::new(1.0, accent().gamma_multiply(*a)));
+        // Turned to read upwards, from just over the tick, on a backing so
+        // the trace's noise does not run through it.
+        let at = pos2(xx - 0.5 * h, foot - 5.0);
+        let back =
+            Rect::from_min_max(pos2(at.x - 1.0, at.y - w - 2.0), pos2(at.x + h + 1.0, at.y + 1.0));
+        p.rect_filled(back, 2.0, ground().gamma_multiply(0.75 * a));
+        p.add(egui::epaint::TextShape::new(at, g, col).with_angle(-std::f32::consts::FRAC_PI_2));
+    }
+}
+
+/// Room for a label's text either side, and its box's height, points.
+const SKIM_PAD: f32 = 4.0;
+pub(super) const SKIM_LEAD: f32 = 5.0;
+
+/// The skimmer's labels along the waterfall's top, where the newest rows
+/// are: a box with the callsign beside each signal, a leader up from it,
+/// stacked in lanes ([`skim::lanes`]). Remembers where they went, for the
+/// pointer.
+fn paint_skim_waterfall(sc: &mut Scope, ui: &egui::Ui, p: &egui::Painter, rect: Rect, cx: &Ctx) {
+    sc.skim_boxes.clear();
+    if sc.skim_shown.is_empty() {
+        return;
+    }
+    let v = cx.view;
+    let fs = theme::skimmer_font_scale();
+    let font = mono(11.0 * fs);
+    let box_h = 15.0 * fs;
+    let x = |f: f64| v.x_of(f, rect.left(), rect.width());
+    let vis: Vec<usize> =
+        (0..sc.skim_shown.len()).filter(|&i| v.contains(sc.skim_shown[i].0.hz)).collect();
+    let galleys: Vec<_> = vis
+        .iter()
+        .map(|&i| {
+            let (s, a) = &sc.skim_shown[i];
+            p.layout_no_wrap(s.call.clone(), font.clone(), skim_ink(s, *a))
+        })
+        .collect();
+    let boxes: Vec<(f32, f32)> = vis
+        .iter()
+        .zip(&galleys)
+        .map(|(&i, g)| (x(sc.skim_shown[i].0.hz), g.size().x + 2.0 * SKIM_PAD))
+        .collect();
+    let lanes = skim::lanes(&boxes, SKIM_LEAD, 4.0);
+    let hover = ui.ctx().pointer_hover_pos().filter(|q| rect.contains(*q));
+    for (((&i, g), &(sx, w)), lane) in vis.iter().zip(galleys).zip(&boxes).zip(lanes) {
+        let Some(lane) = lane else { continue };
+        let a = sc.skim_shown[i].1;
+        let top = rect.top() + 3.0 + lane as f32 * (box_h + 2.0);
+        let r = Rect::from_min_size(pos2(sx + SKIM_LEAD, top), vec2(w, box_h));
+        if r.bottom() > rect.bottom() - 2.0 {
+            continue;
+        }
+        let hot = hover.is_some_and(|q| r.contains(q));
+        let edge_c = if hot { accent() } else { accent().gamma_multiply(0.55 * a) };
+        // The leader: down the signal from the top to the box's middle.
+        p.vline(sx.round() + 0.5, rect.top()..=r.center().y, Stroke::new(1.0, edge_c));
+        p.hline(sx..=r.left(), r.center().y, Stroke::new(1.0, edge_c));
+        p.rect_filled(r, 2.0, ground().gamma_multiply(0.85));
+        p.rect_stroke(
+            r,
+            2.0,
+            Stroke::new(if hot { 1.5 } else { 1.0 }, edge_c),
+            egui::StrokeKind::Inside,
+        );
+        let col = if hot { ink() } else { skim_ink(&sc.skim_shown[i].0, a) };
+        p.galley(pos2(r.left() + SKIM_PAD, r.center().y - 0.5 * g.size().y), g, col);
+        sc.skim_boxes.push((r, i));
+    }
+}
+
+/// The offset bar (decision 55): a line down the spectrum (`spectrum`) or
+/// the waterfall, in the neutral blue, with its readout. On the spectrum
+/// the readout is a flag at the bar's top: the offset from the dial, as
+/// DECODE's AF column, and the bar's frequency, with a × that takes it away;
+/// on the waterfall, the offset alone along the foot. Off the view, the
+/// flag is pinned to that side with an arrow.
+fn paint_offset(sc: &mut Scope, p: &egui::Painter, rect: Rect, cx: &Ctx, spectrum: bool) {
+    let Some(bar) = sc.offset else { return };
+    let v = cx.view;
+    let xx = v.x_of(bar.hz, rect.left(), rect.width());
+    let inside = (rect.left()..=rect.right()).contains(&xx);
+    let lit = accent();
+    if inside {
+        let w = if sc.offset_drag { 2.0 } else { 1.5 };
+        p.vline(xx.round() + 0.5, rect.y_range(), Stroke::new(w, lit));
+    }
+    let off = bar.offset_hz(cx.rig.rx_hz, cx.rig.mode.is_lower());
+    let text = if spectrum {
+        format!("{} · {}", fmt_offset(off), fmt_tenth(cx.map.shown(bar.hz)))
+    } else {
+        fmt_offset(off)
+    };
+    let text = match (inside, xx < rect.left()) {
+        (true, _) => text,
+        (false, true) => format!("◀ {text}"),
+        (false, false) => format!("{text} ▶"),
+    };
+    let g = p.layout_no_wrap(text, mono(10.5), ink());
+    let close_w = if spectrum { 14.0 } else { 0.0 };
+    let size = g.size() + vec2(8.0 + close_w, 4.0);
+    let y = if spectrum { rect.top() + 38.0 } else { rect.bottom() - size.y - 4.0 };
+    let left = if !inside {
+        if xx < rect.left() { rect.left() + 4.0 } else { rect.right() - size.x - 4.0 }
+    } else if xx + 4.0 + size.x > rect.right() {
+        xx - 4.0 - size.x
+    } else {
+        xx + 4.0
+    };
+    let r = Rect::from_min_size(pos2(left, y), size);
+    p.rect_filled(r, 2.0, ground().gamma_multiply(0.9));
+    p.rect_stroke(r, 2.0, Stroke::new(1.0, lit), egui::StrokeKind::Inside);
+    p.galley(pos2(r.left() + 4.0, r.top() + 2.0), g, ink());
+    if spectrum {
+        let c = Rect::from_min_max(pos2(r.right() - close_w, r.top()), r.max);
+        p.vline(c.left(), c.y_range(), Stroke::new(1.0, lit.gamma_multiply(0.6)));
+        p.text(c.center(), Align2::CENTER_CENTER, "×", label(12.0), lit);
+        sc.offset_close = Some(c);
     }
 }
 
@@ -872,6 +1027,8 @@ fn paint_waterfall(
             3.0,
         ));
     }
+    paint_skim_waterfall(sc, ui, &p, rect, cx);
+    paint_offset(sc, &p, rect, cx, false);
 
     // Each visible row's time, newest first, for the slot lines and the
     // UTC ticks: both are placed where the rows cross their time.
@@ -1085,19 +1242,86 @@ fn pointer_on(
     let marker_at = |px: f32| {
         (0..2).find(|&i| sc.markers.m[i].is_some_and(|m| (x(m.hz) - px).abs() < pointer::EDGE_GRAB))
     };
-    let (pressed, down, released, hover) = ui.input(|i| {
+    let (pressed, down, released, hover, shift) = ui.input(|i| {
         (
             i.pointer.primary_pressed(),
             i.pointer.primary_down(),
             i.pointer.primary_released(),
             i.pointer.hover_pos(),
+            i.modifiers.shift,
         )
     });
     let here = hover.filter(|p| rect.contains(*p));
+    // The skimmer's label, the offset bar's ×, or the bar itself under the
+    // pointer: they come before anything under them.
+    let label_at = |q: Pos2| sc.skim_boxes.iter().find(|(r, _)| r.contains(q)).map(|&(_, i)| i);
+    let close_at = |q: Pos2| sc.offset_close.is_some_and(|r| r.contains(q));
+    let bar_at = |px: f32| sc.offset.is_some_and(|b| (x(b.hz) - px).abs() < pointer::EDGE_GRAB);
+    // Where the bar goes for the pointer at `px`: onto a labelled station's
+    // own frequency when it is within a few pixels of one, so the bar reads
+    // exactly the AF DECODE gave it.
+    let bar_hz = |px: f32| {
+        sc.skim_shown
+            .iter()
+            .map(|(s, _)| s.hz)
+            .filter(|&hz| (x(hz) - px).abs() <= 4.0)
+            .min_by(|a, b| (x(*a) - px).abs().total_cmp(&(x(*b) - px).abs()))
+            .unwrap_or_else(|| f_at(px))
+    };
+    let rx_grab = |px: f32| {
+        matches!(grab_at(px, x(rx), lo_x, hi_x), Some(Grab::Rx | Grab::EdgeLo | Grab::EdgeHi))
+    };
+
+    // Hover over a label, the ×, or the bar: say what it is.
+    let mut over_own = false;
+    if sc.drag.is_none()
+        && sc.marker_drag.is_none()
+        && !sc.offset_drag
+        && let Some(pos) = here
+    {
+        if let Some(i) = label_at(pos) {
+            let s = &sc.skim_shown[i].0;
+            let own = s.row.is_some();
+            ui.ctx().set_cursor_icon(if own || !tx {
+                CursorIcon::PointingHand
+            } else {
+                CursorIcon::NotAllowed
+            });
+            let what = if own {
+                "click to pick it in DECODE".to_string()
+            } else if tx {
+                "tuning locked while transmitting".to_string()
+            } else {
+                format!("click to tune to its dial, {}", view::fmt_freq(cx.map.shown(s.dial_hz)))
+            };
+            sc.cursor = format!("{} · {what}", s.call);
+            let detail = format!(
+                "{}\n{:+.0} dB · AF {:.0} Hz on the {} dial · {} · {} UTC\n{what}",
+                s.text,
+                s.snr,
+                s.audio_hz,
+                view::fmt_freq(cx.map.shown(s.dial_hz)),
+                fmt_tenth(cx.map.shown(s.hz)),
+                fmt_utc(s.utc),
+            );
+            resp.clone().on_hover_text_at_pointer(detail);
+            over_own = true;
+        } else if close_at(pos) {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            sc.cursor = "remove the offset bar".into();
+            over_own = true;
+        } else if bar_at(pos.x) && (tx || !rx_grab(pos.x)) {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            sc.cursor = "drag the offset bar · it tunes nothing".into();
+            over_own = true;
+        }
+    }
 
     // Hover: the cursor shape and what a click would do.
     if sc.drag.is_none()
         && sc.marker_drag.is_none()
+        && !sc.offset_drag
+        && !over_own
         && let Some(pos) = here
     {
         let g = if tx { None } else { grab_at(pos.x, x(rx), lo_x, hi_x) };
@@ -1121,7 +1345,8 @@ fn pointer_on(
                     (Some(Grab::Passband), _) => "drag to tune with the passband · click to tune",
                     (Some(_), _) => "drag to set the filter",
                     (None, Some(_)) => "drag the marker",
-                    _ => "click to tune · right-click for a marker",
+                    _ =>
+                        "click to tune · right-click for a marker · shift-click for the offset bar",
                 }
             )
         };
@@ -1129,7 +1354,17 @@ fn pointer_on(
 
     // Press.
     if pressed && let Some(pos) = here {
-        if let Some(i) = marker_at(pos.x).filter(|_| {
+        sc.skim_press = None;
+        if close_at(pos) {
+            sc.offset = None;
+        } else if let Some(i) = label_at(pos) {
+            sc.skim_press = Some(i);
+        } else if shift || (bar_at(pos.x) && (tx || !rx_grab(pos.x))) {
+            // The offset bar: shift drops it here (and drags it on), a
+            // press on it drags it. It moves nothing but itself.
+            sc.offset = Some(OffsetBar { hz: bar_hz(pos.x) });
+            sc.offset_drag = true;
+        } else if let Some(i) = marker_at(pos.x).filter(|_| {
             !matches!(
                 grab_at(pos.x, x(rx), lo_x, hi_x),
                 Some(Grab::Rx | Grab::EdgeLo | Grab::EdgeHi)
@@ -1145,6 +1380,10 @@ fn pointer_on(
 
     // Drag.
     if down && let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+        if sc.offset_drag {
+            sc.offset = Some(OffsetBar { hz: bar_hz(pos.x) });
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        }
         if let Some(i) = sc.marker_drag {
             sc.markers.move_to(i, f_at(pos.x));
         }
@@ -1192,6 +1431,23 @@ fn pointer_on(
             out.tune_to = Some(cx.map.radio(f));
         }
         sc.marker_drag = None;
+        sc.offset_drag = false;
+        // A click on a skimmer label: DECODE's own picks its line there;
+        // the wide skimmer's tunes the receiver to the dial it was heard on.
+        // (Only where the press was: the spectrum and the waterfall each
+        // see the release.)
+        if let Some(pos) = here
+            && let Some(i) = sc.skim_press.take().filter(|&i| label_at(pos) == Some(i))
+        {
+            let s = &sc.skim_shown[i].0;
+            match s.row {
+                Some(id) => out.skim_pick = Some(id),
+                // SAFETY INTERLOCK 9: a label tunes nothing while
+                // transmitting.
+                None if !tx => out.tune_to = Some(s.dial_hz),
+                None => {}
+            }
+        }
     }
 
     if resp.double_clicked() {

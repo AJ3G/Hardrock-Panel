@@ -32,8 +32,16 @@
 //! tune to it (snapped to the step), drag the receiver marker, drag a filter
 //! edge, wheel to step, ctrl+wheel to zoom about the pointer, drag empty
 //! space to pan, double-click for the whole span, right-click to place a
-//! measurement marker. Nothing tunes while the radio transmits (safety
-//! interlock 9).
+//! measurement marker, shift-click to drop the offset bar. Nothing tunes
+//! while the radio transmits (safety interlock 9).
+//!
+//! # The skimmer's labels and the offset bar (decisions 54 and 55)
+//!
+//! [`Scope::skim`] takes DECODE's newest decodes each frame and labels each
+//! station by its callsign at its frequency, on the waterfall's top and up
+//! the spectrum's foot, fading over three slots ([`skim`]). The offset bar
+//! ([`offset`]) is a measuring cursor that reads its distance from the dial
+//! in DECODE's hertz; it retunes nothing.
 //!
 //! # The FFT on the GPU (decision 37)
 //!
@@ -55,6 +63,7 @@ mod gpu_run;
 pub mod gpu_spec;
 pub mod levels;
 mod markers;
+mod offset;
 mod paint;
 pub mod palette;
 mod persistence;
@@ -62,6 +71,7 @@ pub mod pointer;
 mod rows;
 pub mod scf;
 pub mod settings;
+pub mod skim;
 pub mod slotlines;
 pub mod view;
 
@@ -75,10 +85,12 @@ use sdr::{SpectrumFrame, ZoomRequest};
 
 pub use digimodes::Digi;
 pub use settings::ScopeSettings;
+pub use skim::{SkimFeed, SkimSpot};
 pub use slotlines::DecodeSlots;
 
 use gpu_run::{Ask, GpuRun, TraceGeom};
 use markers::{Exact, ExactPeak, Markers};
+use offset::OffsetBar;
 use persistence::Persistence;
 use pointer::{Drag, Wheel};
 use rows::{Rows, Upload};
@@ -129,6 +141,8 @@ pub struct ScopeOut {
     pub commands: Vec<sdr::Command>,
     /// A setting changed: save [`Scope::settings`].
     pub settings_changed: bool,
+    /// A skimmer label of DECODE's own was clicked: pick its line there.
+    pub skim_pick: Option<u64>,
 }
 
 /// A data mode picked on the scope.
@@ -283,6 +297,18 @@ pub struct Scope {
     notice: Option<(String, f64)>,
     /// DECODE's runs, for the slot lines.
     slot_lines: slotlines::SlotLines,
+    /// DECODE's newest decodes, for the skimmer's labels; the labels shown
+    /// this frame, with their opacity; where their boxes were drawn on the
+    /// waterfall; and the one a press went down on.
+    skim: SkimFeed,
+    skim_shown: Vec<(SkimSpot, f32)>,
+    skim_boxes: Vec<(egui::Rect, usize)>,
+    skim_press: Option<usize>,
+    /// The offset bar, whether it is being dragged, and its readout's
+    /// remove button as drawn.
+    offset: Option<OffsetBar>,
+    offset_drag: bool,
+    offset_close: Option<egui::Rect>,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -353,6 +379,13 @@ impl Scope {
             resyncs_told: 0,
             notice: None,
             slot_lines: slotlines::SlotLines::default(),
+            skim: SkimFeed::default(),
+            skim_shown: Vec::new(),
+            skim_boxes: Vec::new(),
+            skim_press: None,
+            offset: None,
+            offset_drag: false,
+            offset_close: None,
         }
     }
 
@@ -463,6 +496,12 @@ impl Scope {
     /// running a mode that has them), for the slot lines.
     pub fn decode_slots(&mut self, slots: Option<DecodeSlots>) {
         self.slot_lines.feed(slots, utc_now());
+    }
+
+    /// Each frame: DECODE's newest decodes for the skimmer's labels (`None`
+    /// when SKIM is off or no slotted mode runs: no labels).
+    pub fn skim(&mut self, feed: Option<SkimFeed>) {
+        self.skim = feed.unwrap_or_default();
     }
 
     fn map(&self) -> FreqMap {
@@ -947,6 +986,173 @@ mod tests {
         assert_eq!(h.step(true, 7.2), (true, false));
         assert_eq!(h.step(false, 7.3), (true, false));
         assert_eq!(h.step(false, 9.0), (false, true));
+    }
+
+    /// The scope drawn by egui with no window over a still snapshot, and the
+    /// pointer's events for each frame; what it asked for each frame.
+    fn frames(sc: &mut Scope, rig: ScopeRig, events: Vec<Vec<egui::Event>>) -> Vec<ScopeOut> {
+        thread_local! {
+            static CTX: (egui::Context, std::cell::Cell<f64>) =
+                (egui::Context::default(), std::cell::Cell::new(0.0));
+        }
+        let (ctx, clock) = CTX.with(|c| (c.0.clone(), c.1.get()));
+        let snap =
+            sdr::Snapshot { center_hz: 14_100_000.0, sample_rate: 192_000.0, ..Default::default() };
+        let mut outs = Vec::new();
+        for (i, ev) in events.into_iter().enumerate() {
+            let t = clock + (i + 1) as f64 * 0.05;
+            CTX.with(|c| c.1.set(t));
+            let input = egui::RawInput {
+                time: Some(t),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                events: ev,
+                ..Default::default()
+            };
+            let mut out = None;
+            let mut full = ctx.run_ui(input, |ui| out = Some(sc.ui(ui, &snap, rig)));
+            full.textures_delta.clear();
+            outs.push(out.unwrap());
+        }
+        outs
+    }
+
+    fn press(pos: egui::Pos2, pressed: bool, shift: bool) -> Vec<egui::Event> {
+        let modifiers = egui::Modifiers { shift, ..Default::default() };
+        vec![
+            egui::Event::ModifiersChanged(modifiers),
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            },
+        ]
+    }
+
+    fn spot(row: Option<u64>, call: &str, hz: f64, dial: f64) -> SkimSpot {
+        SkimSpot {
+            row,
+            hz,
+            audio_hz: (hz - dial) as f32,
+            dial_hz: dial,
+            call: call.into(),
+            text: format!("CQ {call} FN42"),
+            snr: -8.0,
+            // Heard in the slot that has just ended.
+            utc: utc_now() - 16.0,
+        }
+    }
+
+    fn ft8_rig(transmitting: bool) -> ScopeRig {
+        ScopeRig {
+            rx_hz: 14_074_000.0,
+            mode: sdr::Mode::Usb,
+            passband: (200.0, 3000.0),
+            transmitting,
+            on_air: transmitting,
+        }
+    }
+
+    #[test]
+    fn the_offset_bar_is_dropped_dragged_and_removed_and_tunes_nothing() {
+        let mut sc = Scope::new(None, ScopeSettings::default());
+        let rig = ft8_rig(false);
+        let first = frames(&mut sc, rig, vec![vec![]]);
+        assert!(first[0].tune_to.is_none());
+        // The OFFSET chip's place: the middle of the passband.
+        assert_eq!(OffsetBar::at_receiver(rig.rx_hz, rig.passband).hz, 14_075_600.0);
+        // Shift-click well away from the receiver, in the spectrum, then
+        // drag; transmitting or not, nothing is tuned.
+        for tx in [false, true] {
+            let rig = ft8_rig(tx);
+            let (a, b) = (egui::pos2(300.0, 120.0), egui::pos2(340.0, 120.0));
+            let outs = frames(
+                &mut sc,
+                rig,
+                vec![
+                    press(a, true, true),
+                    vec![egui::Event::PointerMoved(b)],
+                    press(b, false, false),
+                ],
+            );
+            assert!(outs.iter().all(|o| o.tune_to.is_none() && o.passband.is_none()));
+            let bar = sc.offset.expect("the bar is placed");
+            assert!(!sc.offset_drag);
+            // Where it ended is where the pointer let go, and it reads its
+            // distance from the dial.
+            let v = view::view(Span { center: 14_100_000.0, width: 192_000.0 }, None);
+            let hz_b = v.lo + (v.hi - v.lo) * ((340.0 - 0.0) / 1280.0);
+            assert!((bar.hz - hz_b).abs() < 3000.0, "{} against {hz_b}", bar.hz);
+            assert_eq!(bar.offset_hz(rig.rx_hz, false), bar.hz - 14_074_000.0);
+        }
+        // Its × takes it away.
+        let close = sc.offset_close.expect("the readout's ×").center();
+        frames(
+            &mut sc,
+            ft8_rig(false),
+            vec![press(close, true, false), press(close, false, false)],
+        );
+        assert!(sc.offset.is_none());
+    }
+
+    #[test]
+    fn a_skimmer_label_picks_its_line_or_tunes_to_its_dial_but_not_in_tx() {
+        let mut sc = Scope::new(None, ScopeSettings::default());
+        let feed = SkimFeed {
+            period_s: 15.0,
+            spots: vec![
+                spot(Some(7), "K1ABC", 14_075_200.0, 14_074_000.0),
+                spot(None, "W9XYZ", 14_131_000.0, 14_130_000.0),
+            ],
+        };
+        sc.skim(Some(feed.clone()));
+        frames(&mut sc, ft8_rig(false), vec![vec![]]);
+        assert_eq!(sc.skim_shown.len(), 2);
+        let at = |sc: &Scope, call: &str| {
+            sc.skim_boxes
+                .iter()
+                .find(|(_, i)| sc.skim_shown[*i].0.call == call)
+                .map(|(r, _)| r.center())
+                .expect("the label is drawn")
+        };
+        // Shift-clicked a pixel or two off a labelled station, the offset bar
+        // goes onto it and reads DECODE's AF for it.
+        let k = at(&sc, "K1ABC");
+        // The signal is a leader's length left of its box.
+        let x_k = sc
+            .skim_boxes
+            .iter()
+            .find(|(_, i)| sc.skim_shown[*i].0.call == "K1ABC")
+            .map(|(r, _)| r.left() - paint::SKIM_LEAD)
+            .unwrap();
+        let near = egui::pos2(x_k + 2.0, k.y + 60.0);
+        frames(&mut sc, ft8_rig(false), vec![press(near, true, true), press(near, false, false)]);
+        let bar = sc.offset.take().expect("the bar");
+        assert_eq!(bar.hz, 14_075_200.0);
+        assert_eq!(bar.offset_hz(14_074_000.0, false), 1200.0);
+        // DECODE's own: picks its line, tunes nothing.
+        let k = at(&sc, "K1ABC");
+        let outs =
+            frames(&mut sc, ft8_rig(false), vec![press(k, true, false), press(k, false, false)]);
+        assert_eq!(outs[1].skim_pick, Some(7));
+        assert!(outs.iter().all(|o| o.tune_to.is_none()));
+        // The wide skimmer's: tunes to its dial, but not while transmitting
+        // (interlock 9).
+        let w = at(&sc, "W9XYZ");
+        let outs =
+            frames(&mut sc, ft8_rig(true), vec![press(w, true, false), press(w, false, false)]);
+        assert!(outs.iter().all(|o| o.tune_to.is_none() && o.skim_pick.is_none()));
+        let outs =
+            frames(&mut sc, ft8_rig(false), vec![press(w, true, false), press(w, false, false)]);
+        assert_eq!(outs[1].tune_to, Some(14_130_000.0));
+        // SKIM off: no labels.
+        sc.skim(None);
+        frames(&mut sc, ft8_rig(false), vec![vec![]]);
+        assert!(sc.skim_shown.is_empty() && sc.skim_boxes.is_empty());
     }
 
     /// The whole scope on the CPU spectrum (no GPU), drawn by egui with no

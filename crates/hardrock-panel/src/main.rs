@@ -602,6 +602,8 @@ impl App {
         );
         // The scope's slot lines follow the decoder's slots (decision 51).
         self.scope.decode_slots(self.decode.slots());
+        // And its labels, DECODE's decodes (decision 54).
+        self.scope.skim(self.decode.skim_feed(&self.saved.decode));
     }
 
     /// Make a change an outside program asked for, as the panel's own
@@ -674,6 +676,9 @@ impl App {
                 self.saved.scope = self.scope.settings().clone();
             }
             let picked = so.data_mode.take();
+            if let Some(id) = so.skim_pick.take() {
+                self.decode.pick_row(id);
+            }
             let now = rx::RadioNow { link: self.rig.as_deref(), rig, transmitting };
             self.rx.apply_scope(so, &mut self.saved.rx, now);
             // A DATA key or a band-plan marker: the radio's filter, the

@@ -6,6 +6,8 @@ use eframe::egui::{self, Align2, Color32, CursorIcon, Rect, RichText, Sense, Str
 use super::bandplan::{self, Use};
 use super::digimodes::{self, Digi};
 use super::levels::s_unit;
+use super::markers::fmt_tenth;
+use super::offset::{OffsetBar, fmt_offset};
 use super::paint::{Ctx, fft_label};
 use super::palette::Palette;
 use super::settings::{
@@ -371,6 +373,27 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
             sc.markers.clear();
         }
         note(ui, "· right-click places one, drag to move it · readouts to 0.1 Hz");
+        caption(ui, "· Offset bar");
+        let on = sc.offset.is_some();
+        let r = chip(ui, on, if on { "OFFSET ×" } else { "OFFSET" }).on_hover_text(
+            "A bar that reads how far it is from the dial, in DECODE's Hz, and where it is. \
+             Dropped at the receiver's passband; shift-click the scope to put it anywhere, \
+             drag it to move it. It tunes nothing",
+        );
+        if r.clicked() {
+            sc.offset =
+                if on { None } else { Some(OffsetBar::at_receiver(cx.rig.rx_hz, cx.rig.passband)) };
+        }
+        if let Some(b) = sc.offset {
+            note(
+                ui,
+                &format!(
+                    "{} from the dial · {}",
+                    fmt_offset(b.offset_hz(cx.rig.rx_hz, cx.rig.mode.is_lower())),
+                    fmt_tenth(cx.map.shown(b.hz))
+                ),
+            );
+        }
     });
 
     ui.horizontal_wrapped(|ui| {
