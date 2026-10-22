@@ -451,6 +451,29 @@ follows the dial (in LSB it counts down from the dial, as the audio does).
 
 ![The skimmer's labels and the offset bar, DECODE on FT8](images/skimmer-offset.png)
 
+### Slices
+
+**+ SLICE**, on the receiver's line, adds another receiver in the span: up to
+three, B, C and D, beside the panel's own (A). Each has a row of its own and
+its passband on the scope in its colour (B violet, C green, D pink) with its
+name at the top.
+
+- **Its dial**: drag the kHz figure, or click it and type. **PARK** puts it on
+  a mode's calling frequency on this band (FT8, FT4, WSPR, JT65, JT9, PSK31,
+  RTTY) with that mode's passband.
+- **Its mode**, its level in dBm, its own volume and **MUTE**.
+- **Its sound output**: the speakers, or a virtual audio cable, so a slice
+  parked on WSPR or FT4 can feed its own copy of WSJT-X while you listen to A.
+- **SWAP A** swaps it with A. A is the one the radio follows (TX follows RX,
+  the DUO's filter) and the one DECODE hears, so this is how a slice is
+  transmitted from or decoded in DECODE. Not while transmitting. Each slice
+  keeps its sound output, so after a swap the cable plays what A was on.
+- **×** removes it.
+
+A slice must be inside the span; one outside it says so and is not heard
+until the span moves back over it. The slices never tune the radio. They are
+kept between runs.
+
 ## Decoding
 
 **DECODE**, on the top bar, opens the panel's own decoders. Pick a mode and

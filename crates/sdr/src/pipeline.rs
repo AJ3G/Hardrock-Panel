@@ -45,6 +45,19 @@ pub type IqTap = Box<dyn FnMut(&[f32], f64, f64) + Send>;
 /// same rule as [`IqTap`].
 pub type AudioTap = Box<dyn FnMut(&[f32]) + Send>;
 
+/// One more receiver in the span, a slice: its own dial, mode and passband,
+/// decimated, filtered and levelled as the main receiver is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SliceSpec {
+    /// The caller's name for it; a slice keeps its state while its id does.
+    pub id: u32,
+    /// Its dial, Hz from the centre.
+    pub offset_hz: f64,
+    pub mode: Mode,
+    /// `[low, high]` Hz relative to its dial.
+    pub passband: (f32, f32),
+}
+
 /// What the UI can ask of the pipeline.
 pub enum Command {
     /// Receiver dial, Hz from the centre.
@@ -76,6 +89,11 @@ pub enum Command {
     SetCenter(f64),
     /// Where the audio goes; `None` discards it.
     SetAudio(Option<AudioFeed>),
+    /// The slices to run besides the main receiver: those not named are
+    /// stopped, new ones started, the rest retuned.
+    SetSlices(Vec<SliceSpec>),
+    /// Where a slice's audio goes; `None` discards it.
+    SetSliceAudio(u32, Option<AudioFeed>),
     /// How many frames of history to keep for the waterfall and 3D views.
     SetHistory(usize),
     /// Run a zoom FFT on one region (`None` stops it); see [`crate::zoom`].
@@ -186,6 +204,8 @@ pub struct Snapshot {
     pub nonfinite: u64,
     /// [`Command::ResetSpectrum`]s the spectrum thread has carried out.
     pub spectrum_resets: u64,
+    /// Each slice running, by id, and its passband level, dBm.
+    pub slice_levels: Vec<(u32, f32)>,
 }
 
 /// A running pipeline. Dropping it stops the threads.
@@ -293,6 +313,66 @@ enum SpecMsg {
     Reset(u64),
 }
 
+/// A slice as the pipeline runs it.
+struct Slice {
+    id: u32,
+    rx: Receiver,
+    feed: Option<AudioFeed>,
+    audio: Vec<f32>,
+}
+
+/// Give a slice the main receiver's decimator, passband shape, AGC, gain and
+/// calibration, changing only what differs (a new decimator or shape starts
+/// its filters again).
+fn like_main(r: &mut Receiver, main: &Receiver, cal_db: f32) {
+    if r.decimator() != main.decimator() {
+        r.set_decimator(main.decimator());
+    }
+    if r.filter_shape() != main.filter_shape() {
+        r.set_filter_shape(main.filter_shape());
+    }
+    if r.agc() != main.agc() {
+        r.set_agc(main.agc());
+    }
+    if r.agc_params() != main.agc_params() {
+        r.set_agc_params(main.agc_params());
+    }
+    if r.decoder_agc() != main.decoder_agc() {
+        r.set_decoder_agc(main.decoder_agc());
+    }
+    if r.gain_db() != main.gain_db() {
+        r.set_gain_db(main.gain_db());
+    }
+    r.set_calibration_db(cal_db);
+}
+
+/// Bring `slices` to `want`: stop those not named, start new ones like the
+/// main receiver, and retune the rest where they differ.
+fn set_slices(slices: &mut Vec<Slice>, want: &[SliceSpec], main: &Receiver, cal_db: f32) {
+    slices.retain(|s| want.iter().any(|w| w.id == s.id));
+    for w in want {
+        let i = match slices.iter().position(|s| s.id == w.id) {
+            Some(i) => i,
+            None => {
+                let mut rx = Receiver::new(main.sample_rate());
+                like_main(&mut rx, main, cal_db);
+                slices.push(Slice { id: w.id, rx, feed: None, audio: Vec::with_capacity(4096) });
+                slices.len() - 1
+            }
+        };
+        let r = &mut slices[i].rx;
+        if r.mode() != w.mode {
+            r.set_mode(w.mode);
+        }
+        if r.passband() != w.passband {
+            r.set_passband(w.passband.0, w.passband.1);
+        }
+        if r.offset_hz() != w.offset_hz {
+            r.set_offset_hz(w.offset_hz);
+        }
+    }
+}
+
 /// Replace anything in `iq` that is not a number with zero, and say how
 /// many there were. One NaN in an exponential average stays there for good
 /// (`a + α(x − a)` is NaN once `a` is), which would blank the spectrum and
@@ -333,6 +413,8 @@ fn run(
     receiver.set_gain_db(cfg.gain_db);
     receiver.set_calibration_db(spectrum_cfg.calibration_db);
     let mut audio_feed: Option<AudioFeed> = None;
+    let mut slices: Vec<Slice> = Vec::new();
+    let mut cal_db = spectrum_cfg.calibration_db;
     let mut iq_tap: Option<IqTap> = None;
     let mut audio_tap: Option<AudioTap> = None;
     let mut paused = false;
@@ -383,10 +465,19 @@ fn run(
                         Command::SetFps(f) => sc.fps = f,
                         Command::SetCalibration(db) => {
                             sc.calibration_db = db;
+                            cal_db = db;
                             receiver.set_calibration_db(db);
                         }
                         Command::SetCenter(hz) => source.set_center_hz(hz),
                         Command::SetAudio(f) => audio_feed = f,
+                        Command::SetSlices(want) => {
+                            set_slices(&mut slices, &want, &receiver, cal_db)
+                        }
+                        Command::SetSliceAudio(id, f) => {
+                            if let Some(s) = slices.iter_mut().find(|s| s.id == id) {
+                                s.feed = f;
+                            }
+                        }
                         Command::SetHistory(n) => {
                             let _ = msg_tx.send(SpecMsg::History(n.max(1)));
                         }
@@ -408,6 +499,10 @@ fn run(
                         }
                         Command::Pause(p) => paused = p,
                         Command::Stop => unreachable!(),
+                    }
+                    // The slices follow the main receiver's DSP settings.
+                    for s in &mut slices {
+                        like_main(&mut s.rx, &receiver, cal_db);
                     }
                     if sc != spectrum_cfg {
                         spectrum_cfg = sc;
@@ -442,6 +537,9 @@ fn run(
         if new_rate != rate {
             rate = new_rate;
             receiver.set_sample_rate(rate);
+            for s in &mut slices {
+                s.rx.set_sample_rate(rate);
+            }
         }
         let center = source.center_hz();
         let t = Instant::now();
@@ -486,6 +584,13 @@ fn run(
         if let Some(f) = audio_feed.as_mut() {
             f.push(&audio);
         }
+        for s in &mut slices {
+            s.audio.clear();
+            s.rx.process(&buf[..n], &mut s.audio);
+            if let Some(f) = s.feed.as_mut() {
+                f.push(&s.audio);
+            }
+        }
         if let Some(tap) = audio_tap.as_mut()
             && !receiver.decoder_audio().is_empty()
         {
@@ -503,7 +608,10 @@ fn run(
 
         let level = receiver.level_dbm();
         let alive = source.is_alive();
+        let slice_levels: Vec<(u32, f32)> =
+            slices.iter().map(|s| (s.id, s.rx.level_dbm())).collect();
         publish(&shared, |s| {
+            s.slice_levels = slice_levels;
             s.level_dbm = level;
             s.sample_rate = rate;
             s.center_hz = center;
@@ -756,6 +864,47 @@ mod tests {
         while audio_rx.pop().is_ok() {}
         let src = p.stop().expect("the source comes back");
         assert_eq!(src.center_hz(), 7.1e6);
+    }
+
+    /// Two slices beside the main receiver: each hears what is at its own
+    /// dial, plays on its own feed, and follows the main receiver's gain;
+    /// dropped from the list, it stops.
+    #[test]
+    fn slices_hear_their_own_dials() {
+        let rate = 192_000.0;
+        let src = SyntheticSource::new(
+            rate,
+            7.1e6,
+            -100.0,
+            vec![SynthSignal::carrier(12_500.0, -30.0), SynthSignal::carrier(-40_000.0, -50.0)],
+        );
+        let cfg = PipelineConfig {
+            spectrum: SpectrumConfig { fft_size: 4096, ..Default::default() },
+            offset_hz: 60_000.0,
+            agc: AgcMode::Off,
+            gain_db: 0.0,
+            history: 2,
+            ..Default::default()
+        };
+        let p = Pipeline::spawn(Box::new(src), cfg);
+        let spec =
+            |id, hz| SliceSpec { id, offset_hz: hz, mode: Mode::Usb, passband: (100.0, 2700.0) };
+        p.send(Command::SetSlices(vec![spec(1, 11_500.0), spec(2, -41_000.0)]));
+        let (feed, mut audio_rx, _) = audio_ring();
+        p.send(Command::SetSliceAudio(2, Some(feed)));
+        let level = |s: &Snapshot, id| s.slice_levels.iter().find(|l| l.0 == id).map(|l| l.1);
+        let s = wait_for(&p, |s| {
+            level(s, 1).is_some_and(|l| (l - -30.0).abs() < 0.6)
+                && level(s, 2).is_some_and(|l| (l - -50.0).abs() < 0.6)
+        });
+        // The main receiver, between them, hears only the noise.
+        assert!(s.level_dbm < -70.0, "main {}", s.level_dbm);
+        wait_for(&p, |_| audio_rx.slots() > 1000);
+        // Slice 1 moved off its carrier, slice 2 stopped.
+        p.send(Command::SetSlices(vec![spec(1, 30_000.0)]));
+        let s = wait_for(&p, |s| level(s, 1).is_some_and(|l| l < -70.0) && level(s, 2).is_none());
+        assert_eq!(s.slice_levels.len(), 1);
+        while audio_rx.pop().is_ok() {}
     }
 
     /// A transmission whose I/Q is not numbers (the worst a converter could

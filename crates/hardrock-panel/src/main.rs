@@ -55,6 +55,7 @@ mod scope;
 mod scopewin;
 mod settings;
 mod skimlog;
+mod slices;
 mod slotclock;
 mod spots;
 mod station;
@@ -688,6 +689,7 @@ impl App {
             cat: rig.is_some_and(|r| r.connected),
             links: self.outside.summary(),
             tx_why,
+            sounds: &self.sounds,
         };
         let o =
             scopewin::scope_window(ctx, &mut open, self.saved.scope_popped, &mut self.scope, args);
@@ -700,6 +702,10 @@ impl App {
         }
         if o.settings {
             self.show_settings = true;
+        }
+        if let Some(id) = o.swap_slice {
+            let now = rx::RadioNow { link: self.rig.as_deref(), rig, transmitting };
+            self.rx.swap_slice(&mut self.saved.rx, id, now);
         }
         if let Some(mut so) = o.scope {
             if so.settings_changed {

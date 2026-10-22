@@ -19,6 +19,8 @@ pub(crate) struct WinOut {
     pub reopen: bool,
     /// Open SETTINGS.
     pub settings: bool,
+    /// Swap this slice with A (decision 66).
+    pub swap_slice: Option<u32>,
 }
 
 /// What the window shows besides the scope.
@@ -32,6 +34,8 @@ pub(crate) struct Args<'a> {
     pub links: Vec<String>,
     /// Why the panel thinks the radio is transmitting, when it does.
     pub tx_why: Option<String>,
+    /// The sound outputs a slice can play on.
+    pub sounds: &'a [String],
 }
 
 /// Draw the window, docked or popped out. Clears `open` when it is closed.
@@ -209,7 +213,10 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
             }
             _ => {}
         }
+        crate::slices::add_key(ui, s, rx);
     });
+    let so = crate::slices::rows(ui, s, rx, a.sounds, a.rig.transmitting);
+    out.swap_slice = so.swap;
 
     ui.horizontal_wrapped(|ui| {
         caption(ui, "Transmit");
@@ -251,6 +258,19 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
         return;
     }
     let snap = rx.snapshot();
+    // The slices running, as coloured passbands on the scope.
+    let running: Vec<u32> = snap.slice_levels.iter().map(|l| l.0).collect();
+    scope.slices = s
+        .slices
+        .iter()
+        .filter(|x| running.contains(&x.id))
+        .map(|x| crate::scope::SliceMark {
+            hz: x.rx_hz,
+            passband: x.passband,
+            colour: crate::slices::colour(x.id),
+            name: crate::slices::name(x.id),
+        })
+        .collect();
     out.scope = Some(scope.ui(ui, &snap, a.rig));
     scope.scf_tap(&mut |sink| {
         let sink = sink.map(|s| Box::new(move |b: &IqBlock| s(b.iq, b.rate)) as IqSink);

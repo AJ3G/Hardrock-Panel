@@ -21,10 +21,11 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, TryRecvError, bounded};
 use elad_iq::{EladConfig, EladHandle};
 use rigcat::{Frame, Protocol, RigLink, RigStatus, Vfo};
-use sdr::{AudioOut, Command, Mode, Pipeline, PipelineConfig, Snapshot};
+use sdr::{AudioOut, Command, Mode, Pipeline, PipelineConfig, SliceSpec, Snapshot};
 use serde::{Deserialize, Serialize};
 
 use crate::scope::{self, Scope, ScopeOut};
+use crate::slices::{self, SliceSettings};
 
 /// Where the I/Q comes from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +76,8 @@ pub(crate) struct RxSettings {
     pub passband: (f32, f32),
     /// How the receiver decimates, filters and levels (decisions 38, 39).
     pub dsp: DspSettings,
+    /// The slices besides A (decision 66).
+    pub slices: Vec<SliceSettings>,
 }
 
 /// The receiver's DSP choices (decision 38), as SETTINGS → Receiver keeps
@@ -200,6 +203,7 @@ impl Default for RxSettings {
             mode: "USB".into(),
             passband: Mode::Usb.default_passband(),
             dsp: DspSettings::default(),
+            slices: Vec::new(),
         }
     }
 }
@@ -447,6 +451,10 @@ pub(crate) struct Rx {
     reopened_at: Option<Instant>,
     /// What the stream watchdog did, for the scope window.
     pub watchdog: Option<String>,
+    /// The slices last given the pipeline, and each one's sound output (or
+    /// why it couldn't be opened) by id, with the device asked for.
+    slices_sent: Option<Vec<SliceSpec>>,
+    slice_audio: Vec<(u32, Option<String>, Result<AudioOut, String>)>,
 }
 
 impl Default for Rx {
@@ -481,6 +489,8 @@ impl Default for Rx {
             tx_at: None,
             reopened_at: None,
             watchdog: None,
+            slices_sent: None,
+            slice_audio: Vec::new(),
         }
     }
 }
@@ -552,6 +562,8 @@ impl Rx {
         self.label.clear();
         self.notes.clear();
         self.offset_sent = f64::NAN;
+        self.slices_sent = None;
+        self.slice_audio.clear();
     }
 
     /// (Re)start from `s.source` at `s.rate`.
@@ -630,9 +642,12 @@ impl Rx {
         let t = self.taps.clone();
         p.send(Command::SetAudioTap(Some(Box::new(move |a| t.feed_audio(a)))));
         self.offset_sent = self.rx_hz - self.centre;
-        // The sound card is opened again for the new pipeline's feed.
+        // The sound card is opened again for the new pipeline's feed, and the
+        // slices started on it.
         self.audio = None;
         self.audio_dev = None;
+        self.slices_sent = None;
+        self.slice_audio.clear();
         self.pipeline = Some(p);
         self.heard = (0, Instant::now());
     }
@@ -699,6 +714,7 @@ impl Rx {
         self.watch_stream(s, scope, now);
         self.sync_volume(s, now);
         self.keep_audio(s);
+        self.keep_slices(s);
         let Some(p) = &self.pipeline else { return };
         let snap_centre = p.lock().center_hz;
         // SAFETY INTERLOCK (docs/safety-interlocks.md, #9): while the radio
@@ -832,6 +848,51 @@ impl Rx {
         }
     }
 
+    /// Run the slices inside the span (decision 66), and keep each one's
+    /// sound output, volume and mute.
+    fn keep_slices(&mut self, s: &RxSettings) {
+        let Some(p) = &self.pipeline else { return };
+        let want = slices::specs(&s.slices, self.centre, p.lock().sample_rate);
+        if self.slices_sent.as_ref() != Some(&want) {
+            p.send(Command::SetSlices(want.clone()));
+            self.slices_sent = Some(want.clone());
+        }
+        // A slice not running, or whose output was changed, lets its sound
+        // card go; one running with none opens it.
+        self.slice_audio.retain(|(id, dev, _)| {
+            want.iter().any(|w| w.id == *id)
+                && s.slices.iter().any(|x| x.id == *id && x.audio_out == *dev)
+        });
+        for w in &want {
+            let Some(sl) = s.slices.iter().find(|x| x.id == w.id) else { continue };
+            if !self.slice_audio.iter().any(|(id, _, _)| *id == w.id) {
+                let opened =
+                    AudioOut::open(sl.audio_out.as_deref(), sl.volume).map(|(out, feed)| {
+                        p.send(Command::SetSliceAudio(w.id, Some(feed)));
+                        out
+                    });
+                self.slice_audio.push((w.id, sl.audio_out.clone(), opened));
+            }
+            if let Some((_, _, Ok(a))) = self.slice_audio.iter().find(|(id, _, _)| *id == w.id) {
+                a.set_volume(sl.volume);
+                a.set_muted(sl.muted);
+            }
+        }
+    }
+
+    /// Each running slice's level, dBm, by id.
+    pub(crate) fn slice_levels(&self) -> Vec<(u32, f32)> {
+        self.pipeline.as_ref().map(|p| p.lock().slice_levels.clone()).unwrap_or_default()
+    }
+
+    /// Why a slice's sound output couldn't be opened.
+    pub(crate) fn slice_audio_error(&self, id: u32) -> Option<&str> {
+        self.slice_audio.iter().find_map(|(i, _, r)| match r {
+            Err(e) if *i == id => Some(e.as_str()),
+            _ => None,
+        })
+    }
+
     /// The sound output in use, and its underruns and dropped samples.
     pub(crate) fn audio_state(&self) -> Option<(String, u64, u64)> {
         self.audio.as_ref().map(|a| {
@@ -937,6 +998,23 @@ impl Rx {
         frames.extend(proto.set_filter(name, filter.unwrap_or(width)));
         link.set(frames);
         self.duo_sent = Some((self.mode, width));
+    }
+
+    /// Swap slice `id` with A (decision 66): A goes to the slice's dial,
+    /// mode and passband, and the slice to A's. SAFETY INTERLOCK
+    /// (docs/safety-interlocks.md, #9): A is where the radio transmits in
+    /// split, so not while transmitting.
+    pub(crate) fn swap_slice(&mut self, s: &mut RxSettings, id: u32, now: RadioNow<'_>) {
+        if now.transmitting {
+            return;
+        }
+        let Some(sl) = s.slices.iter_mut().find(|x| x.id == id) else { return };
+        let (hz, m, pb) = (sl.rx_hz, sl.mode(), sl.passband);
+        sl.rx_hz = self.rx_hz;
+        sl.mode = self.mode.label().into();
+        sl.passband = self.passband;
+        self.tune(hz, now.transmitting);
+        self.set_mode(m, Some(pb), now);
     }
 
     /// Act on what the operator did on the scope.
@@ -1139,6 +1217,23 @@ impl VolSync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SWAP A puts A where the slice was and the slice where A was, and
+    /// does nothing while transmitting (interlock #9).
+    #[test]
+    fn a_slice_swaps_with_a_but_not_while_transmitting() {
+        let mut s = RxSettings::default();
+        crate::slices::add(&mut s.slices, 14_095_600.0, Mode::Usb, (1400.0, 1600.0), None);
+        let mut rx = Rx::new(&s);
+        rx.rx_hz = 14_074_000.0;
+        let keyed = RadioNow { link: None, rig: None, transmitting: true };
+        rx.swap_slice(&mut s, 1, keyed);
+        assert_eq!((rx.rx_hz, s.slices[0].rx_hz), (14_074_000.0, 14_095_600.0));
+        let idle = RadioNow { transmitting: false, ..keyed };
+        rx.swap_slice(&mut s, 1, idle);
+        assert_eq!((rx.rx_hz, rx.passband), (14_095_600.0, (1400.0, 1600.0)));
+        assert_eq!((s.slices[0].rx_hz, s.slices[0].passband), (14_074_000.0, s.passband));
+    }
 
     fn duo(fa: u64, fb: Option<u64>, split: Option<bool>) -> RigStatus {
         RigStatus {

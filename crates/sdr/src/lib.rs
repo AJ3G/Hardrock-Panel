@@ -39,7 +39,7 @@ pub use agc::AgcParams;
 pub use audio::{AudioFeed, AudioOut, output_devices};
 pub use ddc::DecimatorKind;
 pub use passband::FilterShape;
-pub use pipeline::{AudioTap, Command, IqTap, Pipeline, PipelineConfig, Snapshot};
+pub use pipeline::{AudioTap, Command, IqTap, Pipeline, PipelineConfig, SliceSpec, Snapshot};
 pub use receiver::{AUDIO_RATE, Receiver, SUPPORTED_RATES, decimation_plan};
 pub use source::{
     DEMO_SIGNALS, EladSource, IqSource, SynthKind, SynthSignal, SyntheticSource, TxEffects, TxSim,

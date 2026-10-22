@@ -419,6 +419,7 @@ pub(crate) struct Decode {
 }
 
 /// A station for GLOBE, if its grid is known.
+#[allow(clippy::too_many_arguments)]
 fn reception(
     heard: &Heard,
     call: &str,

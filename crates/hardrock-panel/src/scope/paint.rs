@@ -235,6 +235,31 @@ fn paint_spectrum(
         p.text(pos2(xx, all.bottom() - 3.0), Align2::CENTER_BOTTOM, lab, mono(10.0), dim());
     }
 
+    // The slices besides it (decision 66): each passband in its colour,
+    // its name along the top.
+    for sl in &sc.slices {
+        let (a, b) = (x(sl.hz + sl.passband.0 as f64), x(sl.hz + sl.passband.1 as f64));
+        let (a, b) = (a.min(b), a.max(b).max(a.min(b) + 2.0));
+        if b < all.left() || a > all.right() {
+            continue;
+        }
+        p.rect_filled(
+            Rect::from_x_y_ranges(a..=b, all.y_range()),
+            0.0,
+            sl.colour.gamma_multiply(0.14),
+        );
+        for e in [a, b] {
+            p.vline(e, all.y_range(), Stroke::new(1.0, sl.colour.gamma_multiply(0.7)));
+        }
+        p.text(
+            pos2(0.5 * (a + b), all.top() + 40.0),
+            Align2::CENTER_TOP,
+            sl.name,
+            mono(11.0),
+            sl.colour,
+        );
+    }
+
     // The receiver's passband, and its edges as handles.
     let rx = cx.rig.rx_hz;
     let (pa, pb) = (x(rx + cx.rig.passband.0 as f64), x(rx + cx.rig.passband.1 as f64));
@@ -1050,6 +1075,16 @@ fn paint_waterfall(
                 label(12.0),
                 dim(),
             );
+        }
+    }
+
+    // The slices' passband edges (decision 66), faint in their colours.
+    for sl in &sc.slices {
+        for e in [sl.passband.0, sl.passband.1] {
+            let ex = v.x_of(sl.hz + e as f64, rect.left(), rect.width());
+            if (rect.left()..=rect.right()).contains(&ex) {
+                p.vline(ex, rect.y_range(), Stroke::new(1.0, sl.colour.gamma_multiply(0.45)));
+            }
         }
     }
 

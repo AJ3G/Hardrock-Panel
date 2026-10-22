@@ -84,6 +84,7 @@ use eframe::egui_wgpu::RenderState;
 use sdr::{SpectrumFrame, ZoomRequest};
 
 pub use digimodes::Digi;
+pub(crate) use paint::bw_text;
 pub use settings::ScopeSettings;
 pub use skim::{KeyTag, SkimFeed, SkimSpot};
 pub use slotlines::DecodeSlots;
@@ -98,6 +99,17 @@ use view::{FreqMap, Span, View};
 
 /// The GPU's I/Q tap: `sink(iq, centre Hz, rate)`, interleaved f32.
 pub type IqSink = Box<dyn Fn(&[f32], f64, f64) + Send + Sync>;
+
+/// A slice besides the receiver (decision 66), drawn as its passband in its
+/// colour with its name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceMark {
+    /// Its dial, the radio's own Hz.
+    pub hz: f64,
+    pub passband: (f32, f32),
+    pub colour: egui::Color32,
+    pub name: &'static str,
+}
 
 /// What the scope needs to know about the radio each frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -320,6 +332,8 @@ pub struct Scope {
     offset_close: Option<egui::Rect>,
     /// The label the offset bar is on this frame, in `skim_shown`.
     skim_on_bar: Option<usize>,
+    /// The slices running besides the receiver, set before each `ui`.
+    pub(crate) slices: Vec<SliceMark>,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -399,6 +413,7 @@ impl Scope {
             offset_drag: false,
             offset_close: None,
             skim_on_bar: None,
+            slices: Vec::new(),
         }
     }
 
