@@ -564,11 +564,14 @@ const SMALL_OF_MAIN: f32 = 0.4;
 const LOCKED_NOTE: &str = "Locked, as with E1 and E2 pressed together on the radio. Hold E1 or E2 \
                            to unlock.";
 
-/// Satin aluminium: the rim, the body's shadow and highlight, and the mark.
-const SILVER_RIM: Color32 = Color32::from_rgb(0x6c, 0x71, 0x78);
-const SILVER_LOW: Color32 = Color32::from_rgb(0x8e, 0x94, 0x9b);
-const SILVER_HIGH: Color32 = Color32::from_rgb(0xe8, 0xeb, 0xee);
-const SILVER_EDGE: Color32 = Color32::from_rgb(0x2a, 0x2d, 0x31);
+/// Brushed stainless steel, darker than satin aluminium (AJ3G, 22 Oct 2026:
+/// "a darker, silver color. Almost like stainless steel", keeping the black
+/// knobs' reflection on top): the rim, the body's shadow and highlight, and
+/// the mark.
+const SILVER_RIM: Color32 = Color32::from_rgb(0x45, 0x49, 0x4f);
+const SILVER_LOW: Color32 = Color32::from_rgb(0x5a, 0x5f, 0x66);
+const SILVER_HIGH: Color32 = Color32::from_rgb(0xc4, 0xc9, 0xcf);
+const SILVER_EDGE: Color32 = Color32::from_rgb(0x1e, 0x20, 0x23);
 const KNOB_MARK: Color32 = Color32::from_rgb(0x1a, 0x1c, 0x1f);
 
 /// A silver knob at `c`, radius `r`, its mark turned `angle` from the top.
@@ -597,15 +600,19 @@ fn silver_knob(
             Stroke::new(1.0, Color32::from_black_alpha(55)),
         );
     }
-    // The face: a radial gradient towards the highlight.
+    // The face: a radial gradient towards the highlight, which stays a
+    // spot near the top left as the black knobs' did, so it reads as a
+    // reflection on steel rather than a lit surface.
     let body = r * 0.84;
-    let hl = c - vec2(body * 0.32, body * 0.42);
+    let hl = c - vec2(body * 0.3, body * 0.4);
     let n = 16;
     for i in 0..n {
         let t = i as f32 / n as f32;
-        let col = SILVER_LOW.lerp_to_gamma(SILVER_HIGH, t.powf(0.8));
-        p.circle_filled(c + (hl - c) * t, body * (1.0 - 0.85 * t), lift(col));
+        let col = SILVER_LOW.lerp_to_gamma(SILVER_HIGH, t.powf(1.6));
+        p.circle_filled(c + (hl - c) * t, body * (1.0 - t), lift(col));
     }
+    // The glint at its heart.
+    p.circle_filled(hl, body * 0.1, Color32::from_white_alpha(90));
     // Machining rings, faint.
     for k in 1..9 {
         let rr = body * k as f32 / 9.0;
