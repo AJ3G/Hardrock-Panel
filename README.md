@@ -135,6 +135,8 @@ Hardrock Panel is derived from SDRoxide by dividebysandwich and its
 contributors, and like SDRoxide is licensed under the
 [GNU GPL, version 3 or later](LICENSE). The fonts Chakra Petch and Share Tech
 Mono are under the SIL Open Font License; see `crates/hardrock-panel/assets/fonts/`.
+GLOBE's map is from [Natural Earth](https://www.naturalearthdata.com), which is
+in the public domain; see `crates/hardrock-panel/assets/globe/`.
 
 Hardrock-500, Hardrock-50 and ATU-500 are products of HobbyPCB. This project is
 not affiliated with HobbyPCB. No HobbyPCB manuals, schematics or firmware are

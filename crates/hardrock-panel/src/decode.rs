@@ -412,6 +412,40 @@ pub(crate) struct Decode {
     /// AUTO ID (decision 61): asked for, and at work.
     pub(crate) autoid_on: bool,
     autoid: Option<AutoIdRun>,
+    /// The stations placed since GLOBE last took them (decision 65): the
+    /// receiver's decodes, SKIM WIDE's and the keyboard skimmer's, each
+    /// with its grid or one heard from it before.
+    pub(crate) globe_feed: Vec<crate::globe::field::Reception>,
+}
+
+/// A station for GLOBE, if its grid is known.
+fn reception(
+    heard: &Heard,
+    call: &str,
+    grid: Option<&str>,
+    rf_hz: f64,
+    mode: &str,
+    snr: Option<f32>,
+    utc: f64,
+    src: crate::globe::field::Source,
+    row: Option<u64>,
+) -> Option<crate::globe::field::Reception> {
+    let grid = grid
+        .filter(|g| station::grid_to_latlon(g).is_some())
+        .map(str::to_string)
+        .or_else(|| heard.get(call).map(|h| h.grid.clone()))?;
+    let pos = station::grid_to_latlon(&grid)?;
+    Some(crate::globe::field::Reception {
+        call: call.to_string(),
+        grid,
+        pos,
+        rf_hz,
+        mode: mode.to_string(),
+        snr,
+        utc,
+        src,
+        row,
+    })
 }
 
 /// The receiver's dial over the last few minutes. A WSJT slot's decodes
@@ -642,9 +676,31 @@ impl Decode {
             let st = k.state();
             let now = decoders::slot::utc_now();
             for p in &st.spots {
-                match self.key_held.iter_mut().find(|h| h.id == p.id) {
-                    Some(h) => *h = p.clone(),
-                    None => self.key_held.push(p.clone()),
+                // A callsign read for the first time on this track: GLOBE
+                // places it if it has been heard with a grid.
+                let named = match self.key_held.iter_mut().find(|h| h.id == p.id) {
+                    Some(h) => {
+                        let new = h.call.is_none() && p.call.is_some();
+                        *h = p.clone();
+                        new
+                    }
+                    None => {
+                        self.key_held.push(p.clone());
+                        p.call.is_some()
+                    }
+                };
+                if let Some(c) = p.call.as_deref().filter(|_| named) {
+                    self.globe_feed.extend(reception(
+                        &self.heard,
+                        c,
+                        None,
+                        p.hz + at.xvtr_hz,
+                        p.mode.label(),
+                        Some(p.snr_db),
+                        p.heard_utc,
+                        crate::globe::field::Source::Skim,
+                        None,
+                    ));
                 }
             }
             for h in &mut self.key_held {
@@ -735,6 +791,21 @@ impl Decode {
                         live: false,
                     });
                     let Some(call) = call else { continue };
+                    let grid = station::sender_of(&d.message).1;
+                    if let Some(g) = &grid {
+                        self.heard.note(&call, g, d.slot_utc as f64);
+                    }
+                    self.globe_feed.extend(reception(
+                        &self.heard,
+                        &call,
+                        grid.as_deref(),
+                        cal.rf_of_audio(r.dial_hz, d.audio_hz as f64, false) + at.xvtr_hz,
+                        w.mode().label(),
+                        Some(d.snr_db),
+                        d.slot_utc as f64,
+                        crate::globe::field::Source::Skim,
+                        None,
+                    ));
                     self.wide_spots.push_front(SkimSpot {
                         row: None,
                         hz: r.dial_hz + d.audio_hz as f64,
@@ -1146,6 +1217,20 @@ impl Decode {
                 track: None,
                 live: false,
             });
+            if let Some(c) = &row.call {
+                // The id push_row gives it.
+                self.globe_feed.extend(reception(
+                    &self.heard,
+                    c,
+                    row.grid.as_deref(),
+                    rf,
+                    mode.label(),
+                    Some(d.snr_db),
+                    row.utc,
+                    crate::globe::field::Source::Decode,
+                    Some(self.next_id + 1),
+                ));
+            }
             push_row(&mut self.rows, &mut self.next_id, row);
             if let Some(u) = wsjtx {
                 send_wsjtx(u, mode, d, rf);

@@ -42,6 +42,7 @@ mod theme;
 mod audio;
 mod decode;
 mod decodelog;
+mod globe;
 mod gpu_gate;
 mod logfile;
 mod outside;
@@ -111,6 +112,8 @@ struct Saved {
     outside: outside::OutsideSettings,
     /// SETTINGS → Station: callsign, grid, distance unit.
     station: station::StationSettings,
+    /// GLOBE's layers, view and sources (decision 65).
+    globe: globe::GlobeSettings,
 }
 
 impl Default for Saved {
@@ -131,6 +134,7 @@ impl Default for Saved {
             decode_popped: false,
             outside: outside::OutsideSettings::default(),
             station: station::StationSettings::default(),
+            globe: globe::GlobeSettings::default(),
         }
     }
 }
@@ -173,6 +177,8 @@ struct App {
     rx: rx::Rx,
     show_scope: bool,
     show_decode: bool,
+    show_globe: bool,
+    globe: globe::Globe,
     decode: decode::Decode,
     outside: outside::Outside,
     /// The I/Q source as being chosen, applied with APPLY.
@@ -235,6 +241,8 @@ impl App {
             rx,
             show_scope: view_args.demo || view_args.elad || view_args.scope,
             show_decode: view_args.decode,
+            show_globe: false,
+            globe: globe::Globe::default(),
             decode: decode::Decode::default(),
             outside,
             draft_source: saved.rx.source,
@@ -731,19 +739,58 @@ impl App {
             // A DATA key or a band-plan marker: the radio's filter, the
             // decoder and the note follow, as DECODE's snap does.
             if let Some(p) = picked {
-                let kind = decode::Kind::of_digi(p.digi);
-                let xvtr = radio::xvtr_hz(ctx);
-                let (note, refused) =
-                    self.snap_to(Some(p.digi), kind, Some(p.dial), rig, transmitting, xvtr);
-                let note = match p.note {
-                    Some(n) if !refused => format!("{n}. {note}"),
-                    _ => note,
-                };
-                self.scope.show_data(Some(p.digi), Some(note.clone()));
-                self.decode.note = Some((note, refused));
+                self.data_pick(p, rig, transmitting, radio::xvtr_hz(ctx));
             }
         }
         self.show_scope = open;
+    }
+
+    /// A data mode on a dial, from the scope's DATA keys and markers or
+    /// GLOBE's TUNE: the radio, the receiver and DECODE go to it.
+    fn data_pick(
+        &mut self,
+        p: scope::DataPick,
+        rig: Option<&RigStatus>,
+        transmitting: bool,
+        xvtr: i64,
+    ) {
+        let kind = decode::Kind::of_digi(p.digi);
+        let (note, refused) =
+            self.snap_to(Some(p.digi), kind, Some(p.dial), rig, transmitting, xvtr);
+        let note = match p.note {
+            Some(n) if !refused => format!("{n}. {note}"),
+            _ => note,
+        };
+        self.scope.show_data(Some(p.digi), Some(note.clone()));
+        self.decode.note = Some((note, refused));
+    }
+
+    fn globe_window(
+        &mut self,
+        ctx: &egui::Context,
+        rig: Option<&RigStatus>,
+        transmitting: bool,
+        xvtr: i64,
+    ) {
+        let mut open = true;
+        let o = globe::window(
+            ctx,
+            &mut open,
+            &mut self.globe,
+            &mut self.saved.globe,
+            &self.saved.station,
+        );
+        if let Some(p) = o.pop {
+            self.saved.globe.popped = p;
+        }
+        if let Some(p) = o.tune {
+            self.data_pick(p, rig, transmitting, xvtr);
+        }
+        if let Some(id) = o.show_row {
+            self.show_decode = true;
+            self.decode.pick_row(id);
+        }
+        self.show_globe = open;
     }
 
     /// Take the radio and the panel's receiver to data mode `d` (decision
@@ -1046,6 +1093,15 @@ impl eframe::App for App {
                     {
                         self.show_decode = !self.show_decode;
                     }
+                    if chrome::chip(ui, self.show_globe, "GLOBE")
+                        .on_hover_text(
+                            "Your station, the stations heard, the grey line, propagation and \
+                             space weather",
+                        )
+                        .clicked()
+                    {
+                        self.show_globe = !self.show_globe;
+                    }
                     ui.add_space(8.0);
                     let (text, col) = if let Some(h) = self.outside.holder() {
                         (
@@ -1214,6 +1270,16 @@ impl eframe::App for App {
                 }
             }
             self.show_decode = open;
+        }
+        // DECODE's and the skimmer's stations, for GLOBE, kept while it is
+        // shut too so it opens with the last hour on it.
+        for r in self.decode.globe_feed.drain(..) {
+            self.globe.add(r);
+        }
+        if self.show_globe {
+            self.globe_window(ctx, rig.as_ref(), transmitting, xvtr);
+        } else {
+            self.globe.idle();
         }
 
         self.saved.meters = Some(self.view.saved());

@@ -580,6 +580,48 @@ For the WSJT modes:
   12 spots sent 01:10 UTC"), or what went wrong. Clearing a tick sends
   nothing more, not even what was waiting.
 
+## The globe
+
+**GLOBE** opens a map of the world centred on your station (set your callsign
+and grid under SETTINGS → Station first). Drag to turn it, scroll to zoom;
+**HOME** brings your station back to the middle, **DX** centres the station
+picked and **PATH** the middle of its path. **GLOBE** and **FLAT** switch
+between the globe and a flat map. **POP OUT** puts it in a window of its own.
+
+- **Day and night.** The lit side is brighter and the night side dark, with
+  city lights. The grey line, from sunset to the end of civil twilight, is a
+  pale band; the solid line is sunset and the dashed one the Sun 6° down. The
+  ☉ marks where the Sun is overhead. The clocks show local time and UTC.
+- **HEARD.** Every station DECODE and the skimmers heard in the last hour
+  whose grid is known (from its message, or an earlier one). Click a line, or
+  a dot on the map, for its path: distance, both bearings, the hops, and how
+  high the Sun is at each end. **TUNE** takes the radio to that mode's dial on
+  its band, as its DATA key would (not while transmitting); **SHOW IN
+  DECODE** brings its line into view.
+- **LAYERS.** STATIONS, PATHS, PROP MAP, GREY LINE, CLOUDS, AURORA, CITIES,
+  BORDERS (countries and states) and GRID (Maidenhead squares) can each be
+  turned off.
+- **PROP.** Where the band was open, from the paths heard: each path counts at
+  the middle of each hop, more for a stronger report, and less as it ages
+  (HALF-LIFE, 45 minutes to start). **ONE BAND** shows the band picked under
+  **BAND**, weak blue to strong white; **ALL BANDS** colours each place by its
+  best band. **BANDS OPEN** on the right shows how much of the world each band
+  reached.
+- **SOURCES.** DECODE and SKIM are the panel's own. **PSK REPORTER** (off to
+  start) asks pskreporter.info every five minutes who heard your callsign in
+  the last hour, and draws those as dashed paths.
+- **SPACE WEATHER and WEATHER.** While GLOBE is open it fetches the solar
+  flux, Kp, X-ray and solar wind and the aurora from NOAA SWPC, the MUF(3000)
+  from KC2G's ionosondes, infrared clouds from NOAA nowCOAST, and the weather
+  and NWS alerts at your grid from Open-Meteo and weather.gov. Yellow and red
+  mean something worth watching: Kp 4 or 5 and over, an M or X flare, Bz of
+  −10 nT or below, a 25 % aurora chance overhead, a thunderstorm or an alert.
+  The line at the bottom shows how old each source is, or that it failed (hover
+  for why). Nothing is fetched while GLOBE is shut.
+
+The map is from Natural Earth (naturalearthdata.com), which is in the public
+domain.
+
 ## Outside programs
 
 Under SETTINGS, *Outside programs*, all off to start and taken with APPLY:

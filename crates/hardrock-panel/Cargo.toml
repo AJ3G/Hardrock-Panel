@@ -37,6 +37,9 @@ eframe = { version = "0.36.1", default-features = false, features = [
     "x11",
     "persistence",
 ] }
+ureq = "3.4.0"
+png = "0.18.1"
+chrono.workspace = true
 
 [dev-dependencies]
 # Parses and validates the scope's WGSL in the tests, with no GPU.
