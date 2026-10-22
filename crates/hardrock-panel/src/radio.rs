@@ -16,6 +16,7 @@
 
 mod controls;
 mod face;
+mod knobs;
 pub(crate) mod logic;
 mod rigtheme;
 mod zoom;
@@ -114,6 +115,8 @@ pub(crate) struct RadioUi {
     pub texts: HashMap<&'static str, String>,
     /// Why the last thing asked here couldn't be sent.
     pub note: Option<String>,
+    /// The main knob, E1 and E2.
+    pub knobs: knobs::KnobUi,
 }
 
 impl RadioUi {
@@ -371,10 +374,10 @@ fn radio_body(
 
             // The face: LCD and knobs.
             ui.horizontal(|ui| {
-                let lcd_w = ui.available_width() - z(104.0 + 14.0);
-                face::lcd(ui, &mut f, prefs, lcd_w);
+                let lcd_w = ui.available_width() - z(face::KNOBS_W + 14.0);
+                let h = face::lcd(ui, &mut f, prefs, lcd_w);
                 ui.add_space(z(6.0));
-                face::knobs(ui, &mut f, prefs);
+                face::knobs(ui, &mut f, prefs, h);
             });
 
             ui.separator();

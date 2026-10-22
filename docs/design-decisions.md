@@ -640,3 +640,30 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 **What the panel does.** The display hold (decision 40) follows the radio alone when the CAT link is up (`ScopeRig::on_air`: panel TUNE, FP or GI); only with no radio connected does it fall back to the amplifier. The guard after it is 0.3 s instead of 0.5. Everything else that waits for the end of an over still waits for the amplifier too: tuning stays locked (interlock #9), settings aren't sent (#5), and the relay keys stay greyed (#2) until its drive reads nothing. So the scope moves again a little before the tuning unlocks.
 
 **Where.** `scope/mod.rs` (`ScopeRig::on_air`, `TX_GUARD_SECS`), `main.rs` (`scope_window`).
+
+## 53. RADIO's knobs turn, push and hold as the FDM-DUO's own, in silver (22 Oct 2026)
+
+**Why.** AJ3G: "The large Knob should be a VFO with a Push and Hold Feature. Same with E1/E2 knobs. Turn them the same color silver as shown online. Also invoke their features. with VFO knob when hovering over it allow the vfo to be turned up or down." And: "Make them look similar in size as the elad manual." The knobs were dark and only the main knob did anything, tuning with the wheel.
+
+**What each does.** From the DUO's manual (its knob table, receive and VFO sections). Turning is the wheel over the knob (a notch a step, a trackpad 40 points a step); the main knob also turns by dragging round it, 24 steps a turn, clockwise up. A click is the radio's short press; held past the radio's hold time it is the long press, which fires while still held as on the radio. The hold time is the radio's menu 71 (`HT`), 1 s, the manual's default, until it answers.
+
+| Knob | Turn | Push | Hold | Over CAT |
+|---|---|---|---|---|
+| Main | tune the receive VFO by the step; in MEM, the next or previous channel | STEP: turning chooses the step, push again to leave | digit by digit: turning changes the lit digit, E1 and E2 move it, push or hold to leave | FA/FB, MC |
+| E1 | change VOL, SQL, AGC/manual gain, NR or NB | the next of those, in the radio's order | lock (below) | VM, SQ, GC, NR+NC, NB+NK |
+| E2 | change the filter, the CW pitch (CW only) or the RIT offset (RIT on only) | the next of those offered | lock (below) | RF, PI, RC+RU/RD |
+
+- **Panel-side, with no CAT command:** the tuning step (the radio's step and QuickStep encodings aren't known, so the step is the panel's, a dial digit from 1 Hz to 1 MHz); the STEP and digit-by-digit modes; which setting E1 and E2 have selected; and the lock. The radio locks its keys and knobs when E1 and E2 are pressed together; a mouse can't press two, so holding either toggles a panel lock of the knobs and the dial. The radio's own lock has no CAT command, so it is neither set nor read.
+- **Not mapped:** the AGC speed and manual gain level (GS's set encoding is unconfirmed, so it is read only here, decision 20); E2 walking the radio's settings menu (MENU is a list here); the main knob's coarse menu changes; VFO>MEM and memory delete with the knobs; the transmit-time functions (E1 mic gain or CW speed, E2 power and the TX display), since nothing is changed while the radio transmits. The FM filter has no known codes, so E2 says so in FM.
+- **Safety.** While the radio transmits or isn't connected the knobs grey and take nothing (interlock #5, panel side); the link refuses the frames then anyway.
+
+**Look.** Satin aluminium: a radial gradient from mid grey to a soft highlight at the top left, as the keys are lit, faint concentric machining rings, a knurled darker rim, and a near-black mark that turns with the knob. Under the pointer it lightens and wears a thin blue ring (neutral), with the pointing-hand cursor. The radio window keeps one look whatever the panel's look, so ELAD and SDRoxide both show silver.
+
+**Size.** The manual's front-panel page could not be measured: the 76-page PDF in the uploads is the HR500 assembly manual, not the DUO's, and the DUO's manual and photos could not be fetched (the network refused). The sizes follow the DUO's face as published (about 178 by 70 mm) and its layout: the main knob's diameter is up to 0.58 of the LCD's height (held to what fits over E1 and E2), and E1 and E2 are 0.4 of the main knob. At scale 1 that is a 104-point main knob and 42-point E1 and E2 beside a 184-point LCD (were 92 and 40 beside about 192). The knob column is 140 points wide (was 104), so the LCD's digits are about a tenth smaller; they stay well readable. To be checked against the manual's drawing when it is to hand: `MAIN_OF_LCD` and `SMALL_OF_MAIN` in `face.rs`.
+
+**Tested by** `radio::knobs::tests`: the wheel and drag mappings, push against hold at the hold time (and a drag cancelling both), menu 71's hold time, the step walk, E1's and E2's lists, and the frames E1 and E2 send. `tools/fake_duo.py` now answers and takes VM, SQ, GC, NR, NC, NB, NK, PI and MC, and answers HT.
+
+**Screen.** `screens/radio-knobs.png`: the demo panel with the fake DUO, E1 turned to VOL 37, the pointer over the main knob.
+
+**Where.** `radio/knobs.rs` (the logic), `radio/face.rs` (`knobs`, `silver_knob`, `knob_input`), `radio.rs` (`RadioUi::knobs`).
+

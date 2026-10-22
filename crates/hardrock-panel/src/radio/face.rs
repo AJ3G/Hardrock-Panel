@@ -10,6 +10,7 @@ use eframe::egui::{
     Shape, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 
+use super::knobs;
 use super::logic::{self, RadioPrefs};
 use super::rigtheme::RigTheme;
 use super::zoom::{k as zoom, z};
@@ -167,8 +168,8 @@ pub(crate) fn tune_to(f: &mut Face<'_>, if_hz: u64, mode: Option<&str>) {
     }
 }
 
-/// The LCD, `width` wide.
-pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32) {
+/// The LCD, `width` wide. Returns its height.
+pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32) -> f32 {
     let th = f.th;
     let xvtr = prefs.xvtr_hz;
     let n = logic::digit_count(xvtr);
@@ -195,6 +196,8 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
     let ghost = ink.gamma_multiply(th.lcd_ghost);
     let inner = glass.shrink(pad - z(6.0));
     let locked = f.lock.is_some();
+    // The radio's E1+E2 lock holds the dial as well as the knobs.
+    let dial_locked = locked || f.st.knobs.locked;
     let mut y = inner.top();
 
     // Annunciators. Some are keys: click to change.
@@ -218,12 +221,12 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
         let dr = Rect::from_min_size(pos2(x - 3.0 * k, y), vec2((DW + 6.0) * k, digits_h));
         if logic::steppable(i, n, xvtr) && rb.is_some() {
             let id = ui.id().with(("radio-digit", i));
-            let r = ui.interact(dr, id, if locked { Sense::hover() } else { Sense::click() });
+            let r = ui.interact(dr, id, if dial_locked { Sense::hover() } else { Sense::click() });
             let sel = f.st.sel == Some(i);
-            if !locked && (r.hovered() || sel) {
+            if !dial_locked && (r.hovered() || sel) {
                 p.rect_filled(dr, CornerRadius::same(3), ink.gamma_multiply(0.08));
             }
-            if !locked {
+            if !dial_locked {
                 let a = if r.hovered() || sel { 0.85 } else { 0.22 };
                 let cx = dr.center().x + DH * th.skew * k * 0.5;
                 let c = ink.gamma_multiply(a);
@@ -262,7 +265,8 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
                      number starts F INPUT.",
                 );
             } else {
-                r.on_hover_cursor(CursorIcon::NotAllowed).on_hover_text(f.lock.unwrap_or_default());
+                r.on_hover_cursor(CursorIcon::NotAllowed)
+                    .on_hover_text(f.lock.unwrap_or(LOCKED_NOTE));
             }
         }
         seven(&p, pos2(x, top), k, th.skew, *d, ink, ghost);
@@ -367,11 +371,12 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
         logic::s_dbm(f.p, f.s).map_or(String::new(), |d| format!("{d:.0} dBm"))
     };
     p.text(pos2(inner.right(), y + z(9.0)), egui::Align2::RIGHT_CENTER, right, mono, ink);
+    height
 }
 
 /// The arrow keys and typed digits, with the pointer on the dial.
 fn keys_on_dial(ui: &mut Ui, f: &mut Face<'_>, dial: Rect, n: usize) {
-    if f.lock.is_some() || ui.ctx().egui_wants_keyboard_input() {
+    if f.lock.is_some() || f.st.knobs.locked || ui.ctx().egui_wants_keyboard_input() {
         return;
     }
     let over = ui.rect_contains_pointer(dial);
@@ -546,52 +551,512 @@ fn annunciator_click(f: &mut Face<'_>, cmd: &'static str) {
     f.send_control(c, to);
 }
 
-/// The knobs beside the LCD. The wheel over the big one tunes by the digit
-/// last picked (100 Hz until one is).
-pub(crate) fn knobs(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs) {
-    let (rect, resp) = ui.allocate_exact_size(vec2(z(104.0), z(150.0)), Sense::hover());
-    let p = ui.painter_at(rect);
-    let knob = |c: Pos2, r: f32| {
-        p.circle_filled(c + vec2(0.0, z(3.0)), r + z(1.0), Color32::from_black_alpha(140));
-        let (dark, light) =
-            (Color32::from_rgb(0x1c, 0x1e, 0x21), Color32::from_rgb(0x4d, 0x52, 0x59));
-        p.circle_filled(c, r, dark);
-        // A radial gradient, lit from the top left.
-        let hl = c - vec2(r * 0.3, r * 0.4);
-        for i in 0..10 {
-            let t = i as f32 / 10.0;
-            p.circle_filled(c + (hl - c) * t, r * 0.8 * (1.0 - t), dark.lerp_to_gamma(light, t));
-        }
-        p.circle_stroke(c, r, Stroke::new(1.0, Color32::from_gray(10)));
+/// The knob column's width at scale 1.
+pub(crate) const KNOBS_W: f32 = 140.0;
+
+/// The main knob's diameter as a share of the LCD's height, and E1's and
+/// E2's as a share of the main knob's, as on the FDM-DUO's face (decision
+/// 53).
+const MAIN_OF_LCD: f32 = 0.58;
+const SMALL_OF_MAIN: f32 = 0.4;
+
+/// What the dial and knobs say while the radio's E1+E2 lock is on.
+const LOCKED_NOTE: &str = "Locked, as with E1 and E2 pressed together on the radio. Hold E1 or E2 \
+                           to unlock.";
+
+/// Satin aluminium: the rim, the body's shadow and highlight, and the mark.
+const SILVER_RIM: Color32 = Color32::from_rgb(0x6c, 0x71, 0x78);
+const SILVER_LOW: Color32 = Color32::from_rgb(0x8e, 0x94, 0x9b);
+const SILVER_HIGH: Color32 = Color32::from_rgb(0xe8, 0xeb, 0xee);
+const SILVER_EDGE: Color32 = Color32::from_rgb(0x2a, 0x2d, 0x31);
+const KNOB_MARK: Color32 = Color32::from_rgb(0x1a, 0x1c, 0x1f);
+
+/// A silver knob at `c`, radius `r`, its mark turned `angle` from the top.
+/// Lit from the top left as the case's keys are, with concentric machining
+/// rings, a knurled skirt and a darker rim. Lighter with a blue ring under
+/// the pointer; dimmed when it can't be used.
+fn silver_knob(
+    p: &egui::Painter,
+    th: &RigTheme,
+    c: Pos2,
+    r: f32,
+    angle: f32,
+    hover: bool,
+    live: bool,
+) {
+    let lift = |col: Color32| if hover { col.lerp_to_gamma(Color32::WHITE, 0.12) } else { col };
+    p.circle_filled(c + vec2(0.0, z(3.0)), r + z(1.0), Color32::from_black_alpha(150));
+    p.circle_filled(c, r, lift(SILVER_RIM));
+    // The knurled skirt: fine ridges round the rim.
+    let ridges = ((r * 1.4) as usize).clamp(24, 96);
+    for i in 0..ridges {
+        let a = i as f32 / ridges as f32 * std::f32::consts::TAU + angle;
+        let d = vec2(a.sin(), -a.cos());
         p.line_segment(
-            [c - vec2(0.0, r * 0.92), c - vec2(0.0, r * 0.74)],
-            Stroke::new(z(2.0), f.th.label),
+            [c + d * r * 0.86, c + d * (r - 1.0)],
+            Stroke::new(1.0, Color32::from_black_alpha(55)),
         );
+    }
+    // The face: a radial gradient towards the highlight.
+    let body = r * 0.84;
+    let hl = c - vec2(body * 0.32, body * 0.42);
+    let n = 16;
+    for i in 0..n {
+        let t = i as f32 / n as f32;
+        let col = SILVER_LOW.lerp_to_gamma(SILVER_HIGH, t.powf(0.8));
+        p.circle_filled(c + (hl - c) * t, body * (1.0 - 0.85 * t), lift(col));
+    }
+    // Machining rings, faint.
+    for k in 1..9 {
+        let rr = body * k as f32 / 9.0;
+        let a =
+            if k % 2 == 0 { Color32::from_white_alpha(22) } else { Color32::from_black_alpha(14) };
+        p.circle_stroke(c, rr, Stroke::new(0.7, a));
+    }
+    p.circle_stroke(c, body, Stroke::new(1.0, Color32::from_white_alpha(110)));
+    p.circle_stroke(c, r, Stroke::new(1.0, SILVER_EDGE));
+    // The mark, dark on the silver.
+    let d = vec2(angle.sin(), -angle.cos());
+    p.line_segment([c + d * body * 0.88, c + d * body * 0.58], Stroke::new(z(2.5), KNOB_MARK));
+    if hover {
+        p.circle_stroke(c, r + z(2.0), Stroke::new(z(1.5), th.cap_lit.gamma_multiply(0.7)));
+    }
+    if !live {
+        p.circle_filled(c, r + 0.5, th.case.gamma_multiply(0.55));
+    }
+}
+
+/// One knob's input this frame.
+struct KnobIn {
+    resp: Response,
+    hovered: bool,
+    steps: i64,
+    press: Option<knobs::Press>,
+}
+
+/// Read knob `k` (0 main, 1 E1, 2 E2) at `c`, radius `r`: the wheel over
+/// it, a drag round it (`drag`, the main knob only), and a push or hold.
+fn knob_input(
+    ui: &Ui,
+    f: &mut Face<'_>,
+    k: usize,
+    c: Pos2,
+    r: f32,
+    live: bool,
+    drag: bool,
+) -> KnobIn {
+    let rect = Rect::from_center_size(c, vec2(2.0 * r, 2.0 * r));
+    let sense = match (live, drag) {
+        (false, _) => Sense::hover(),
+        (true, true) => Sense::click_and_drag(),
+        (true, false) => Sense::click(),
     };
-    let big = pos2(rect.center().x, rect.top() + z(48.0));
-    knob(big, z(46.0));
-    let (l, r) = (
-        pos2(rect.left() + z(26.0), rect.top() + z(118.0)),
-        pos2(rect.right() - z(26.0), rect.top() + z(118.0)),
-    );
-    knob(l, z(20.0));
-    knob(r, z(20.0));
-    let font = label_font(10.5);
-    p.text(l + vec2(0.0, z(26.0)), egui::Align2::CENTER_CENTER, "E1", font.clone(), f.th.dim);
-    p.text(r + vec2(0.0, z(26.0)), egui::Align2::CENTER_CENTER, "E2", font, f.th.dim);
-    if f.lock.is_none() && logic::dial_hz(f.s).is_some() {
-        let over = resp.hover_pos().is_some_and(|q| q.distance(big) <= z(46.0));
-        let hover = if over { resp.clone() } else { resp.clone().with_new_rect(Rect::NOTHING) };
-        let w = if over { wheel_steps(ui, &hover) } else { 0 };
-        if w != 0 {
-            let n = logic::digit_count(prefs.xvtr_hz);
-            let pl = f.st.sel.map_or(100, |i| logic::place(i, n));
-            step(f, pl, w);
+    let resp = ui.interact(rect, ui.id().with(("radio-knob", k)), sense);
+    let hovered = resp.hover_pos().is_some_and(|q| q.distance(c) <= r);
+    let ks = &mut f.st.knobs;
+    let mut steps = 0;
+    if live && hovered {
+        steps += ui.ctx().input_mut(|i| {
+            let mut n = 0;
+            for e in &i.events {
+                if let egui::Event::MouseWheel { unit, delta, .. } = e {
+                    let u = match unit {
+                        egui::MouseWheelUnit::Point => knobs::WheelUnit::Point,
+                        egui::MouseWheelUnit::Line => knobs::WheelUnit::Line,
+                        egui::MouseWheelUnit::Page => knobs::WheelUnit::Page,
+                    };
+                    n += knobs::wheel_to_steps(u, delta.y, &mut ks.wheel[k]);
+                }
+            }
+            // The wheel is the knob's: the window doesn't scroll as well.
+            i.smooth_scroll_delta = egui::Vec2::ZERO;
+            n
+        });
+    }
+    if live && drag && resp.dragged() {
+        if let Some(q) = resp.interact_pointer_pos() {
+            let v = q - c;
+            // Too near the centre the angle means nothing.
+            if v.length() > r * 0.2 {
+                let a = v.y.atan2(v.x);
+                if let Some(last) = ks.drag_last {
+                    steps += knobs::angle_to_steps(a - last, &mut ks.drag);
+                }
+                ks.drag_last = Some(a);
+            }
         }
-        if over {
-            resp.on_hover_text(
-                "Scroll to tune by the digit last picked on the dial (100 Hz until one is).",
-            );
+    } else if drag {
+        ks.drag_last = None;
+        ks.drag = 0.0;
+    }
+    if steps != 0 {
+        ks.press[k].cancel();
+        ks.turned[k] += steps as f32 * knobs::DRAG_STEP_RAD;
+    }
+    let down = live && resp.is_pointer_button_down_on();
+    let now = ui.input(|i| i.time);
+    let press = ks.press[k].update(down, now, knobs::hold_s(f.s));
+    if ks.press[k].waiting() {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    KnobIn { resp, hovered, steps, press }
+}
+
+/// A setting turned to lately, if the radio hasn't read it back yet, else
+/// the read-back: so quick turns add up.
+fn knob_base(f: &Face<'_>, key: &'static str, rb: Option<i32>) -> Option<i32> {
+    match f.st.knobs.pending.get(key) {
+        Some((v, t)) if Some(*v) != rb && t.elapsed().as_secs_f32() < 1.5 => Some(*v),
+        _ => rb,
+    }
+}
+
+/// The dial digit the main knob tunes by, the one last picked, or the
+/// 100 Hz digit.
+fn tune_step(f: &Face<'_>, n: usize) -> u64 {
+    f.st.sel.map_or(knobs::STEP_DEFAULT, |i| logic::place(i, n))
+}
+
+/// Move the selected dial digit `by` places (right positive), inside the
+/// digits that step.
+fn move_digit(f: &mut Face<'_>, n: usize, by: i64) {
+    let first = (0..n).find(|i| logic::steppable(*i, n, f.xvtr)).unwrap_or(0) as i64;
+    let now =
+        f.st.sel.map_or(knobs::digit_of(knobs::STEP_DEFAULT, n).unwrap_or(0) as i64, |i| i as i64);
+    f.st.sel = Some((now + by).clamp(first, n as i64 - 1) as usize);
+}
+
+/// The main knob: tune, or in MEM pick the channel; in STEP change the
+/// step; digit by digit change the selected digit.
+fn main_knob(f: &mut Face<'_>, n: usize, input: &KnobIn) {
+    use knobs::{MainMode, Press};
+    let ks = f.st.knobs.main;
+    if input.steps != 0 {
+        match ks {
+            MainMode::Step => {
+                let to = knobs::next_step(tune_step(f, n), input.steps);
+                f.st.sel = knobs::digit_of(to, n).or(f.st.sel);
+            }
+            MainMode::Digit => {
+                if f.st.sel.is_none() {
+                    move_digit(f, n, 0);
+                }
+                step(f, tune_step(f, n), input.steps);
+            }
+            MainMode::Tune if f.s.vfo == Some(2) => {
+                let now = f.s.value("MC").and_then(|v| v.trim().parse::<u16>().ok());
+                let base = knob_base(f, "MC", now.map(i32::from)).unwrap_or(0) as u16;
+                let to = knobs::next_memory(base, input.steps);
+                if let Some(fr) = f.p.recall_memory(to) {
+                    f.out.frames.push(fr);
+                    f.st.knobs.pending.insert("MC", (i32::from(to), Instant::now()));
+                }
+            }
+            MainMode::Tune => step(f, tune_step(f, n), input.steps),
+        }
+    }
+    f.st.knobs.main = match (ks, input.press) {
+        (MainMode::Tune, Some(Press::Push)) => MainMode::Step,
+        (MainMode::Step, Some(Press::Push)) => MainMode::Tune,
+        (MainMode::Tune | MainMode::Step, Some(Press::Hold)) => {
+            if f.st.sel.is_none() {
+                move_digit(f, n, 0);
+            }
+            MainMode::Digit
+        }
+        (MainMode::Digit, Some(_)) => MainMode::Tune,
+        (m, None) => m,
+    };
+}
+
+/// E1: change its setting, or push for the next one; digit by digit, move
+/// the selected digit.
+fn e1_knob(f: &mut Face<'_>, n: usize, input: &KnobIn) {
+    use knobs::{E1, MainMode, Press};
+    let digit = f.st.knobs.main == MainMode::Digit;
+    match input.press {
+        Some(Press::Push) if digit => move_digit(f, n, -1),
+        Some(Press::Push) => f.st.knobs.e1 = f.st.knobs.e1.next(),
+        Some(Press::Hold) if digit => f.st.knobs.main = MainMode::Tune,
+        Some(Press::Hold) => f.st.knobs.locked = !f.st.knobs.locked,
+        None => {}
+    }
+    if input.steps == 0 {
+        return;
+    }
+    if digit {
+        move_digit(f, n, input.steps);
+        return;
+    }
+    let e = f.st.knobs.e1;
+    let Some(from) = knob_base(f, e.name(), knobs::e1_value(f.p, f.s, e)) else {
+        f.st.note = Some(format!("E1: the radio hasn't answered {} yet.", e.name()));
+        return;
+    };
+    let (lo, hi) = knobs::e1_range(e);
+    let to = if e == E1::Agc {
+        i32::from(input.steps > 0)
+    } else {
+        (from + input.steps as i32).clamp(lo, hi)
+    };
+    match knobs::e1_frames(f.p, f.s, e, from, to) {
+        Ok(v) if !v.is_empty() => {
+            f.out.frames.extend(v);
+            f.st.knobs.pending.insert(e.name(), (to, Instant::now()));
+        }
+        Ok(_) => {}
+        Err(err) => f.st.note = Some(err),
+    }
+}
+
+/// E2: change the filter, CW pitch or RIT offset, or push for the next;
+/// digit by digit, move the selected digit.
+fn e2_knob(f: &mut Face<'_>, n: usize, input: &KnobIn) {
+    use knobs::{E2, MainMode, Press};
+    let digit = f.st.knobs.main == MainMode::Digit;
+    match input.press {
+        Some(Press::Push) if digit => move_digit(f, n, 1),
+        Some(Press::Push) => f.st.knobs.e2 = f.st.knobs.e2.next(f.s),
+        Some(Press::Hold) if digit => f.st.knobs.main = MainMode::Tune,
+        Some(Press::Hold) => f.st.knobs.locked = !f.st.knobs.locked,
+        None => {}
+    }
+    if input.steps == 0 {
+        return;
+    }
+    if digit {
+        move_digit(f, n, input.steps);
+        return;
+    }
+    let d = input.steps;
+    match f.st.knobs.e2.now(f.s) {
+        E2::Filter => {
+            let ws = knobs::widths(f.p, f.s);
+            let now = knob_base(f, "FIL", logic::filter_hz(f.p, f.s).map(|w| w as i32));
+            let (Some(now), Some(mode)) = (now, f.s.mode) else { return };
+            if let Some(w) = knobs::next_width(&ws, now as u32, d)
+                && w as i32 != now
+                && let Some(fr) = f.p.set_filter(mode, w)
+            {
+                f.out.frames.push(fr);
+                f.st.knobs.pending.insert("FIL", (w as i32, Instant::now()));
+            }
+        }
+        E2::Pitch => {
+            let Some(c) = logic::find(f.p, "PI") else { return };
+            let rb = logic::readback(c, f.s).and_then(|v| v.trim().parse().ok());
+            let Some(now) = knob_base(f, "PITCH", rb) else { return };
+            let to = (now + 10 * d as i32).clamp(0, 1000);
+            if to != now {
+                f.send_control(c, &to.to_string());
+                f.st.knobs.pending.insert("PITCH", (to, Instant::now()));
+            }
+        }
+        E2::Rit => {
+            let now = knob_base(f, "RIT", logic::rit_hz(f.s)).unwrap_or(0);
+            let to = (now + 10 * d as i32).clamp(-50_000, 50_000);
+            if to != now {
+                let v = f.p.set_rit(to);
+                f.out.frames.extend(v);
+                f.st.knobs.pending.insert("RIT", (to, Instant::now()));
+            }
+        }
+    }
+}
+
+/// E2's setting in words, as its caption shows it.
+fn e2_text(f: &Face<'_>) -> String {
+    use knobs::E2;
+    let e = f.st.knobs.e2.now(f.s);
+    let v = match e {
+        E2::Filter => logic::filter_hz(f.p, f.s).map(logic::filter_text),
+        E2::Pitch => logic::find(f.p, "PI")
+            .and_then(|c| logic::readback(c, f.s))
+            .and_then(|v| v.trim().parse::<i32>().ok())
+            .map(|v| format!("PITCH {v}")),
+        E2::Rit => logic::rit_hz(f.s).map(|h| format!("RIT {:+.2}", h as f32 / 1000.0)),
+    };
+    v.unwrap_or_else(|| format!("{} —", e.name()))
+}
+
+/// The knobs beside the LCD, `height` tall as it is: the main tuning knob
+/// over E1 and E2, silver as the radio's. Each turns with the wheel over
+/// it, the main knob also by dragging round it; a click is the radio's
+/// push, a press held past its hold time (menu 71) the radio's push and
+/// hold. See [`knobs`] for what each does.
+pub(crate) fn knobs(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, height: f32) {
+    use knobs::{E1, E2, MainMode};
+    let w = z(KNOBS_W);
+    let (rect, _) = ui.allocate_exact_size(vec2(w, height), Sense::hover());
+    let line = z(13.0);
+    // The main knob as large as the LCD's share allows, E1 and E2 under it
+    // with a line of status between and their captions below.
+    let fit = (height - z(2.0 + 3.0 + 4.0 + 3.0) - 2.0 * line) / (1.0 + SMALL_OF_MAIN);
+    let d_main = (height * MAIN_OF_LCD).min(fit).min(w - z(8.0));
+    let d_small = d_main * SMALL_OF_MAIN;
+    let main_c = pos2(rect.center().x, rect.top() + z(2.0) + d_main / 2.0);
+    let status_y = main_c.y + d_main / 2.0 + z(3.0) + line / 2.0;
+    let small_y = status_y + line / 2.0 + z(4.0) + d_small / 2.0;
+    let e1_c = pos2(rect.center().x - w / 4.0, small_y);
+    let e2_c = pos2(rect.center().x + w / 4.0, small_y);
+    let cap_y = small_y + d_small / 2.0 + z(3.0) + line / 2.0;
+
+    // SAFETY INTERLOCK (#5, panel side): no knob changes anything while the
+    // radio transmits or isn't connected; they grey with the rest of the
+    // window, and the link would refuse the frames anyway.
+    let live = f.lock.is_none();
+    let n = logic::digit_count(prefs.xvtr_hz);
+    let tuning = logic::dial_hz(f.s).is_some();
+    let main_in = knob_input(ui, f, 0, main_c, d_main / 2.0, live && tuning, true);
+    let e1_in = knob_input(ui, f, 1, e1_c, d_small / 2.0, live, false);
+    let e2_in = knob_input(ui, f, 2, e2_c, d_small / 2.0, live, false);
+    if live {
+        if f.st.knobs.locked {
+            // Locked, only a hold of E1 or E2 does anything: it unlocks.
+            let hold = Some(knobs::Press::Hold);
+            if e1_in.press == hold || e2_in.press == hold {
+                f.st.knobs.locked = false;
+            }
+        } else {
+            if tuning {
+                main_knob(f, n, &main_in);
+            }
+            e1_knob(f, n, &e1_in);
+            e2_knob(f, n, &e2_in);
+        }
+    }
+
+    // Draw.
+    let p = ui.painter_at(rect.expand(z(4.0)));
+    let ks = &f.st.knobs;
+    let th = f.th;
+    let main_live = live && tuning && !ks.locked;
+    silver_knob(
+        &p,
+        th,
+        main_c,
+        d_main / 2.0,
+        ks.turned[0],
+        main_in.hovered && main_live,
+        main_live,
+    );
+    let small_live = live;
+    silver_knob(&p, th, e1_c, d_small / 2.0, ks.turned[1], e1_in.hovered && small_live, small_live);
+    silver_knob(&p, th, e2_c, d_small / 2.0, ks.turned[2], e2_in.hovered && small_live, small_live);
+
+    // The status line under the main knob: what it does now.
+    let step = tune_step(f, n);
+    let (status, lit) = if ks.locked {
+        ("LOCKED".to_string(), true)
+    } else {
+        match ks.main {
+            MainMode::Step => (format!("STEP {}", knobs::step_text(step)), true),
+            MainMode::Digit => ("DIGIT BY DIGIT".to_string(), true),
+            MainMode::Tune if f.s.vfo == Some(2) => {
+                let ch = f.s.value("MC").map_or("—".to_string(), |v| v.trim().to_string());
+                (format!("MEM CH {ch}"), false)
+            }
+            MainMode::Tune => (format!("STEP {}", knobs::step_text(step)), false),
+        }
+    };
+    let col = if lit { th.cap_lit } else { th.dim };
+    p.text(pos2(main_c.x, status_y), egui::Align2::CENTER_CENTER, &status, label_font(10.0), col);
+    let e1 = ks.e1;
+    let e1_text = knobs::e1_text(e1, knobs::e1_value(f.p, f.s, e1));
+    let e2_text = e2_text(f);
+    let font = label_font(9.5);
+    p.text(
+        pos2(e1_c.x, cap_y),
+        egui::Align2::CENTER_CENTER,
+        format!("E1 {e1_text}"),
+        font.clone(),
+        th.dim,
+    );
+    p.text(pos2(e2_c.x, cap_y), egui::Align2::CENTER_CENTER, format!("E2 {e2_text}"), font, th.dim);
+
+    // Pointer and hover notes.
+    let hold = knobs::hold_s(f.s);
+    let digit = ks.main == MainMode::Digit;
+    let locked = ks.locked;
+    let rx_vfo = if logic::rx_vfo(f.s) == rigcat::Vfo::B { "VFO B" } else { "VFO A" };
+    let main_note = if locked {
+        LOCKED_NOTE.to_string()
+    } else {
+        match ks.main {
+            MainMode::Tune if f.s.vfo == Some(2) => format!(
+                "Main knob, MEM: scroll or drag round to recall the next or previous memory \
+                 channel (CAT MC). Click: STEP. Hold {hold:.1} s: digit by digit."
+            ),
+            MainMode::Tune => format!(
+                "Main knob: scroll or drag round to tune {rx_vfo} by {} (CAT {}). Click: STEP, \
+                 to choose the step. Hold {hold:.1} s: digit by digit.",
+                knobs::step_text(step),
+                if rx_vfo == "VFO B" { "FB" } else { "FA" },
+            ),
+            MainMode::Step => format!(
+                "STEP: scroll to change the tuning step, now {}. The step is the panel's: the \
+                 radio's own step has no known CAT command. Click to go back to tuning.",
+                knobs::step_text(step)
+            ),
+            MainMode::Digit => "Digit by digit: scroll to change the selected digit; E1 and E2 \
+                                move the selection. Click or hold to go back to tuning."
+                .to_string(),
+        }
+    };
+    let lock_tail = "Hold: lock the knobs and dial (the radio's E1 and E2 pressed together).";
+    let e1_note = if locked {
+        LOCKED_NOTE.to_string()
+    } else if digit {
+        "E1, digit by digit: scroll or click to move the selected digit (click: one left). \
+         Hold: back to tuning."
+            .to_string()
+    } else {
+        let what = match e1 {
+            E1::Vol => "the radio's volume (CAT VM)",
+            E1::Sql => "the squelch (CAT SQ)",
+            E1::Agc => {
+                "AGC or manual gain (CAT GC); the AGC speed and gain level have no known \
+                        CAT encoding, so set them on the radio"
+            }
+            E1::Nr => "noise reduction, off or its level (CAT NR, NC)",
+            E1::Nb => "the noise blanker, off or its level (CAT NB, NK)",
+        };
+        format!(
+            "E1: {e1_text}. Scroll to change {what}. Click: the next of VOL, SQL, AGC, NR, NB. \
+             {lock_tail}"
+        )
+    };
+    let e2_note = if locked {
+        LOCKED_NOTE.to_string()
+    } else if digit {
+        "E2, digit by digit: scroll or click to move the selected digit (click: one right). \
+         Hold: back to tuning."
+            .to_string()
+    } else {
+        let what = match ks.e2.now(f.s) {
+            E2::Filter if knobs::widths(f.p, f.s).is_empty() => {
+                "the receive filter: not in this mode, whose filter codes aren't known"
+            }
+            E2::Filter => "the receive filter (CAT RF)",
+            E2::Pitch => "the CW pitch, 10 Hz a step (CAT PI)",
+            E2::Rit => "the RIT offset, 10 Hz a step (CAT RU, RD)",
+        };
+        format!(
+            "E2: {e2_text}. Scroll to change {what}. Click: the next of FIL, PITCH (CW) and RIT \
+             (while RIT is on). {lock_tail}"
+        )
+    };
+    for (input, note, ok) in
+        [(main_in, main_note, live && tuning), (e1_in, e1_note, live), (e2_in, e2_note, live)]
+    {
+        if !input.hovered {
+            continue;
+        }
+        if ok {
+            input.resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(note);
+        } else {
+            let why = f.lock.unwrap_or("The radio's dial hasn't been read yet.");
+            input.resp.on_hover_cursor(CursorIcon::NotAllowed).on_hover_text(why);
         }
     }
 }
