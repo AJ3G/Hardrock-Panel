@@ -138,6 +138,7 @@ Mono are under the SIL Open Font License; see `crates/hardrock-panel/assets/font
 GLOBE's map is from [Natural Earth](https://www.naturalearthdata.com) and its
 relief picture from NASA's Blue Marble Next Generation, both in the public
 domain; see `crates/hardrock-panel/assets/globe/`.
+Its HAMQSL CONDITIONS are fetched from [HamQSL](https://www.hamqsl.com) (N0NBH).
 
 Hardrock-500, Hardrock-50 and ATU-500 are products of HobbyPCB. This project is
 not affiliated with HobbyPCB. No HobbyPCB manuals, schematics or firmware are
