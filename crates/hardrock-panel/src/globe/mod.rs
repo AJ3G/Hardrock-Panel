@@ -137,6 +137,9 @@ pub(crate) struct Globe {
     held: bool,
     /// egui's clock at the last frame, for PLAY, SPIN and the turns.
     last_t: Option<f64>,
+    /// The band of DECODE's latest station, and the one BAND last followed.
+    decode_band: Option<&'static str>,
+    followed: Option<&'static str>,
 }
 
 impl Default for Globe {
@@ -162,6 +165,8 @@ impl Default for Globe {
             fly: None,
             held: false,
             last_t: None,
+            decode_band: None,
+            followed: None,
         }
     }
 }
@@ -190,7 +195,25 @@ const PAINT_EVERY_S: f64 = 3.0;
 impl Globe {
     /// A station heard (or, from PSK Reporter, hearing AJ3G).
     pub(crate) fn add(&mut self, r: Reception) {
+        if r.src == Source::Decode && r.band().is_some() {
+            self.decode_band = r.band();
+        }
         self.history.add(r);
+    }
+
+    /// ONE BAND follows DECODE onto a new band, so its stations are on the
+    /// map: on 40 m with BAND left on 20 the map showed none of them (AJ3G,
+    /// 23 Oct 2026). Only when DECODE changes band, so a band picked by hand
+    /// stays until then.
+    fn follow_decode(&mut self, s: &mut GlobeSettings) {
+        if let Some(b) = self.decode_band
+            && self.followed != Some(b)
+        {
+            self.followed = Some(b);
+            if BANDS.contains(&b) {
+                s.band = b.to_string();
+            }
+        }
     }
 
     /// Turn smoothly to `to`, starting at egui's clock `t`.
@@ -371,6 +394,7 @@ pub(crate) fn window(
 ) -> GlobeOut {
     let mut out = GlobeOut::default();
     let now = decoders::slot::utc_now();
+    g.follow_decode(s);
     g.step(s, st, now);
     if g.advance(ctx.input(|i| i.time)) {
         ctx.request_repaint();
@@ -1745,5 +1769,37 @@ mod tests {
         g.spin = false;
         g.held = false;
         assert!(!g.advance(t + 0.3));
+    }
+
+    #[test]
+    fn one_band_follows_decode_onto_a_new_band_but_keeps_a_hand_pick() {
+        let mut g = Globe::default();
+        let mut s = GlobeSettings::default();
+        let rec = |hz: f64, src| Reception {
+            call: "K1ABC".into(),
+            grid: "FN42".into(),
+            pos: LatLon { lat: 42.5, lon: -71.0 },
+            rf_hz: hz,
+            mode: "FT8".into(),
+            snr: Some(-5.0),
+            utc: 0.0,
+            src,
+            row: None,
+        };
+        g.add(rec(7_075_000.0, Source::Decode));
+        g.follow_decode(&mut s);
+        assert_eq!(s.band, "40");
+        // Picked by hand while DECODE stays on 40: it stays.
+        s.band = "20".into();
+        g.add(rec(7_076_000.0, Source::Decode));
+        g.follow_decode(&mut s);
+        assert_eq!(s.band, "20");
+        // The skimmer elsewhere doesn't move it; DECODE on 15 does.
+        g.add(rec(28_075_000.0, Source::Skim));
+        g.follow_decode(&mut s);
+        assert_eq!(s.band, "20");
+        g.add(rec(21_075_000.0, Source::Decode));
+        g.follow_decode(&mut s);
+        assert_eq!(s.band, "15");
     }
 }

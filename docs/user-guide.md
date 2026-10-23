@@ -636,7 +636,8 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
 - **PROP.** Where the band was open, from the paths heard: each path counts at
   the middle of each hop, more for a stronger report, and less as it ages
   (HALF-LIFE, 45 minutes to start). **ONE BAND** shows the band picked under
-  **BAND**, weak blue to strong white; **ALL BANDS** colours each place by its
+  **BAND**, weak blue to strong white, and BAND follows DECODE when it moves to
+  another band (a band you pick stays until then); **ALL BANDS** colours each place by its
   best band. **BANDS OPEN** on the right shows how much of the world each band
   reached.
 - **SOURCES.** DECODE and SKIM are the panel's own. **PSK REPORTER** (off to
