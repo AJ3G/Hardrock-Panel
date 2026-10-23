@@ -643,6 +643,16 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
 - **SOURCES.** DECODE and SKIM are the panel's own. **PSK REPORTER** (off to
   start) asks pskreporter.info every five minutes who heard your callsign in
   the last hour, and draws those as dashed paths.
+- **FORECAST.** Each band from 160 to 10 m, hour by hour for the next 24
+  hours at your grid, dark for closed and blue to white for likely open. It
+  is a rough model, not VOACAP: the MUF rises with the Sun and the solar
+  flux, the lowest usable frequency with the Sun overhead, and a high Kp
+  lowers the one and raises the other. When a KC2G sounder is within
+  3000 km, the next hours are scaled to its MUF now. Hover a cell for the
+  hour in UTC and local time and its MUF and LUF.
+- **HAMQSL CONDITIONS.** HamQSL's (N0NBH) published Good, Fair or Poor for
+  each band group by day and by night, with the band noise and the
+  geomagnetic field, fetched hourly as a second opinion.
 - **SPACE WEATHER and WEATHER.** While GLOBE is open it fetches the solar
   flux, Kp, X-ray and solar wind and the aurora from NOAA SWPC, the MUF(3000)
   from KC2G's ionosondes, infrared clouds from NOAA nowCOAST, and the weather

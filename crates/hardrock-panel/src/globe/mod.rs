@@ -12,6 +12,7 @@
 
 pub(crate) mod fetch;
 pub(crate) mod field;
+mod forecast;
 mod geo;
 mod picture;
 pub(crate) mod sphere;
@@ -1496,6 +1497,10 @@ fn side(ui: &mut egui::Ui, g: &mut Globe, st: &StationSettings, now: f64, out: &
         .size(10.5)
         .color(theme::TEXT()),
     );
+    ui.add_space(6.0);
+    forecast_chart(ui, g, st, now, sonde.map(|(_, so)| so.mufd));
+    ui.add_space(6.0);
+    hamqsl_table(ui, g);
     ui.separator();
 
     // Space weather.
@@ -1645,6 +1650,147 @@ fn side(ui: &mut egui::Ui, g: &mut Globe, st: &StationSettings, now: f64, out: &
     } else {
         row(ui, "ALERTS", warn(g.got.alerts.join(", ")));
     }
+}
+
+/// FORECAST: each band hour by hour for the next day at the station, from
+/// `forecast`'s model, scaled to the nearest sounder's MUF now.
+fn forecast_chart(
+    ui: &mut egui::Ui,
+    g: &Globe,
+    st: &StationSettings,
+    now: f64,
+    muf_now: Option<f64>,
+) {
+    ui.label(caps("FORECAST · NEXT 24 HOURS (MODEL)"));
+    let Some(qth) = st.pos() else {
+        ui.label(
+            RichText::new("Set your grid under SETTINGS → Station.")
+                .size(11.0)
+                .color(theme::TEXT()),
+        );
+        return;
+    };
+    let sw = &g.got.space;
+    let (sfi, kp) = (sw.sfi.unwrap_or(120.0), sw.kp.unwrap_or(2.0));
+    let hours = forecast::build(&forecast::Inputs { qth, sfi, kp, muf_now }, now);
+    let off = chrono::Local::now().offset().local_minus_utc() as f64;
+    let (label_w, cell_w, cell_h) = (34.0, 10.0, 11.0);
+    let n = forecast::BANDS.len();
+    let size = Vec2::new(label_w + cell_w * 24.0, cell_h * n as f32 + 14.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    let p = ui.painter_at(rect);
+    let mut tip = None;
+    // 10 m at the top, as a band chart reads.
+    for (row, (band, _)) in forecast::BANDS.iter().rev().enumerate() {
+        let y = rect.top() + row as f32 * cell_h;
+        let k = n - 1 - row;
+        p.text(
+            Pos2::new(rect.left(), y + cell_h / 2.0),
+            egui::Align2::LEFT_CENTER,
+            format!("{band} m"),
+            egui::FontId::monospace(9.5),
+            theme::TEXT(),
+        );
+        for (col, h) in hours.iter().enumerate() {
+            let c = Rect::from_min_size(
+                Pos2::new(rect.left() + label_w + col as f32 * cell_w, y),
+                Vec2::new(cell_w - 1.0, cell_h - 1.0),
+            );
+            let v = h.open[k] as f32;
+            let fill = if v < 0.05 {
+                theme::FILL()
+            } else {
+                let [r, gg, b] = picture::ramp(0.25 + 0.75 * v);
+                Color32::from_rgb(r as u8, gg as u8, b as u8)
+            };
+            p.rect_filled(c, 1.0, fill);
+            if resp.hover_pos().is_some_and(|m| c.contains(m)) {
+                let (_, _, _, hh, _, _) = crate::decodelog::civil(h.utc as i64);
+                let (_, _, _, lh, _, _) = crate::decodelog::civil((h.utc + off) as i64);
+                let word = match v {
+                    v if v >= 0.7 => "likely open",
+                    v if v >= 0.3 => "marginal",
+                    _ => "likely closed",
+                };
+                tip = Some(format!(
+                    "{band} m at {hh:02}Z ({lh:02}:00 local): {word}\nMUF about {:.0} MHz, LUF about {:.0} MHz",
+                    h.muf, h.luf
+                ));
+            }
+        }
+    }
+    // The hour labels, every six hours, in UTC.
+    for (col, h) in hours.iter().enumerate().filter(|(c, _)| c % 6 == 0) {
+        let (_, _, _, hh, _, _) = crate::decodelog::civil(h.utc as i64);
+        p.text(
+            Pos2::new(rect.left() + label_w + col as f32 * cell_w, rect.bottom() - 6.0),
+            egui::Align2::LEFT_CENTER,
+            format!("{hh:02}Z"),
+            egui::FontId::monospace(9.0),
+            theme::TEXT(),
+        );
+    }
+    // Now, inside the first hour.
+    let x = rect.left() + label_w + ((now % 3600.0) / 3600.0) as f32 * cell_w;
+    p.line_segment(
+        [Pos2::new(x, rect.top()), Pos2::new(x, rect.top() + cell_h * n as f32)],
+        Stroke::new(1.0, INK),
+    );
+    if let Some(t) = tip {
+        resp.on_hover_text(t);
+    }
+    let src = match (sw.sfi, muf_now) {
+        (Some(_), Some(_)) => {
+            "From the solar flux, Kp and the Sun, scaled to the sounder's MUF now."
+        }
+        (Some(_), None) => {
+            "From the solar flux, Kp and the Sun; no sounder near enough to scale it."
+        }
+        _ => "Waiting for the solar flux: shown for 120 sfu until it comes.",
+    };
+    ui.label(RichText::new(src).size(10.5).color(theme::TEXT()));
+}
+
+/// HamQSL's calculated conditions (N0NBH), day and night per band group,
+/// as a second opinion beside FORECAST. Good, Fair and Poor in blues and
+/// grey: yellow and red stay the warnings'.
+fn hamqsl_table(ui: &mut egui::Ui, g: &Globe) {
+    ui.label(caps("HAMQSL CONDITIONS (N0NBH)"));
+    let Some(h) = &g.got.hamqsl else {
+        ui.label(RichText::new("Waiting for hamqsl.com").size(11.0).color(theme::TEXT()));
+        return;
+    };
+    let word = |w: &str| {
+        let c = match w {
+            "Good" => theme::CYAN(),
+            "Fair" => theme::TEXT_STRONG(),
+            _ => theme::TEXT(),
+        };
+        RichText::new(w.to_uppercase()).monospace().size(11.0).color(c)
+    };
+    egui::Grid::new("globe-hamqsl").num_columns(3).spacing([14.0, 2.0]).show(ui, |ui| {
+        ui.label(RichText::new("BANDS").size(9.5).strong().color(theme::TEXT()));
+        ui.label(RichText::new("DAY").size(9.5).strong().color(theme::TEXT()));
+        ui.label(RichText::new("NIGHT").size(9.5).strong().color(theme::TEXT()));
+        ui.end_row();
+        for (b, day, night) in &h.bands {
+            ui.label(RichText::new(b).monospace().size(11.0).color(theme::TEXT()));
+            ui.label(word(day));
+            ui.label(word(night));
+            ui.end_row();
+        }
+    });
+    let mut extra = Vec::new();
+    if let Some(n) = &h.noise {
+        extra.push(format!("Noise {n}"));
+    }
+    if let Some(m) = &h.geomag {
+        extra.push(format!("geomagnetic field {}", m.to_lowercase()));
+    }
+    if !h.updated.is_empty() {
+        extra.push(format!("updated {}", h.updated));
+    }
+    ui.label(RichText::new(extra.join(" · ")).size(10.5).color(theme::TEXT()));
 }
 
 fn compass(deg: f64) -> &'static str {

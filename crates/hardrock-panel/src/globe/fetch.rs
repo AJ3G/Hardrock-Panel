@@ -51,6 +51,19 @@ pub(crate) struct Ionosonde {
     pub utc: f64,
 }
 
+/// HamQSL's (N0NBH, hamqsl.com) calculated HF conditions: the same for
+/// everyone, from the solar flux, A and K.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct HamQsl {
+    /// As HamQSL writes it, e.g. "23 Oct 2026 0100 GMT".
+    pub updated: String,
+    /// Each band group, e.g. "80m-40m", with its day and night words
+    /// (Good, Fair or Poor).
+    pub bands: Vec<(String, String, String)>,
+    pub noise: Option<String>,
+    pub geomag: Option<String>,
+}
+
 /// The weather at the station.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct LocalWx {
@@ -103,6 +116,8 @@ pub(crate) struct Fetched {
     pub clouds: Option<Clouds>,
     pub wx: Option<LocalWx>,
     pub alerts: Vec<String>,
+    /// HamQSL's (N0NBH) band conditions.
+    pub hamqsl: Option<HamQsl>,
     /// PSK Reporter: who heard the station, the whole last hour.
     pub heard_me: Vec<Reception>,
     /// Bumped each time anything arrives.
@@ -232,6 +247,8 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
         ("WX", 15),
         ("NWS", 15),
         ("PSKR", 5),
+        // N0NBH updates hourly and asks that it be fetched no more often.
+        ("HAMQSL", 60),
     ]
     .into_iter()
     .map(|(name, min)| Due { name, every: Duration::from_secs(min * 60), next: now })
@@ -300,6 +317,9 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
                     .map(|al| with(&data, |f| f.alerts = al)),
                     None => Err("no grid in SETTINGS → Station".into()),
                 },
+                "HAMQSL" => get_text(&ag, "https://www.hamqsl.com/solarxml.php")
+                    .and_then(|t| parse_hamqsl(&t))
+                    .map(|h| with(&data, |f| f.hamqsl = Some(h))),
                 "PSKR" if a.pskr => match &a.call {
                     Some(c) => get_text(&ag, &pskr_url(c))
                         .map(|t| parse_pskreporter(&t))
@@ -708,6 +728,58 @@ pub(crate) fn parse_clouds(b: &[u8]) -> Result<Clouds, String> {
     Ok(Clouds { w, h, px })
 }
 
+/// The text inside the first `<tag ...>…</tag>` in `s`, trimmed.
+fn xml_text<'a>(s: &'a str, tag: &str) -> Option<&'a str> {
+    let open = s.find(&format!("<{tag}"))?;
+    let body = open + s[open..].find('>')? + 1;
+    let end = body + s[body..].find(&format!("</{tag}>"))?;
+    Some(s[body..end].trim())
+}
+
+/// An attribute's value in an opening tag.
+fn xml_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let at = tag.find(&format!("{name}=\""))? + name.len() + 2;
+    Some(&tag[at..at + tag[at..].find('"')?])
+}
+
+/// HamQSL's solarxml.php: its `calculatedconditions` bands, day and night.
+pub(crate) fn parse_hamqsl(t: &str) -> Result<HamQsl, String> {
+    let cond = xml_text(t, "calculatedconditions").ok_or("no calculatedconditions")?;
+    let mut bands: Vec<(String, String, String)> = Vec::new();
+    let mut rest = cond;
+    while let Some(i) = rest.find("<band ") {
+        let tag_end = i + rest[i..].find('>').ok_or("an unclosed band")?;
+        let tag = &rest[i..tag_end];
+        let close = tag_end + rest[tag_end..].find("</band>").ok_or("an unclosed band")?;
+        let word = rest[tag_end + 1..close].trim().to_string();
+        if let (Some(name), Some(time)) = (xml_attr(tag, "name"), xml_attr(tag, "time")) {
+            let b = match bands.iter_mut().find(|b| b.0 == name) {
+                Some(b) => b,
+                None => {
+                    bands.push((name.to_string(), String::new(), String::new()));
+                    bands.last_mut().expect("just pushed")
+                }
+            };
+            if time == "day" {
+                b.1 = word;
+            } else {
+                b.2 = word;
+            }
+        }
+        rest = &rest[close..];
+    }
+    if bands.is_empty() {
+        return Err("no bands in calculatedconditions".into());
+    }
+    let word = |tag: &str| xml_text(t, tag).filter(|s| !s.is_empty()).map(str::to_string);
+    Ok(HamQsl {
+        updated: word("updated").unwrap_or_default(),
+        bands,
+        noise: word("signalnoise"),
+        geomag: word("geomagfield"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,5 +883,29 @@ mod tests {
         let c = parse_clouds(&png).unwrap();
         assert_eq!((c.w, c.h), (2, 1));
         assert_eq!(c.px, vec![0, 255]);
+    }
+
+    /// A reply shaped as HamQSL's solarxml.php documents it (the container
+    /// can't reach hamqsl.com, so not a saved live reply).
+    #[test]
+    fn hamqsl_gives_each_band_group_day_and_night() {
+        let x = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<solar><solardata><source url="http://www.hamqsl.com">N0NBH</source>
+<updated> 23 Oct 2026 0100 GMT</updated><solarflux>152</solarflux>
+<calculatedconditions>
+<band name="80m-40m" time="day">Fair</band><band name="30m-20m" time="day">Good</band>
+<band name="17m-15m" time="day">Good</band><band name="12m-10m" time="day">Fair</band>
+<band name="80m-40m" time="night">Good</band><band name="30m-20m" time="night">Good</band>
+<band name="17m-15m" time="night">Fair</band><band name="12m-10m" time="night">Poor</band>
+</calculatedconditions>
+<calculatedvhfconditions><phenomenon name="vhf-aurora" location="northern_hemi">Band Closed</phenomenon></calculatedvhfconditions>
+<geomagfield>QUIET</geomagfield><signalnoise>S1-S2</signalnoise></solardata></solar>"#;
+        let h = parse_hamqsl(x).unwrap();
+        assert_eq!(h.updated, "23 Oct 2026 0100 GMT");
+        assert_eq!(h.bands.len(), 4);
+        assert_eq!(h.bands[0], ("80m-40m".into(), "Fair".into(), "Good".into()));
+        assert_eq!(h.bands[3], ("12m-10m".into(), "Fair".into(), "Poor".into()));
+        assert_eq!((h.noise.as_deref(), h.geomag.as_deref()), (Some("S1-S2"), Some("QUIET")));
+        assert!(parse_hamqsl("<solar></solar>").is_err());
     }
 }
