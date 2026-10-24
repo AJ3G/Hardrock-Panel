@@ -779,12 +779,14 @@ impl App {
         xvtr: i64,
     ) {
         let mut open = true;
+        let rx_hz = self.heard_hz(rig, xvtr).map(|f| f as f64);
         let o = globe::window(
             ctx,
             &mut open,
             &mut self.globe,
             &mut self.saved.globe,
             &self.saved.station,
+            rx_hz,
         );
         if let Some(p) = o.pop {
             self.saved.globe.popped = p;
@@ -797,6 +799,21 @@ impl App {
             self.decode.pick_row(id);
         }
         self.show_globe = open;
+    }
+
+    /// Where the panel is listening, as shown: its receiver when that is
+    /// running, or else the connected radio's dial.
+    fn heard_hz(&self, rig: Option<&RigStatus>, xvtr: i64) -> Option<u64> {
+        use radio::logic;
+        if self.rx.active() {
+            let map = scope::view::FreqMap {
+                ppm: self.scope.settings().ppm,
+                transverter_hz: xvtr as f64,
+            };
+            Some(map.shown(self.rx.rx_hz).max(0.0).round() as u64)
+        } else {
+            rig.filter(|r| r.connected).and_then(logic::dial_hz).map(|f| logic::shown(f, xvtr))
+        }
     }
 
     /// Take the radio and the panel's receiver to data mode `d` (decision
@@ -855,12 +872,7 @@ impl App {
         };
         let map =
             scope::view::FreqMap { ppm: self.scope.settings().ppm, transverter_hz: xvtr as f64 };
-        let here = if self.rx.active() {
-            Some(map.shown(self.rx.rx_hz).max(0.0).round() as u64)
-        } else {
-            cat.and_then(logic::dial_hz).map(|f| logic::shown(f, xvtr))
-        };
-        let Some(here) = here else {
+        let Some(here) = self.heard_hz(cat, xvtr) else {
             return (
                 format!(
                     "{name}: no radio or receiver to tune. Choose the radio or the I/Q source \

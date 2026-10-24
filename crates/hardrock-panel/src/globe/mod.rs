@@ -14,6 +14,7 @@ pub(crate) mod fetch;
 pub(crate) mod field;
 mod forecast;
 mod geo;
+mod ibp;
 mod picture;
 pub(crate) mod sphere;
 mod sun;
@@ -138,9 +139,12 @@ pub(crate) struct Globe {
     held: bool,
     /// egui's clock at the last frame, for PLAY, SPIN and the turns.
     last_t: Option<f64>,
-    /// The band of DECODE's latest station, and the one BAND last followed.
+    /// The band of DECODE's latest station (followed when there is no
+    /// receiver or radio), and the one BAND last followed.
     decode_band: Option<&'static str>,
     followed: Option<&'static str>,
+    /// The receiver's band now, marked in BAND CONDITIONS.
+    rx_band: Option<&'static str>,
 }
 
 impl Default for Globe {
@@ -168,6 +172,7 @@ impl Default for Globe {
             last_t: None,
             decode_band: None,
             followed: None,
+            rx_band: None,
         }
     }
 }
@@ -202,12 +207,18 @@ impl Globe {
         self.history.add(r);
     }
 
-    /// ONE BAND follows DECODE onto a new band, so its stations are on the
-    /// map: on 40 m with BAND left on 20 the map showed none of them (AJ3G,
-    /// 23 Oct 2026). Only when DECODE changes band, so a band picked by hand
-    /// stays until then.
-    fn follow_decode(&mut self, s: &mut GlobeSettings) {
-        if let Some(b) = self.decode_band
+    /// ONE BAND follows the receiver onto a new band, so the map shows the
+    /// band being listened to (AJ3G, 24 Oct 2026): `rx_hz` is the panel's
+    /// receiver, or else the radio's dial, as shown (with the transverter).
+    /// With neither, DECODE's latest station's band. Only when that band
+    /// changes, so a band picked by hand stays until the receiver moves.
+    fn follow_rx(&mut self, s: &mut GlobeSettings, rx_hz: Option<f64>) {
+        let b = match rx_hz {
+            Some(hz) => bandplan::band_at(hz).map(|b| b.name),
+            None => self.decode_band,
+        };
+        self.rx_band = b;
+        if let Some(b) = b
             && self.followed != Some(b)
         {
             self.followed = Some(b);
@@ -392,10 +403,11 @@ pub(crate) fn window(
     g: &mut Globe,
     s: &mut GlobeSettings,
     st: &StationSettings,
+    rx_hz: Option<f64>,
 ) -> GlobeOut {
     let mut out = GlobeOut::default();
     let now = decoders::slot::utc_now();
-    g.follow_decode(s);
+    g.follow_rx(s, rx_hz);
     g.step(s, st, now);
     if g.advance(ctx.input(|i| i.time)) {
         ctx.request_repaint();
@@ -1455,52 +1467,12 @@ fn side(ui: &mut egui::Ui, g: &mut Globe, st: &StationSettings, now: f64, out: &
         );
     }
     ui.add_space(4.0);
-    ui.label(caps("BANDS OPEN · SHARE OF THE WORLD REACHED"));
-    let best = g.fields.iter().map(|f| f.reach).fold(0.0001, f64::max);
-    let scale = [0.01, 0.03, 0.1, 0.3, 1.0].into_iter().find(|x| *x >= best).unwrap_or(1.0);
-    for f in &g.fields {
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [40.0, 14.0],
-                egui::Label::new(
-                    RichText::new(format!("{} m", f.band))
-                        .monospace()
-                        .size(11.0)
-                        .color(theme::TEXT()),
-                ),
-            );
-            let (r, _) = ui.allocate_exact_size(Vec2::new(170.0, 8.0), Sense::hover());
-            ui.painter().rect_filled(r, 2.0, theme::FILL());
-            let mut fill = r;
-            fill.set_width(r.width() * (f.reach / scale).min(1.0) as f32);
-            ui.painter().rect_filled(fill, 2.0, rgb(picture::band_colour(f.band)));
-            ui.label(
-                RichText::new(format!("{:.1}%", f.reach * 100.0))
-                    .monospace()
-                    .size(11.0)
-                    .color(theme::TEXT_STRONG()),
-            );
-        });
-    }
-    let quiet: Vec<&str> =
-        BANDS.iter().copied().filter(|b| !g.fields.iter().any(|f| f.band == *b)).collect();
-    ui.label(
-        RichText::new(format!(
-            "Scale tops at {:.0}%.{}",
-            scale * 100.0,
-            if quiet.len() < BANDS.len() && !quiet.is_empty() {
-                format!(" Nothing heard on {} m.", quiet.join(", "))
-            } else {
-                String::new()
-            }
-        ))
-        .size(10.5)
-        .color(theme::TEXT()),
-    );
+    let muf_now = sonde.map(|(_, so)| so.mufd);
+    band_conditions(ui, g, st, now, muf_now);
     ui.add_space(6.0);
-    forecast_chart(ui, g, st, now, sonde.map(|(_, so)| so.mufd));
+    forecast_chart(ui, g, st, now, muf_now);
     ui.add_space(6.0);
-    hamqsl_table(ui, g);
+    ibp_beacons(ui, st, now);
     ui.separator();
 
     // Space weather.
@@ -1671,8 +1643,7 @@ fn forecast_chart(
         return;
     };
     let sw = &g.got.space;
-    let (sfi, kp) = (sw.sfi.unwrap_or(120.0), sw.kp.unwrap_or(2.0));
-    let hours = forecast::build(&forecast::Inputs { qth, sfi, kp, muf_now }, now);
+    let hours = forecast_hours(g, qth, now, muf_now);
     let off = chrono::Local::now().offset().local_minus_utc() as f64;
     let (label_w, cell_w, cell_h) = (34.0, 10.0, 11.0);
     let n = forecast::BANDS.len();
@@ -1751,46 +1722,193 @@ fn forecast_chart(
     ui.label(RichText::new(src).size(10.5).color(theme::TEXT()));
 }
 
-/// HamQSL's calculated conditions (N0NBH), day and night per band group,
-/// as a second opinion beside FORECAST. Good, Fair and Poor in blues and
-/// grey: yellow and red stay the warnings'.
-fn hamqsl_table(ui: &mut egui::Ui, g: &Globe) {
-    ui.label(caps("HAMQSL CONDITIONS (N0NBH)"));
-    let Some(h) = &g.got.hamqsl else {
-        ui.label(RichText::new("Waiting for hamqsl.com").size(11.0).color(theme::TEXT()));
-        return;
+/// FORECAST's model from the station, with 120 sfu and Kp 2 until the
+/// space weather comes.
+fn forecast_hours(g: &Globe, qth: LatLon, now: f64, muf_now: Option<f64>) -> Vec<forecast::Hour> {
+    let sw = &g.got.space;
+    let (sfi, kp) = (sw.sfi.unwrap_or(120.0), sw.kp.unwrap_or(2.0));
+    forecast::build(&forecast::Inputs { qth, sfi, kp, muf_now }, now)
+}
+
+/// FORECAST's word for how open a band is, 0 to 1.
+fn model_word(v: f64) -> &'static str {
+    match v {
+        v if v >= 0.7 => "OPEN",
+        v if v >= 0.3 => "MARGINAL",
+        _ => "CLOSED",
+    }
+}
+
+/// HamQSL's band group for a band: 160 and 60 m are in none.
+fn hamqsl_group(band: &str) -> Option<&'static str> {
+    match band {
+        "80" | "40" => Some("80m-40m"),
+        "30" | "20" => Some("30m-20m"),
+        "17" | "15" => Some("17m-15m"),
+        "12" | "10" => Some("12m-10m"),
+        _ => None,
+    }
+}
+
+/// BAND CONDITIONS, every band at once, as SDRoxide's BANDS window has it
+/// (AJ3G, 24 Oct 2026): HamQSL's word for the band now (its day or its
+/// night, by the Sun at the station), FORECAST's model for this hour, and
+/// what was heard: PATHS (receptions, each at its faded weight), REACH (the
+/// share of the world) and BEST (the strongest report's margin over its
+/// mode's floor). The receiver's band is marked. Blues, white and grey
+/// only: yellow and red stay the warnings'.
+fn band_conditions(
+    ui: &mut egui::Ui,
+    g: &Globe,
+    st: &StationSettings,
+    now: f64,
+    muf_now: Option<f64>,
+) {
+    ui.label(caps("BAND CONDITIONS"));
+    let qth = st.pos();
+    let day = qth.is_none_or(|q| sun::elevation(q, now) > 0.0);
+    let hour = qth.map(|q| forecast_hours(g, q, now, muf_now).swap_remove(0));
+    let condx = |band: &str| -> Option<&str> {
+        let grp = hamqsl_group(band)?;
+        let (_, d, n) = g.got.hamqsl.as_ref()?.bands.iter().find(|(b, _, _)| b == grp)?;
+        Some(if day { d } else { n })
     };
-    let word = |w: &str| {
-        let c = match w {
-            "Good" => theme::CYAN(),
-            "Fair" => theme::TEXT_STRONG(),
-            _ => theme::TEXT(),
-        };
-        RichText::new(w.to_uppercase()).monospace().size(11.0).color(c)
+    let best_reach = g.fields.iter().map(|f| f.reach).fold(0.0001, f64::max);
+    let scale = [0.01, 0.03, 0.1, 0.3, 1.0].into_iter().find(|x| *x >= best_reach).unwrap_or(1.0);
+    let mono = |t: String, c: Color32| RichText::new(t).monospace().size(10.5).color(c);
+    let cell = |ui: &mut egui::Ui, w: f32, t: RichText| {
+        ui.add_sized([w, 14.0], egui::Label::new(t).halign(egui::Align::Min));
     };
-    egui::Grid::new("globe-hamqsl").num_columns(3).spacing([14.0, 2.0]).show(ui, |ui| {
-        ui.label(RichText::new("BANDS").size(9.5).strong().color(theme::TEXT()));
-        ui.label(RichText::new("DAY").size(9.5).strong().color(theme::TEXT()));
-        ui.label(RichText::new("NIGHT").size(9.5).strong().color(theme::TEXT()));
-        ui.end_row();
-        for (b, day, night) in &h.bands {
-            ui.label(RichText::new(b).monospace().size(11.0).color(theme::TEXT()));
-            ui.label(word(day));
-            ui.label(word(night));
+    const W: [f32; 6] = [42.0, 38.0, 56.0, 36.0, 64.0, 40.0];
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (w, h) in W.iter().zip(["BAND", "CONDX", "MODEL", "PATHS", "REACH", "BEST"]) {
+            cell(ui, *w, RichText::new(h).size(9.5).strong().color(theme::TEXT()));
+        }
+    });
+    // 10 m at the top, as FORECAST's chart reads.
+    for (k, (band, _)) in forecast::BANDS.iter().enumerate().rev() {
+        let f = g.fields.iter().find(|f| f.band == *band);
+        let rx = g.rx_band == Some(*band);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let name = format!("{}{band} m", if rx { "▶" } else { " " });
+            cell(
+                ui,
+                W[0],
+                if rx {
+                    mono(name, theme::CYAN()).strong()
+                } else {
+                    mono(name, theme::TEXT_STRONG())
+                },
+            );
+            let (w, c) = match condx(band) {
+                Some(w) => (
+                    w.to_uppercase(),
+                    match w {
+                        "Good" => theme::CYAN(),
+                        "Fair" => theme::TEXT_STRONG(),
+                        _ => theme::TEXT(),
+                    },
+                ),
+                None => ("—".into(), theme::TEXT()),
+            };
+            cell(ui, W[1], mono(w, c));
+            let (w, c) = match &hour {
+                Some(h) => {
+                    let w = model_word(h.open[k]);
+                    let c = match w {
+                        "OPEN" => theme::CYAN(),
+                        "MARGINAL" => theme::TEXT_STRONG(),
+                        _ => theme::TEXT(),
+                    };
+                    (w.to_string(), c)
+                }
+                None => ("—".into(), theme::TEXT()),
+            };
+            cell(ui, W[2], mono(w, c));
+            match f {
+                Some(f) => {
+                    let n = if f.paths < 10.0 {
+                        format!("{:.1}", f.paths)
+                    } else {
+                        format!("{:.0}", f.paths)
+                    };
+                    cell(ui, W[3], mono(n, theme::TEXT_STRONG()));
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(24.0, 7.0), Sense::hover());
+                    ui.painter().rect_filled(r, 2.0, theme::FILL());
+                    let mut fill = r;
+                    fill.set_width(r.width() * (f.reach / scale).min(1.0) as f32);
+                    ui.painter().rect_filled(fill, 2.0, rgb(picture::band_colour(f.band)));
+                    cell(
+                        ui,
+                        W[4] - 26.0,
+                        mono(format!("{:.1}%", f.reach * 100.0), theme::TEXT_STRONG()),
+                    );
+                    let b = f.best_db.map_or("—".into(), |b| format!("{b:+.0} dB"));
+                    cell(ui, W[5], mono(b, theme::TEXT_STRONG()));
+                }
+                None => {
+                    for w in &W[3..] {
+                        cell(ui, *w, mono("·".into(), theme::TEXT()));
+                    }
+                }
+            }
+        });
+    }
+    let mut notes = vec![format!(
+        "CONDX is HamQSL's {} forecast for the whole world; MODEL is FORECAST's for this \
+         hour from here. PATHS, REACH (bars to {:.0}%) and BEST are from the stations heard: \
+         a dotted row is unheard, not closed.",
+        if day { "day" } else { "night" },
+        scale * 100.0
+    )];
+    match &g.got.hamqsl {
+        Some(h) => {
+            let mut extra = Vec::new();
+            if let Some(n) = &h.noise {
+                extra.push(format!("Noise {n}"));
+            }
+            if let Some(m) = &h.geomag {
+                extra.push(format!("geomagnetic field {}", m.to_lowercase()));
+            }
+            if !h.updated.is_empty() {
+                extra.push(format!("HamQSL updated {}", h.updated));
+            }
+            notes.push(extra.join(" · "));
+        }
+        None => notes.push("Waiting for hamqsl.com (N0NBH).".into()),
+    }
+    for n in notes.iter().filter(|n| !n.is_empty()) {
+        ui.label(RichText::new(n).size(10.5).color(theme::TEXT()));
+    }
+}
+
+/// IBP BEACONS: each band's NCDXF beacon now, where it is from the station,
+/// and how long it has left: one heard is a path open, measured.
+fn ibp_beacons(ui: &mut egui::Ui, st: &StationSettings, now: f64) {
+    let t = now.floor() as i64;
+    ui.label(caps(&format!("IBP BEACONS · NEXT IN {} S", ibp::seconds_left(t))));
+    let qth = st.pos();
+    egui::Grid::new("globe-ibp").num_columns(4).spacing([8.0, 1.0]).show(ui, |ui| {
+        for ((band, hz, _), b) in ibp::BANDS.iter().zip(ibp::on_air(t)) {
+            let mono = |t: String, c: Color32| RichText::new(t).monospace().size(10.5).color(c);
+            ui.label(mono(format!("{band} m"), theme::TEXT()));
+            ui.label(mono(format!("{:.2}", *hz as f64 / 1e6), theme::TEXT()));
+            ui.label(mono(b.call.to_string(), theme::CYAN())).on_hover_text(b.site);
+            let geo = qth.map_or(String::new(), |q| {
+                let brg = bearing_deg(q, b.pos());
+                format!("{:.0}° {} · {:.0} km", brg, compass(brg), distance_km(q, b.pos()))
+            });
+            ui.label(mono(geo, theme::TEXT_STRONG()));
             ui.end_row();
         }
     });
-    let mut extra = Vec::new();
-    if let Some(n) = &h.noise {
-        extra.push(format!("Noise {n}"));
-    }
-    if let Some(m) = &h.geomag {
-        extra.push(format!("geomagnetic field {}", m.to_lowercase()));
-    }
-    if !h.updated.is_empty() {
-        extra.push(format!("updated {}", h.updated));
-    }
-    ui.label(RichText::new(extra.join(" · ")).size(10.5).color(theme::TEXT()));
+    ui.label(
+        RichText::new("Beacon times from the NCDXF schedule; hover a call for its site.")
+            .size(10.5)
+            .color(theme::TEXT()),
+    );
 }
 
 fn compass(deg: f64) -> &'static str {
@@ -1918,34 +2036,34 @@ mod tests {
     }
 
     #[test]
-    fn one_band_follows_decode_onto_a_new_band_but_keeps_a_hand_pick() {
+    fn one_band_follows_the_receiver_but_keeps_a_hand_pick() {
         let mut g = Globe::default();
         let mut s = GlobeSettings::default();
-        let rec = |hz: f64, src| Reception {
+        g.follow_rx(&mut s, Some(7_074_000.0));
+        assert_eq!(s.band, "40");
+        // Picked by hand while the receiver stays on 40: it stays.
+        s.band = "20".into();
+        g.follow_rx(&mut s, Some(7_160_000.0));
+        assert_eq!(s.band, "20");
+        // Off the bands, or on one GLOBE has no map for, it stays too.
+        g.follow_rx(&mut s, Some(9_500_000.0));
+        g.follow_rx(&mut s, Some(50_313_000.0));
+        assert_eq!(s.band, "20");
+        g.follow_rx(&mut s, Some(21_074_000.0));
+        assert_eq!(s.band, "15");
+        // With no receiver or radio, DECODE's band.
+        g.add(Reception {
             call: "K1ABC".into(),
             grid: "FN42".into(),
             pos: LatLon { lat: 42.5, lon: -71.0 },
-            rf_hz: hz,
+            rf_hz: 28_075_000.0,
             mode: "FT8".into(),
             snr: Some(-5.0),
             utc: 0.0,
-            src,
+            src: Source::Decode,
             row: None,
-        };
-        g.add(rec(7_075_000.0, Source::Decode));
-        g.follow_decode(&mut s);
-        assert_eq!(s.band, "40");
-        // Picked by hand while DECODE stays on 40: it stays.
-        s.band = "20".into();
-        g.add(rec(7_076_000.0, Source::Decode));
-        g.follow_decode(&mut s);
-        assert_eq!(s.band, "20");
-        // The skimmer elsewhere doesn't move it; DECODE on 15 does.
-        g.add(rec(28_075_000.0, Source::Skim));
-        g.follow_decode(&mut s);
-        assert_eq!(s.band, "20");
-        g.add(rec(21_075_000.0, Source::Decode));
-        g.follow_decode(&mut s);
-        assert_eq!(s.band, "15");
+        });
+        g.follow_rx(&mut s, None);
+        assert_eq!(s.band, "10");
     }
 }

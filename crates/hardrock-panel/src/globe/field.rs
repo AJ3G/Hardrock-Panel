@@ -124,6 +124,10 @@ pub(crate) struct BandField {
     pub reach: f64,
     /// The strongest cell.
     pub peak: f32,
+    /// PATHS: the receptions behind it, each counted at its decayed weight.
+    pub paths: f64,
+    /// BEST: the strongest report's margin over its mode's decode floor, dB.
+    pub best_db: Option<f32>,
 }
 
 /// The centre of cell (`row`, `col`).
@@ -161,10 +165,22 @@ pub(crate) fn build(
         let i = match out.iter().position(|f| f.band == band) {
             Some(i) => i,
             None => {
-                out.push(BandField { band, cells: vec![0.0; ROWS * COLS], reach: 0.0, peak: 0.0 });
+                out.push(BandField {
+                    band,
+                    cells: vec![0.0; ROWS * COLS],
+                    reach: 0.0,
+                    peak: 0.0,
+                    paths: 0.0,
+                    best_db: None,
+                });
                 out.len() - 1
             }
         };
+        out[i].paths += w as f64;
+        if let Some(snr) = r.snr {
+            let m = snr - decode_floor(&r.mode);
+            out[i].best_db = Some(out[i].best_db.map_or(m, |b| b.max(m)));
+        }
         let cells = &mut out[i].cells;
         for p in hop_points(qth, r.pos) {
             let pl = super::sphere::ll_of(p);

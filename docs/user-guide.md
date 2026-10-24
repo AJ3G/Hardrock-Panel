@@ -636,10 +636,10 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
 - **PROP.** Where the band was open, from the paths heard: each path counts at
   the middle of each hop, more for a stronger report, and less as it ages
   (HALF-LIFE, 45 minutes to start). **ONE BAND** shows the band picked under
-  **BAND**, weak blue to strong white, and BAND follows DECODE when it moves to
-  another band (a band you pick stays until then); **ALL BANDS** colours each place by its
-  best band. **BANDS OPEN** on the right shows how much of the world each band
-  reached.
+  **BAND**, weak blue to strong white, and BAND follows your receiver (or the
+  radio's dial when the receiver is off, or DECODE's band with neither) when
+  it moves to another band; a band you pick stays until then. **ALL BANDS**
+  colours each place by its best band.
 - **SOURCES.** DECODE and SKIM are the panel's own. **PSK REPORTER** (off to
   start) asks pskreporter.info every five minutes who heard your callsign in
   the last hour, and draws those as dashed paths.
@@ -650,9 +650,18 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
   lowers the one and raises the other. When a KC2G sounder is within
   3000 km, the next hours are scaled to its MUF now. Hover a cell for the
   hour in UTC and local time and its MUF and LUF.
-- **HAMQSL CONDITIONS.** HamQSL's (N0NBH) published Good, Fair or Poor for
-  each band group by day and by night, with the band noise and the
-  geomagnetic field, fetched hourly as a second opinion.
+- **BAND CONDITIONS.** Every band from 10 to 160 m in one table, with your
+  receiver's band marked ▶. **CONDX** is HamQSL's (N0NBH) Good, Fair or Poor
+  for the band's group, by day or by night as the Sun is at your grid
+  (fetched hourly; 160 and 60 m have none). **MODEL** is FORECAST's word for
+  this hour. **PATHS** counts the receptions on the band at their faded
+  weight, **REACH** is the share of the world reached, and **BEST** is the
+  strongest report's margin over its mode's decode floor. A dotted row was
+  not heard, which is not the same as closed. The band noise and the
+  geomagnetic field are under it.
+- **IBP BEACONS.** Which NCDXF/IARU beacon is on 20, 17, 15, 12 and 10 m
+  now, its bearing and distance from you, and the seconds until the next
+  one. Hearing one is a path open now. Hover a call for its site.
 - **SPACE WEATHER and WEATHER.** While GLOBE is open it fetches the solar
   flux, Kp, X-ray and solar wind and the aurora from NOAA SWPC, the MUF(3000)
   from KC2G's ionosondes, infrared clouds from NOAA nowCOAST, and the weather
