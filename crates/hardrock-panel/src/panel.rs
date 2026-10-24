@@ -1348,39 +1348,52 @@ fn pickers(ui: &mut egui::Ui, i: usize, pair: &mut Pair, s: f32, ink: &PickInk) 
     let pt = ink.size * s;
     let word =
         |t: &str| RichText::new(t).size(pt).color(ink.label).extra_letter_spacing(ink.spacing * s);
-    ui.horizontal(|ui| {
-        ui.label(word("TOP"));
-        let mut top = pair.top;
-        dot(ui, ink.top, s);
-        egui::ComboBox::from_id_salt(("amp-top", i))
-            .width(64.0 * s)
-            .selected_text(RichText::new(top.label()).size(pt).color(ink.top_text))
-            .show_ui(ui, |ui| {
-                for m in AmpMeter::ALL {
-                    ui.selectable_value(&mut top, m, m.label());
-                }
-            });
-        if top != pair.top {
-            pair.set_top(top);
-        }
-        ui.add_space(8.0 * s);
-        ui.label(word("BOTTOM"));
-        let mut bottom = pair.bottom;
-        let shown = bottom.map_or("none", |b| b.label());
-        dot(ui, if bottom.is_some() { ink.bottom } else { ink.none }, s);
-        egui::ComboBox::from_id_salt(("amp-bottom", i))
-            .width(64.0 * s)
-            .selected_text(RichText::new(shown).size(pt).color(ink.bottom_text))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut bottom, None, "none");
-                for m in AmpMeter::ALL {
-                    ui.selectable_value(&mut bottom, Some(m), m.label());
-                }
-            });
-        if bottom != pair.bottom {
-            pair.set_bottom(bottom);
-        }
-    })
+    // A row of fixed height, each item centred in it. In `ui.horizontal`
+    // the row grew at the first picker and everything after was centred
+    // lower, BOTTOM a few points below TOP (AJ3G, 24 Oct 2026): a picker
+    // takes more room than its button shows. The height is the row's, as
+    // measured last frame.
+    let row_id = egui::Id::new(("amp-pickers-height", i));
+    let row_h = ui.data(|d| d.get_temp::<f32>(row_id)).unwrap_or(ui.spacing().interact_size.y);
+    ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), row_h),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.label(word("TOP"));
+            let mut top = pair.top;
+            dot(ui, ink.top, s);
+            egui::ComboBox::from_id_salt(("amp-top", i))
+                .width(64.0 * s)
+                .selected_text(RichText::new(top.label()).size(pt).color(ink.top_text))
+                .show_ui(ui, |ui| {
+                    for m in AmpMeter::ALL {
+                        ui.selectable_value(&mut top, m, m.label());
+                    }
+                });
+            if top != pair.top {
+                pair.set_top(top);
+            }
+            ui.add_space(8.0 * s);
+            ui.label(word("BOTTOM"));
+            let mut bottom = pair.bottom;
+            let shown = bottom.map_or("none", |b| b.label());
+            dot(ui, if bottom.is_some() { ink.bottom } else { ink.none }, s);
+            egui::ComboBox::from_id_salt(("amp-bottom", i))
+                .width(64.0 * s)
+                .selected_text(RichText::new(shown).size(pt).color(ink.bottom_text))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut bottom, None, "none");
+                    for m in AmpMeter::ALL {
+                        ui.selectable_value(&mut bottom, Some(m), m.label());
+                    }
+                });
+            if bottom != pair.bottom {
+                pair.set_bottom(bottom);
+            }
+            let h = ui.min_rect().height();
+            ui.data_mut(|d| d.insert_temp(row_id, h));
+        },
+    )
     .response
     .on_hover_text(ink.hover);
 }
