@@ -715,9 +715,10 @@ impl App {
             if let Some(id) = so.skim_pick.take() {
                 self.decode.pick_row(id);
             }
-            // A keyboard skimmer's label (decision 56): DECODE reads its mode
-            // (CW has no decoder there). The scope sent it only on receive.
+            // A keyboard skimmer's label (decision 56): DECODE reads its mode.
+            // The scope sent it only on receive.
             match so.key_pick.take() {
+                Some(scope::skim::KeyMode::Cw) => self.saved.decode.kind = decode::Kind::Cw,
                 Some(scope::skim::KeyMode::Psk) => self.saved.decode.kind = decode::Kind::Psk31,
                 Some(scope::skim::KeyMode::Rtty) => {
                     self.saved.decode.kind = decode::Kind::Rtty;

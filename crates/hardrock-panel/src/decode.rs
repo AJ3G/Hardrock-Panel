@@ -67,6 +67,7 @@ pub(crate) enum Kind {
     Q65,
     Msk144,
     Jtty,
+    Cw,
     Rtty,
     Psk31,
     Navtex,
@@ -109,7 +110,15 @@ impl Kind {
         ),
         (
             "Keyboard",
-            &[Kind::Jtty, Kind::Rtty, Kind::Psk31, Kind::Navtex, Kind::Olivia, Kind::Thor],
+            &[
+                Kind::Jtty,
+                Kind::Cw,
+                Kind::Rtty,
+                Kind::Psk31,
+                Kind::Navtex,
+                Kind::Olivia,
+                Kind::Thor,
+            ],
         ),
         ("Pictures", &[Kind::Sstv, Kind::Wefax]),
         ("From I/Q", &[Kind::Hfdl, Kind::Acars, Kind::Vdl2, Kind::Ais, Kind::ModeS]),
@@ -126,6 +135,7 @@ impl Kind {
             Kind::Q65 => "Q65-30A",
             Kind::Msk144 => "MSK144",
             Kind::Jtty => "JTTY",
+            Kind::Cw => "CW",
             Kind::Rtty => "RTTY",
             Kind::Psk31 => "PSK31",
             Kind::Navtex => "NAVTEX",
@@ -151,7 +161,9 @@ impl Kind {
             | Kind::Fst4
             | Kind::Q65
             | Kind::Msk144 => Family::Wsjt,
-            Kind::Rtty | Kind::Psk31 | Kind::Navtex | Kind::Olivia | Kind::Thor => Family::Text,
+            Kind::Cw | Kind::Rtty | Kind::Psk31 | Kind::Navtex | Kind::Olivia | Kind::Thor => {
+                Family::Text
+            }
             Kind::Sstv | Kind::Wefax => Family::Picture,
             Kind::Hfdl | Kind::Acars | Kind::Vdl2 | Kind::Ais | Kind::ModeS => Family::Link,
             Kind::Jtty => Family::Chat,
@@ -194,7 +206,7 @@ impl Kind {
             Kind::Vdl2 => "VDL2",
             Kind::Ais => "AIS",
             Kind::ModeS => "ADS-B",
-            Kind::Olivia | Kind::Thor | Kind::Hfdl => return None,
+            Kind::Cw | Kind::Olivia | Kind::Thor | Kind::Hfdl => return None,
         })
     }
 
@@ -296,6 +308,7 @@ impl DecodeSettings {
             Kind::Navtex => TextMode::Navtex { reverse: self.reverse },
             Kind::Olivia => TextMode::Olivia { audio_hz: self.audio_hz, tones: 8, bw_hz: 500.0 },
             Kind::Thor => TextMode::Thor { audio_hz: self.audio_hz, baud: 15.625 },
+            Kind::Cw => TextMode::Cw,
             _ => return None,
         })
     }
@@ -519,6 +532,7 @@ fn kind_of_pick(p: Pick) -> Option<(Kind, Option<f64>, bool)> {
         Pick::Text(TextMode::Navtex { reverse }) => (Kind::Navtex, None, reverse),
         Pick::Text(TextMode::Olivia { audio_hz, .. }) => (Kind::Olivia, Some(audio_hz), false),
         Pick::Text(TextMode::Thor { audio_hz, .. }) => (Kind::Thor, Some(audio_hz), false),
+        Pick::Text(TextMode::Cw) => (Kind::Cw, None, false),
         Pick::Kind("SSTV") => (Kind::Sstv, None, false),
         Pick::Kind("WEFAX") => (Kind::Wefax, None, false),
         _ => return None,
@@ -1665,7 +1679,19 @@ fn body(
             }
         }
         Family::Text => {
-            if s.kind != Kind::Navtex {
+            if s.kind == Kind::Cw {
+                ui.label(
+                    RichText::new("TONE: THE STRONGEST, 200 TO 1500 HZ; SPEED FOUND")
+                        .size(10.5)
+                        .color(theme::CYAN_DIM())
+                        .strong(),
+                )
+                .on_hover_text(
+                    "CW is read on whichever tone is strongest in the receiver's \
+                         passband, at whatever speed it is sent. Put one station in the \
+                         passband (CW mode, or a narrow filter) for clean copy.",
+                );
+            } else if s.kind != Kind::Navtex {
                 caption(ui, "Audio");
                 ui.add(
                     egui::DragValue::new(&mut s.audio_hz)
@@ -2170,7 +2196,10 @@ mod tests {
             for &k in kinds {
                 match k.digi() {
                     Some(d) => assert_eq!(Kind::of_digi(d), Some(k), "{k:?}"),
-                    None => assert!(matches!(k, Kind::Olivia | Kind::Thor | Kind::Hfdl), "{k:?}"),
+                    None => assert!(
+                        matches!(k, Kind::Cw | Kind::Olivia | Kind::Thor | Kind::Hfdl),
+                        "{k:?}"
+                    ),
                 }
             }
         }

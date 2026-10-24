@@ -1193,17 +1193,19 @@ fn keys(sh: &Shown) -> Keys {
     // Green when keyed with the radio, the program's neutral blue in standby:
     // lit either way so the state can be told at a glance, but never yellow
     // or red, which only ever mean a warning (AJ3G).
+    // The key always reads PTT, its state after it (AJ3G, 24 Oct 2026).
     let (mode, tone) = match (shown_ptt, asked(0).is_some()) {
-        (true, false) => ("PTT", Tone::Green),
-        (true, true) => ("PTT", Tone::Blue),
-        (false, _) => ("OFF", Tone::Blue),
+        (true, false) => ("PTT ON", Tone::Green),
+        (true, true) => ("PTT ON", Tone::Blue),
+        (false, _) => ("PTT OFF", Tone::Blue),
     };
     let ptt = Key {
         text: mode.into(),
         lit: true,
         tone,
         enabled: live && !overdriven,
-        hover: "PTT keys the amplifier with the radio; OFF leaves it in bypass. Click to switch.",
+        hover: "PTT ON keys the amplifier with the radio; PTT OFF leaves it in bypass. Click to \
+                switch.",
         why_not: if overdriven {
             format!(
                 "Lower the drive first: {:.0} W would overdrive the amplifier in line (its limit is {:.0} W).",
@@ -2402,7 +2404,7 @@ mod tests {
         let sh = shown(&st);
         let k = keys(&sh);
         // Shown as asked, in the neutral blue, never green before it is read.
-        assert_eq!((k.ptt.text.as_str(), k.ptt.tone), ("PTT", Tone::Blue));
+        assert_eq!((k.ptt.text.as_str(), k.ptt.tone), ("PTT ON", Tone::Blue));
         assert_eq!(k.ptt.action, AmpAction::SetPtt(false));
         let ant = k.ant.unwrap();
         assert_eq!((ant.text.as_str(), ant.tone, ant.lit), ("ANT 2", Tone::Blue, true));

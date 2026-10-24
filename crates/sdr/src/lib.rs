@@ -36,7 +36,7 @@ pub mod window;
 pub mod zoom;
 
 pub use agc::AgcParams;
-pub use audio::{AudioFeed, AudioOut, output_devices};
+pub use audio::{AudioFeed, AudioOut, default_output, output_devices};
 pub use ddc::DecimatorKind;
 pub use passband::FilterShape;
 pub use pipeline::{AudioTap, Command, IqTap, Pipeline, PipelineConfig, SliceSpec, Snapshot};

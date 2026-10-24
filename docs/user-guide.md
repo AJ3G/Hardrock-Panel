@@ -130,7 +130,9 @@ says more.
   one named under it; a click picks the next. VOL is one volume with
   RADIO's VOLUME and SCOPE's Sound slider: move any of them, or the radio's
   own knob, and the others follow, so it turns whichever audio you hear (the
-  radio's at 192 kHz SPAN, the panel's receiver wider).
+  radio's at 192 kHz SPAN, the panel's receiver wider). That is only while
+  the panel's sound goes to the ELAD's own USB audio: with another speaker
+  picked, Sound and MUTE are that speaker's alone.
 - **E2.** Turning changes the receive filter, the CW pitch (in CW) or the RIT
   offset (while RIT is on); a click picks the next.
 - **Lock.** Holding E1 or E2 locks the knobs and the dial, as pressing both
@@ -323,7 +325,7 @@ and height and sits centred in it. In a window much wider than it is tall, the
 panel stops widening at a little over its own proportions and sits in the
 middle.
 
-**The buttons.** PTT/OFF, ANT, DN/UP and ON/BYP change on the screen as soon
+**The buttons.** PTT (it reads PTT ON in green with the amplifier in line, PTT OFF in blue in bypass), ANT, DN/UP and ON/BYP change on the screen as soon
 as they are clicked, in blue, and turn to their usual colour once the
 amplifier reads back the change. One the amplifier refuses (a relay while
 transmitting, or PTT with too much drive) goes back at once; one it still
@@ -464,6 +466,8 @@ name at the top.
 - **Its mode**, its level in dBm, its own volume and **MUTE**.
 - **Its sound output**: the speakers, or a virtual audio cable, so a slice
   parked on WSPR or FT4 can feed its own copy of WSJT-X while you listen to A.
+  The list looks again each time it opens, and a speaker turned on, off or
+  back on, or a new Windows default, is picked up within two seconds.
 - **SWAP A** swaps it with A. A is the one the radio follows (TX follows RX,
   the DUO's filter) and the one DECODE hears, so this is how a slice is
   transmitted from or decoded in DECODE. Not while transmitting. Each slice
@@ -495,8 +499,11 @@ window of its own, **DOCK** brings it back.
   receiver's audio in UTC slots. Each decode shows its UTC, SNR, DT (a
   drifting PC clock shows here), audio frequency and RF frequency. Picking
   the mode puts the receiver on its dial frequency in USB (see above).
-- **Keyboard**: RTTY (45.45 baud, 170 Hz), PSK31, NAVTEX, Olivia 8/500 and
-  THOR16, as running text. Set the audio frequency the signal sits at.
+- **Keyboard**: CW, RTTY (45.45 baud, 170 Hz), PSK31, NAVTEX, Olivia 8/500
+  and THOR16, as running text. Set the audio frequency the signal sits at,
+  except for CW, which reads whichever tone is strongest between 200 and
+  1500 Hz at whatever speed it is sent: put one station in the passband (CW
+  mode, or click its SKIM CW label, which picks CW in DECODE too).
 - **JTTY** (WSJT-X 3.2's keyboard mode, no time slots): a line a message,
   with its UTC, audio and RF frequency, growing as each 1.9 s frame comes
   (an unfinished one ends in "…"; a missed frame shows as " ... "). Frames

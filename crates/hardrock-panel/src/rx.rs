@@ -455,7 +455,13 @@ pub(crate) struct Rx {
     /// why it couldn't be opened) by id, with the device asked for.
     slices_sent: Option<Vec<SliceSpec>>,
     slice_audio: Vec<(u32, Option<String>, Result<AudioOut, String>)>,
+    /// When the sound outputs were last checked for one that went away or
+    /// came back.
+    audio_checked: Option<Instant>,
 }
+
+/// How often [`Rx::recheck_audio`] looks.
+const AUDIO_RECHECK: Duration = Duration::from_secs(2);
 
 impl Default for Rx {
     fn default() -> Self {
@@ -491,6 +497,7 @@ impl Default for Rx {
             watchdog: None,
             slices_sent: None,
             slice_audio: Vec::new(),
+            audio_checked: None,
         }
     }
 }
@@ -713,6 +720,7 @@ impl Rx {
         }
         self.watch_stream(s, scope, now);
         self.sync_volume(s, now);
+        self.recheck_audio(s);
         self.keep_audio(s);
         self.keep_slices(s);
         let Some(p) = &self.pipeline else { return };
@@ -807,8 +815,16 @@ impl Rx {
 
     /// One volume (AJ3G): the radio's VM (E1 on VOL, RADIO's VOLUME, the
     /// radio's own knob) and SCOPE's Sound slider follow each other, so the
-    /// one heard, the radio's audio or the panel's, turns with either.
+    /// one heard, the radio's audio or the panel's, turns with either. Only
+    /// while the panel plays into the ELAD's own USB audio: with another
+    /// speaker picked, Sound and MUTE are that speaker's alone, and the
+    /// radio's VM pulled the slider back (AJ3G, 24 Oct 2026).
     fn sync_volume(&mut self, s: &mut RxSettings, now: RadioNow<'_>) {
+        if !sound_via_radio(s.audio_out.as_deref(), self.audio.as_ref().map(|a| a.device())) {
+            // The radio's word wins again when it is picked again.
+            self.vol = VolSync::default();
+            return;
+        }
         let Some((link, r)) = now.cat() else { return };
         let proto = r.model.protocol();
         let Some(c) = crate::radio::logic::find(&*proto, "VM") else { return };
@@ -819,6 +835,30 @@ impl Rx {
             // Read back after; refused while transmitting (#5).
             link.set(vec![f]);
         }
+    }
+
+    /// Every two seconds, let go of a sound output that failed (turned off
+    /// or unplugged) or couldn't be opened, and of "Default output" when
+    /// Windows has made another device the default, so it is opened again
+    /// next: a speaker turned on after the receiver started played nothing
+    /// until the panel was restarted (AJ3G, 24 Oct 2026).
+    fn recheck_audio(&mut self, s: &RxSettings) {
+        if self.audio_checked.is_some_and(|t| t.elapsed() < AUDIO_RECHECK) {
+            return;
+        }
+        self.audio_checked = Some(Instant::now());
+        let default = sdr::default_output();
+        let stale = |a: &AudioOut, want: Option<&str>| {
+            a.failed() || (want.is_none() && default.as_deref().is_some_and(|d| d != a.device()))
+        };
+        let main_stale = match &self.audio {
+            Some(a) => stale(a, s.audio_out.as_deref()),
+            None => self.audio_error.is_some(),
+        };
+        if main_stale {
+            self.audio_dev = None;
+        }
+        self.slice_audio.retain(|(_, dev, r)| r.as_ref().is_ok_and(|a| !stale(a, dev.as_deref())));
     }
 
     /// Open the sound output, or another one, and keep its volume.
@@ -1155,6 +1195,12 @@ fn dial_line(cat: Option<u64>, centre: f64, rx: f64) -> String {
         |f| format!("dial {} (CAT)", mhz(f as f64)),
     );
     format!("{dial}, I/Q centre {}, receiver {}", mhz(centre), mhz(rx))
+}
+
+/// Whether the panel's sound goes into the ELAD's own USB audio: the
+/// output `picked`, or with "Default output" the device `playing`.
+fn sound_via_radio(picked: Option<&str>, playing: Option<&str>) -> bool {
+    picked.or(playing).is_some_and(|d| crate::audio::radio_device(&[d.to_string()]).is_some())
 }
 
 /// The radio's VM, 0 to 100, against the panel's volume, 0 to 1.
@@ -1662,6 +1708,15 @@ mod tests {
         let (ft8, keys) = demo_band_decodes(7_050_000.0, 7_074_000.0, 192_000);
         eprintln!("FT8 {ft8:?}\nkeys {keys:?}");
         assert!(!ft8.is_empty() && !keys.is_empty());
+    }
+
+    #[test]
+    fn only_the_elads_own_audio_ties_sound_to_the_radios_volume() {
+        assert!(sound_via_radio(Some("FDM-DUO Audio"), None));
+        assert!(sound_via_radio(None, Some("Speakers (ELAD FDM-DUO)")));
+        assert!(!sound_via_radio(Some("Klipsch The Fives"), Some("FDM-DUO Audio")));
+        assert!(!sound_via_radio(None, Some("Realtek Speakers")));
+        assert!(!sound_via_radio(None, None));
     }
 
     #[test]

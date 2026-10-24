@@ -3,6 +3,7 @@
 //! with the matching transmitter beside it (used here by the tests, which
 //! send a known message through and read it back).
 
+pub mod cw;
 pub mod fec;
 pub mod hell;
 pub mod hell_font;

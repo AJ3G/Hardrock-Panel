@@ -72,6 +72,9 @@ struct Controls {
     volume: AtomicU32,
     muted: AtomicBool,
     underruns: AtomicU64,
+    /// The stream reported an error: the device was turned off, unplugged
+    /// or taken away. It plays nothing more; the owner opens it again.
+    failed: AtomicBool,
 }
 
 /// Audio playing on one output device.
@@ -110,6 +113,7 @@ impl AudioOut {
             volume: AtomicU32::new(volume.clamp(0.0, 1.0).to_bits()),
             muted: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
+            failed: AtomicBool::new(false),
         });
         let (rate, channels) = (config.sample_rate, config.channels);
         let c = controls.clone();
@@ -153,6 +157,11 @@ impl AudioOut {
         self.controls.muted.load(Ordering::Relaxed)
     }
 
+    /// The stream has failed (its device went away) and wants opening again.
+    pub fn failed(&self) -> bool {
+        self.controls.failed.load(Ordering::Relaxed)
+    }
+
     /// The device's name, as [`output_devices`] lists it.
     pub fn device(&self) -> &str {
         &self.device
@@ -168,6 +177,14 @@ impl AudioOut {
     pub fn stats(&self) -> (u64, u64) {
         (self.controls.underruns.load(Ordering::Relaxed), self.dropped.load(Ordering::Relaxed))
     }
+}
+
+/// The system's default output's name now (it changes when, say, a
+/// speaker is turned on and Windows makes it the default).
+pub fn default_output() -> Option<String> {
+    cpal::default_host()
+        .default_output_device()
+        .and_then(|d| d.description().ok().map(|x| x.name().to_string()))
 }
 
 /// Linear-interpolating 48 kHz → device-rate reader over the ring, with the
@@ -242,6 +259,7 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
     let mut rs = Resampler::new(rx, rate);
     let step = 1.0 / (RAMP_S * rate as f32);
     let mut gain = 0.0f32;
+    let on_err = controls.clone();
     device
         .build_output_stream(
             config,
@@ -265,7 +283,10 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
                     controls.underruns.fetch_add(1, Ordering::Relaxed);
                 }
             },
-            |e| tracing::warn!("receiver audio: {e}"),
+            move |e| {
+                tracing::warn!("receiver audio: {e}");
+                on_err.failed.store(true, Ordering::Relaxed);
+            },
             None,
         )
         .map_err(|e| e.to_string())

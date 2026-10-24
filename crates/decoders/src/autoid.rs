@@ -622,6 +622,7 @@ pub fn pick_for(name: &str, f: &Features) -> Option<Pick> {
             Pick::Text(TextMode::Rtty { center_hz: c, baud: 75.0, shift_hz: shift, reverse: false })
         }
         "NAVTEX" => Pick::Text(TextMode::Navtex { reverse: false }),
+        "CW" => Pick::Text(TextMode::Cw),
         "FT8" => Pick::Wsjt(WsjtMode::Ft8),
         "FT4" => Pick::Wsjt(WsjtMode::Ft4),
         "JT65" => Pick::Wsjt(WsjtMode::Jt65),

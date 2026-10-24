@@ -16,6 +16,7 @@ use std::time::Instant;
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, unbounded};
 
 use crate::image::{Assembler, ImageUpdate};
+use crate::modem::cw::CwRx;
 use crate::modem::navtex::NavtexRx;
 use crate::modem::olivia::OliviaRx;
 use crate::modem::psk::PskRx;
@@ -371,6 +372,8 @@ pub enum TextMode {
         audio_hz: f64,
         baud: f64,
     },
+    /// CW, on whatever tone is strongest in the passband.
+    Cw,
 }
 
 impl TextMode {
@@ -387,6 +390,7 @@ enum TextRx {
     Navtex(NavtexRx),
     Olivia(OliviaRx),
     Thor(ThorRx),
+    Cw(Box<CwRx>),
 }
 
 impl TextRx {
@@ -407,6 +411,7 @@ impl TextRx {
                 TextRx::Olivia(OliviaRx::new(rate, audio_hz, tones, bw_hz))
             }
             TextMode::Thor { audio_hz, baud } => TextRx::Thor(ThorRx::new(rate, audio_hz, baud)),
+            TextMode::Cw => TextRx::Cw(Box::new(CwRx::new(rate))),
         }
     }
 
@@ -417,6 +422,7 @@ impl TextRx {
             TextRx::Navtex(r) => r.process(audio),
             TextRx::Olivia(r) => r.process(audio),
             TextRx::Thor(r) => r.process(audio),
+            TextRx::Cw(r) => r.process(audio),
         }
     }
 }

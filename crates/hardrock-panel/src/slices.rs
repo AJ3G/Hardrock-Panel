@@ -234,8 +234,9 @@ pub(crate) fn rows(
                 .width(170.0)
                 .selected_text(shown)
                 .show_ui(ui, |ui| {
+                    let sounds = fresh_sounds(ui, sounds);
                     ui.selectable_value(&mut sl.audio_out, None, "Default output");
-                    for d in sounds {
+                    for d in &sounds {
                         ui.selectable_value(&mut sl.audio_out, Some(d.clone()), d);
                     }
                 })
@@ -286,6 +287,22 @@ pub(crate) fn add_key(ui: &mut egui::Ui, s: &mut RxSettings, rx: &Rx) {
         let at = if (at - rx.centre()).abs() < 0.45 * rx.rate() { at } else { rx.rx_hz };
         add(&mut s.slices, at, rx.mode, rx.passband, s.audio_out.clone());
     }
+}
+
+/// The sound outputs for a slice's list, read again each time a list
+/// opens, so a speaker turned on after start-up is in it (AJ3G, 24 Oct
+/// 2026); `known` until one has.
+fn fresh_sounds(ui: &egui::Ui, known: &[String]) -> Vec<String> {
+    let (shown, list) = (egui::Id::new("slice-sounds-shown"), egui::Id::new("slice-sounds"));
+    let now = ui.ctx().cumulative_pass_nr();
+    ui.ctx().data_mut(|d| {
+        let last = d.get_temp::<u64>(shown);
+        d.insert_temp(shown, now);
+        if crate::settings::just_opened(last, now) {
+            d.insert_temp(list, crate::audio::output_devices());
+        }
+        d.get_temp::<Vec<String>>(list).unwrap_or_else(|| known.to_vec())
+    })
 }
 
 #[cfg(test)]

@@ -146,7 +146,7 @@ fn reread_sounds_on_open(ui: &egui::Ui, id: &str, sounds: &mut Vec<String>) {
 
 /// Whether a list last shown on pass `last` and showing on pass `now` has
 /// just opened.
-fn just_opened(last: Option<u64>, now: u64) -> bool {
+pub(crate) fn just_opened(last: Option<u64>, now: u64) -> bool {
     last.is_none_or(|l| now > l + 1)
 }
 
