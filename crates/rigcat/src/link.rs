@@ -492,6 +492,8 @@ fn run<P: Read + Write>(
     let mut next_dial = Instant::now();
     let mut next_settings = Instant::now();
     let (mut settings_once, mut asked) = (false, false);
+    // A power step was just set: read it back this round.
+    let mut power_set = false;
     // A settings read under way: the next item, the rows so far, and
     // whether it goes on while the radio transmits.
     let mut sweep: Option<(usize, Vec<SettingRow>, bool)> = None;
@@ -520,9 +522,11 @@ fn run<P: Read + Write>(
                     if let Err(e) = rig.send(&f) {
                         warn!("rigcat: set power: {e:?}");
                     }
-                    // Read it back, so the panel shows what the radio took.
-                    next_settings = Instant::now();
-                    asked = true;
+                    // Read it back at once, so the power keys show what the
+                    // radio took: the settings sweep could take seconds to
+                    // reach it, and a key that stayed dark read as ignored
+                    // (AJ3G, 24 Oct 2026).
+                    power_set = true;
                 }
                 Ok(Msg::UsbAudio) => {
                     if let Some(f) = rig.proto.audio_input() {
@@ -674,6 +678,11 @@ fn run<P: Read + Write>(
             }
         };
 
+        if std::mem::take(&mut power_set)
+            && let Some(f) = rig.proto.read_power()
+        {
+            ask(&mut rig, &f);
+        }
         for f in rig.proto.telemetry() {
             if ask(&mut rig, &f).is_none() {
                 // A reading that didn't come is not the last one seen.
@@ -792,6 +801,8 @@ mod tests {
         /// When set, `GI` says transmitting while this is true (an over that
         /// ends part way through a test).
         air: Option<Arc<std::sync::atomic::AtomicBool>>,
+        /// Menu 34 as last set (MAX until then).
+        power: Option<u8>,
     }
 
     impl Write for FakeDuo {
@@ -799,13 +810,20 @@ mod tests {
             self.pending.push_str(&String::from_utf8_lossy(b));
             while let Some(i) = self.pending.find(';') {
                 let cmd: String = self.pending.drain(..=i).collect();
+                if cmd == "TP;" {
+                    self.out.extend(format!("TP{:02};", self.power.unwrap_or(9)).bytes());
+                    self.sent.push(cmd);
+                    continue;
+                }
+                if let Some(c) = cmd.strip_prefix("TP").and_then(|c| c.strip_suffix(';')) {
+                    self.power = c.parse().ok();
+                }
                 let reply = match cmd.as_str() {
                     "FA;" => Some("FA00014074000;"),
                     "FP;" if self.quiet => Some("FP!000000;"),
                     "FP;" => Some("FP 006091;"),
                     "RP;" => Some("RP 000001;"),
                     "WR;" => Some("WR0 01.02;"),
-                    "TP;" => Some("TP09;"),
                     "MD;" => Some("MD2;"),
                     "TI;" if self.mic => Some("TI0;"),
                     "TI;" => Some("TI1;"),
@@ -938,6 +956,26 @@ mod tests {
         assert!(!s.keyed());
         assert_eq!(s.fwd_w(), None);
         assert_eq!(s.swr_ratio(), None);
+    }
+
+    #[test]
+    fn a_power_step_set_is_read_back_at_once() {
+        let (tx, st, h) = running();
+        // Wait out the first settings sweep, which reads TP among the rest.
+        for _ in 0..100 {
+            if st.lock().unwrap().settings_read.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(st.lock().unwrap().power_code, Some(9));
+        tx.send(Msg::SetPower(6)).unwrap();
+        thread::sleep(Duration::from_millis(350));
+        assert_eq!(st.lock().unwrap().power_code, Some(6));
+        drop(tx);
+        let sent = h.join().unwrap();
+        let set = sent.iter().position(|c| c == "TP06;").unwrap();
+        assert_eq!(sent[set + 1], "TP;");
     }
 
     #[test]

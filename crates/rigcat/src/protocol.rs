@@ -273,6 +273,11 @@ pub trait Protocol: Send {
     fn power_steps(&self) -> &'static [PowerStep];
     fn power_name(&self) -> &'static str;
     fn set_power(&self, code: u8) -> Frame;
+    /// The READ for the power setting, asked straight after a change so the
+    /// panel shows what the radio took at once, not at the next sweep.
+    fn read_power(&self) -> Option<Frame> {
+        None
+    }
     /// The radio's TUNE carrier, at its power setting.
     fn key_tune(&self) -> Frame;
     fn unkey(&self) -> Frame;

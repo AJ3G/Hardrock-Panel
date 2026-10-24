@@ -31,6 +31,9 @@ pub(crate) const DEFAULT_DRIVE: f32 = 0.25;
 /// menu 34 setting.
 pub(crate) const PRESETS: [(&str, u8); 4] = [("1W", 2), ("3W", 6), ("5W", 8), ("MAX", 9)];
 const PRESETS_CAPTION: &str = "ELAD FDM-DUO TX PWR";
+/// How long a power key shows as clicked while the radio's read-back is
+/// awaited, s.
+const POWER_WAIT_S: f64 = 3.0;
 
 /// The hover for the button that sets `code` (from SDRoxide's).
 fn preset_hover(code: u8) -> String {
@@ -275,23 +278,46 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
         }
     });
 
+    let mut refused = None;
     ui.horizontal(|ui| {
         // The power buttons, captioned underneath so they read as the
         // radio's own and not the amplifier's.
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = z(2.0);
+            // A click shows at once, as asked, until the radio's read-back
+            // agrees or POWER_WAIT_S passes (AJ3G, 24 Oct 2026: the keys
+            // seemed not to respond while the read-back was slow).
+            let key = egui::Id::new("duo-power-asked");
+            let t = ui.ctx().input(|i| i.time);
+            let mut asked = ui.ctx().data(|d| d.get_temp::<(u8, f64)>(key));
+            // Taken, or long enough ago that the note has been read.
+            if asked.is_some_and(|(c, at)| rig.power_code == Some(c) || t - at > 15.0) {
+                asked = None;
+            }
+            let pending = asked.filter(|(_, at)| t - at < POWER_WAIT_S).map(|(c, _)| c);
             let row = ui.horizontal(|ui| {
                 for (label, code) in PRESETS {
-                    let lit = rig.power_code == Some(code);
+                    let lit = pending.map_or(rig.power_code == Some(code), |c| c == code);
                     let resp = ui
                         .add_enabled_ui(rig.connected, |ui| chrome::chip(ui, lit, label))
                         .inner
                         .on_hover_text(preset_hover(code));
-                    if resp.clicked() && !lit {
+                    if resp.clicked() && rig.power_code != Some(code) {
                         out.power = Some(code);
+                        asked = Some((code, t));
                     }
                 }
             });
+            if pending.is_some() {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            }
+            ui.ctx().data_mut(|d| match asked {
+                Some(a) => {
+                    d.insert_temp(key, a);
+                }
+                None => d.remove::<(u8, f64)>(key),
+            });
+            refused = asked.filter(|(_, at)| t - at >= POWER_WAIT_S).map(|(c, _)| c);
             let ink = ui.visuals().widgets.inactive.fg_stroke.color;
             let w = row.response.rect.width();
             ui.allocate_ui_with_layout(
@@ -360,6 +386,21 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
                 out.usb_audio = true;
             }
         });
+    }
+    if let Some(c) = refused {
+        let name = |c: Option<u8>| {
+            c.and_then(|c| rigcat::elad::POWER_STEPS.get(c as usize)).map_or("?", |p| p.label)
+        };
+        ui.label(
+            RichText::new(format!(
+                "The radio still reads {}: it didn't take {}. Another program setting its power \
+                 over CAT (SDR Console, SDRoxide) puts it back; close it, or click again.",
+                name(rig.power_code),
+                name(Some(c))
+            ))
+            .size(z(11.0))
+            .color(theme::YELLOW()),
+        );
     }
     if let Some(e) = &args.tone_error {
         ui.label(RichText::new(format!("Tone: {e}")).size(z(11.0)).color(theme::YELLOW()));

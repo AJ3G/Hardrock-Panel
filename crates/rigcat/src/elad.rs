@@ -941,6 +941,10 @@ impl Protocol for FdmDuo {
         Frame::new(format!("TP{:02};", code.min(TX_POWER_MAX)), FrameKind::SetPower)
     }
 
+    fn read_power(&self) -> Option<Frame> {
+        Some(Frame::read("TP;"))
+    }
+
     fn key_tune(&self) -> Frame {
         Frame::new(TUNE, FrameKind::Key)
     }
