@@ -1307,6 +1307,9 @@ impl eframe::App for App {
             if let Some(p) = o.pop {
                 self.saved.radio_popped = p;
             }
+            if let Some(on) = o.tx_follows_rx {
+                self.saved.rx.tx_follows_rx = on;
+            }
             if let Some(r) = &rig {
                 self.do_tune(o.tune, &amp_raw, r);
             }

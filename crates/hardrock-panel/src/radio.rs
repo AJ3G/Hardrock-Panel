@@ -48,6 +48,9 @@ pub(crate) struct RadioOut {
     /// TUNE could be keyed (interlock #6); check that again before
     /// `RigLink::set`.
     pub cw_send: Option<Frame>,
+    /// SPLIT was pressed: TX follows RX goes on or off with it, so the scope
+    /// doesn't put back a split the operator just took off.
+    pub tx_follows_rx: Option<bool>,
 }
 
 /// Which pop-out is open under the face. One at a time.

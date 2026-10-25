@@ -266,9 +266,15 @@ fn pump(
         //     Not on a DUO running a remote image: its read-back then reports
         //     VFO B, the operating frequency, while the I/Q centre is the one
         //     this driver set, and following it walked the centre between the
-        //     two (AJ3G, 25 Oct).
+        //     two (AJ3G, 25 Oct). Nor in split (`remote::set_split`), for the
+        //     same reason; the last answer is dropped then, so the owner goes
+        //     back to the centre it set.
+        if crate::remote::split() {
+            shared.duo_tuned_hz.store(0, Ordering::Relaxed);
+        }
         if shared.read_dial.load(Ordering::Relaxed)
             && !dev.remote()
+            && !crate::remote::split()
             && last_tune_poll.elapsed() >= tune_poll_every
         {
             last_tune_poll = Instant::now();

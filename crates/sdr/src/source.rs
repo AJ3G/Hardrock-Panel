@@ -68,13 +68,16 @@ impl IqSource for EladSource {
         self.handle.sample_rate()
     }
 
-    /// The radio's own dial when it has reported one (an FDM-DUO following its
-    /// knob), else the centre last asked for.
+    /// The radio's own dial when it is reporting one (an FDM-DUO following its
+    /// knob), else the centre last asked for. A dial that stops reporting (the
+    /// DUO in split) is forgotten, so the centre asked for takes over.
     fn center_hz(&self) -> f64 {
-        if let Some(hz) = self.handle.tuned_hz()
-            && plausible_dial(hz, self.handle.model.rx_range_hz())
-        {
-            self.dial.set(Some(hz));
+        match self.handle.tuned_hz() {
+            Some(hz) if plausible_dial(hz, self.handle.model.rx_range_hz()) => {
+                self.dial.set(Some(hz));
+            }
+            Some(_) => {}
+            None => self.dial.set(None),
         }
         self.dial.get().unwrap_or(self.center_hz)
     }

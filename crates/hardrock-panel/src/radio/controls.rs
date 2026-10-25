@@ -529,8 +529,12 @@ pub(crate) fn vfo_row(ui: &mut Ui, f: &mut Face<'_>) {
                 f.push(logic::a_to_b(f.p, f.s));
             }
             let split = f.s.split == Some(true);
-            if cap(ui, th, split, "SPLIT").on_hover_text("Transmit on VFO B").clicked() {
+            if cap(ui, th, split, "SPLIT")
+                .on_hover_text("Transmit on VFO B. Turns SCOPE's TX follows RX on or off with it")
+                .clicked()
+            {
                 f.push(f.p.set_split(!split));
+                f.out.tx_follows_rx = Some(!split);
             }
             ui.add_space(z(6.0));
             let rit = f.s.rit_on == Some(true);

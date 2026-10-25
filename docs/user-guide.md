@@ -401,11 +401,31 @@ scope has its volume and **Mute**. Up to 192 kHz the DUO plays its own audio
 too, and the panel sets the DUO's mode and filter to the receiver's; above
 192 kHz the DUO mutes its own audio and the panel's receiver is the one heard.
 
-**TX follows RX** (on to start) makes the radio transmit where you listen:
-while the receiver is off VFO A, the panel puts the radio in split with VFO B
-on the receiver, and takes split off again when the receiver is back on VFO A.
-It needs both the CAT link and the ELAD's I/Q. Turn it off to leave split to
-you; a split the panel made is taken off.
+**TX follows RX** (on to start) makes the radio transmit where you listen.
+
+- *Why it's needed.* The scope's centre is the DUO's VFO A, and it stays put
+  while you click stations inside the span: only the panel's receiver moves.
+  The radio itself transmits on its transmit VFO, so without help it would
+  transmit on VFO A, not where the receiver and the OFFSET marker are. With
+  the receiver 4 kHz above the dial, that is 4 kHz below the marker.
+- *What it does.* While the receiver is off VFO A, the panel puts VFO B on
+  the receiver and turns split on, so the radio shows SP and its display
+  reads VFO B, the receiver's frequency. When the receiver is back on VFO A,
+  split comes off. VFO B and split are never changed while transmitting.
+- *Band changes.* A band key on RADIO or the DUO, or its knob, moves VFO A.
+  The scope follows VFO A as read over CAT, the receiver moves with it by
+  the same amount, and VFO B and split follow the receiver once it settles.
+  (In split the DUO's own USB dial read-back reports VFO B, so the panel
+  uses CAT here, not the read-back.)
+- *SPLIT on RADIO.* Pressing SPLIT turns TX follows RX on or off with it.
+  Turning split off with SPLIT is how to take it off for good; otherwise the
+  panel would put it back while the receiver is off VFO A.
+- *Turned off.* The radio transmits on VFO A. Use it when the receiver sits
+  on the dial, or when you set split yourself.
+- It needs both the CAT link and the ELAD's I/Q. When the panel opens the
+  DUO at 192 kHz it clears any split left from before (only `SP0` does; the
+  DUO's own SPLIT key doesn't), and TX follows RX then sets it again if
+  needed.
 
 **The band plan** along the bottom of the spectrum shows the band's segments
 on its top row and, below them, the data modes' dial frequencies: FT8, FT4,

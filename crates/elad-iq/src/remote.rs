@@ -207,6 +207,22 @@ pub fn tripped() -> Option<String> {
     TRIPPED.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// Whether the radio is in split, as its CAT port last said.
+static SPLIT: AtomicBool = AtomicBool::new(false);
+
+/// Say whether the radio is in split. The panel calls this from what the
+/// CAT port reads. In split the DUO's USB dial read-back reports VFO B, the
+/// transmit VFO, not VFO A where the I/Q is (inferred from remote mode, where
+/// it did the same, and from band changes sticking in split, AJ3G, 25 Oct),
+/// so the stream does not follow it then.
+pub fn set_split(on: bool) {
+    SPLIT.store(on, Ordering::Relaxed);
+}
+
+pub fn split() -> bool {
+    SPLIT.load(Ordering::Relaxed)
+}
+
 /// Whether this process has put the radio in remote mode, so a later open at
 /// 192 kHz knows to put it back on its own image first.
 static WENT_REMOTE: AtomicBool = AtomicBool::new(false);

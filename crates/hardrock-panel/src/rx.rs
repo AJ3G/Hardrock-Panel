@@ -686,6 +686,7 @@ impl Rx {
         // image is never loaded while it transmits; the driver checks this
         // between every request of the load.
         elad_iq::set_transmitting(now.transmitting);
+        elad_iq::set_split(now.cat().is_some_and(|(_, r)| r.split == Some(true)));
         if let Some((rx, centre)) = &self.opening {
             let centre = *centre;
             match rx.try_recv() {
@@ -772,13 +773,36 @@ impl Rx {
         self.keep_audio(s);
         self.keep_slices(s);
         let Some(p) = &self.pipeline else { return };
+        // In split the DUO's USB dial read-back is VFO B, so the stream stops
+        // following it (`elad_iq::set_split`) and VFO A over CAT says where
+        // the I/Q is: a band key or the knob moves it, and the I/Q centre is
+        // tuned there over USB. SAFETY INTERLOCK (docs/safety-interlocks.md,
+        // #10): not while transmitting, nor just after (`dial_settled`).
+        let dial_settled = self.tx_at.is_none_or(|t| t.elapsed() >= DIAL_SETTLE);
+        if self.running == IqChoice::Elad
+            && !now.transmitting
+            && dial_settled
+            && let Some((_, r)) = now.cat()
+            && r.split == Some(true)
+            && let Some(a) = r.freq_hz.map(|hz| hz as f64)
+            && a > 0.0
+            && (a - self.centre).abs() >= 1.0
+            && (a - p.lock().center_hz).abs() >= 1.0
+        {
+            p.send(Command::SetCenter(a));
+            let asked = self.asked_centre.is_some_and(|(c, _)| (c - a).abs() < 1.0);
+            elad_iq::note_retune(format!(
+                "I/Q centre to {} over USB, VFO A read over CAT in split ({})",
+                mhz(a),
+                if asked { "as the panel asked" } else { "the dial moved on the radio" }
+            ));
+        }
         let snap_centre = p.lock().center_hz;
         // SAFETY INTERLOCK (docs/safety-interlocks.md, #9): while the radio
         // transmits, and for a moment after, the dial it reads back is not
         // where it listens (in split it can be VFO B, the transmit
         // frequency): the receiver, and so VFO B with it, is not moved by it. Whatever it says once the over is done
         // is taken as a turn of the knob would be.
-        let dial_settled = self.tx_at.is_none_or(|t| t.elapsed() >= DIAL_SETTLE);
         if snap_centre > 0.0 && snap_centre != self.centre && dial_settled {
             let asked = self.asked_centre.is_some_and(|(c, _)| (c - snap_centre).abs() < 1.0);
             if self.running == IqChoice::Elad {
