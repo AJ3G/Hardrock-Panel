@@ -279,9 +279,31 @@ impl Device {
         if crate::remote::transmitting() {
             return Err(waiting());
         }
+        for attempt in 1..=crate::remote::LOAD_ATTEMPTS {
+            if self.load_once(upload, attempt)? {
+                return Ok(());
+            }
+        }
+        Err(Error::Access(format!(
+            "The FDM-DUO did not accept its {} kHz image ({} tries). It now has no working \
+             receiver: power-cycle the DUO, then open it again.",
+            self.rate_hz / 1000,
+            crate::remote::LOAD_ATTEMPTS
+        )))
+    }
+
+    /// One upload. `Ok(false)` when the radio's end-of-load answer says the
+    /// image did not configure.
+    fn load_once(&mut self, upload: &[u8], attempt: u32) -> Result<bool> {
+        let waiting = || {
+            Error::Access(
+                "Waiting for the radio to stop transmitting to load the FDM-DUO's wide image."
+                    .into(),
+            )
+        };
         let t0 = std::time::Instant::now();
         self.trace.note(format!(
-            "loading the {} kHz remote image ({} bytes)",
+            "loading the {} kHz remote image ({} bytes), try {attempt}",
             self.rate_hz / 1000,
             upload.len()
         ));
@@ -291,6 +313,10 @@ impl Device {
         self.trace.note(format!("pre-load answers {a:02X?} {b:02X?}"));
         let r = self.usb.control_in(gw, "load begin", 1, DuoSub::LoadBegin.index(), 1)?;
         expect_ack("beginning the image load", DuoSub::LoadBegin as u8, &r)?;
+        // The FPGA clears itself before it takes data; SDR Console waits
+        // about 0.2 s here every time, and without the wait the radio
+        // answered the end of the load with E5 00, not E5 10 (AJ3G, 25 Oct).
+        std::thread::sleep(crate::remote::ERASE_WAIT);
         for (n, chunk) in crate::remote::chunks(upload).enumerate() {
             if crate::remote::transmitting() {
                 self.trace.note(format!("image load stopped at request {n}: transmitting"));
@@ -305,12 +331,14 @@ impl Device {
         }
         let r = self.usb.control_in(gw, "load end", 0, DuoSub::LoadEnd.index(), 2)?;
         expect_ack("finishing the image load", DuoSub::LoadEnd as u8, &r)?;
+        let done = crate::remote::load_done(&r);
         let v = self.usb.control_in(gw, "post-load FD", 0, DuoSub::PostLoad.index(), 3)?;
         self.trace.note(format!(
-            "image loaded in {:.1} s: end {r:02X?}, after {v:02X?}",
+            "image {} in {:.1} s: end {r:02X?}, after {v:02X?}",
+            if done { "loaded" } else { "NOT accepted" },
             t0.elapsed().as_secs_f32()
         ));
-        Ok(())
+        Ok(done)
     }
 
     /// Write the DDC tuning word for the current centre.

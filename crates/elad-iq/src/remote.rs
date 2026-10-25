@@ -57,9 +57,24 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// The rate the DUO streams at without a host-loaded image.
 pub const STANDALONE_RATE_HZ: u32 = 192_000;
+
+/// How long the FPGA is given to clear itself after `E3` before the image
+/// goes in. SDR Console waits 205 to 222 ms in every capture.
+pub const ERASE_WAIT: Duration = Duration::from_millis(250);
+
+/// How many times an image is sent before the open gives up.
+pub const LOAD_ATTEMPTS: u32 = 2;
+
+/// Whether the `E5` end-of-load answer says the image configured. SDR Console
+/// always got `E5 10`; a load sent without [`ERASE_WAIT`] got `E5 00` and left
+/// the radio with no receiver until it was power-cycled.
+pub fn load_done(reply: &[u8]) -> bool {
+    reply.get(1).is_some_and(|b| b & 0x10 != 0)
+}
 
 /// Bytes per upload request.
 pub const CHUNK: usize = 64;
@@ -322,6 +337,13 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_e5_10_is_a_finished_load() {
+        assert!(load_done(&[0xE5, 0x10]));
+        assert!(!load_done(&[0xE5, 0x00]));
+        assert!(!load_done(&[0xE5]));
+    }
 
     #[test]
     fn the_hash_is_sha_256() {
