@@ -131,9 +131,9 @@ pub struct Image {
 /// The 192 kHz entry is the DUO's own stand-alone image (the DLL's "default
 /// stand-alone and single channel" configuration, first in the DLL). It was
 /// not in a capture: it is found by the same end-of-image rule that gives all
-/// five captured images their exact bytes (AJ3G's DLL, 25 Oct). Loading it is
-/// how a DUO given a wide image goes back to stand-alone without a power
-/// cycle, if it works; see `Device::open`.
+/// five captured images their exact bytes (AJ3G's DLL, 25 Oct). Loaded from
+/// here it does not put the radio back in stand-alone: it stayed in remote
+/// and streamed zeros (AJ3G, 25 Oct), so nothing loads it now.
 pub const IMAGES: [Image; 6] = [
     Image {
         rate_hz: STANDALONE_RATE_HZ,
@@ -210,11 +210,6 @@ static WENT_REMOTE: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn note_remote() {
     WENT_REMOTE.store(true, Ordering::Relaxed);
-}
-
-/// The radio is back on its stand-alone image.
-pub(crate) fn forget_remote() {
-    WENT_REMOTE.store(false, Ordering::Relaxed);
 }
 
 pub(crate) fn went_remote() -> bool {
