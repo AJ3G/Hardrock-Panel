@@ -130,6 +130,15 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
             (IqChoice::Off, None) => {
                 ("Off: choose ELAD or Demo signals under SETTINGS".into(), theme::TEXT())
             }
+            // Wider than stand-alone the DUO is sent an image first, which
+            // takes several seconds (`elad_iq::remote`).
+            (_, None) if rx.opening() && rx.asked_rate() > DUO_AUDIO_MAX_RATE => (
+                format!(
+                    "Opening the ELAD and loading its {} kHz image, about 7 s…",
+                    rx.asked_rate() / 1000
+                ),
+                theme::CYAN(),
+            ),
             (_, None) if rx.opening() => ("Opening the ELAD…".into(), theme::CYAN()),
             (_, None) => (rx.label.clone(), theme::GREEN()),
         };

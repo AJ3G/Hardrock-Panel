@@ -461,6 +461,43 @@ impl UsbDev {
         }
     }
 
+    /// A vendor control-OUT traced only if it fails: twelve thousand of these
+    /// make up one FDM-DUO image load, and the trace is a bounded ring.
+    pub fn control_out_quiet(
+        &self,
+        req: Request,
+        value: u16,
+        index: u16,
+        data: &[u8],
+    ) -> Result<()> {
+        let r = self
+            .iface
+            .control_out(
+                ControlOut {
+                    control_type: ControlType::Vendor,
+                    recipient: Recipient::Device,
+                    request: req.code(),
+                    value,
+                    index,
+                    data,
+                },
+                CTRL_TIMEOUT,
+            )
+            .wait();
+        r.map_err(|source| {
+            self.trace.ctrl(
+                req.code(),
+                "load data",
+                value,
+                index,
+                data.len(),
+                None,
+                &format!("FAILED: {source}"),
+            );
+            Error::Transfer { op: "control write", source }
+        })
+    }
+
     /// Read `len` bytes from the configuration EEPROM at `addr`.
     pub fn eeprom(&self, addr: u16, len: u16) -> Result<Vec<u8>> {
         self.control_in_exact(

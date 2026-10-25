@@ -35,9 +35,7 @@ impl EladDevice {
 
 /// The complex sample rates an ELAD DDC delivers, in Hz.
 ///
-/// **Not commandable on an FDM-DUO**: each rate is a different FPGA image and
-/// the radio boots its own, so this is what the stream *can be*. See
-/// [`EladConfig::sample_rate_hz`].
+/// Each rate is a different FPGA image. See [`EladConfig::sample_rate_hz`].
 pub const ELAD_SAMPLE_RATES: [u32; 6] =
     [192_000, 384_000, 768_000, 1_536_000, 3_072_000, 6_144_000];
 
@@ -55,10 +53,10 @@ pub struct EladConfig {
     pub serial: String,
     /// The DDC's rate in Hz — one of [`ELAD_SAMPLE_RATES`].
     ///
-    /// On an FDM-S1/S2 this selects the FPGA image to load. On an FDM-DUO it
-    /// only says how the stream is *read* (every rate up to 3072 kHz delivers
-    /// 32-bit words, 6144 kHz 16-bit ones); the driver measures the throughput
-    /// once running and warns if the two disagree.
+    /// On an FDM-S1/S2 this selects the FPGA image to load. On an FDM-DUO,
+    /// above 192 kHz it uploads the remote image for the rate when one is known
+    /// ([`crate::remote`]), and otherwise falls back to 192 kHz; the driver
+    /// measures the throughput once running and warns if it disagrees.
     pub sample_rate_hz: u32,
     /// The 12 dB input attenuator.
     pub attenuator: bool,

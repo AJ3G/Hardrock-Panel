@@ -182,6 +182,20 @@ pub enum DuoSub {
     /// `0xFC` — read three status bytes. Bit 2 of the third says the CAT
     /// command buffer is still busy with the last command.
     Status = 0xFC,
+    /// `0xF6`, `0xF9` — read one and two bytes before a remote image is
+    /// loaded. They answer `F6` and `F9 00`; what they report is not known,
+    /// they are sent because SDR Console sends them. See [`crate::remote`].
+    PreLoadA = 0xF6,
+    PreLoadB = 0xF9,
+    /// `0xE3` — begin loading a remote FPGA image (`wValue` 1). Answers `E3`.
+    LoadBegin = 0xE3,
+    /// `0xE4` — one piece of the image, `wValue` its length.
+    LoadData = 0xE4,
+    /// `0xE5` — the load is finished. Answers `E5 10`.
+    LoadEnd = 0xE5,
+    /// `0xFD` — read three bytes after a load; answers `FD 32 31`, which reads
+    /// as "21" and may be the image's version.
+    PostLoad = 0xFD,
 }
 
 impl DuoSub {
@@ -357,9 +371,14 @@ pub fn tuning_word(hz: f64, clock_hz: f64) -> u32 {
 /// the high byte of `wIndex` is the [`DuoSub::Tune`] selector and only eight
 /// bits of the word fit beside it. The remaining byte travels in the payload on
 /// both.
-pub fn tune_request(model: Model, word: u32) -> (u16, u16, [u8; 2]) {
+///
+/// `remote` is a DUO running a host-loaded image ([`crate::remote`]), where the
+/// payload's second byte is `0x02` rather than `0x00` — as SDR Console sends
+/// it. What the byte means is not known.
+pub fn tune_request(model: Model, word: u32, remote: bool) -> (u16, u16, [u8; 2]) {
     let value = (word & 0xFFFF) as u16;
-    let data = [((word >> 24) & 0xFF) as u8, 0];
+    let mode = if remote && model == Model::Duo { 0x02 } else { 0x00 };
+    let data = [((word >> 24) & 0xFF) as u8, mode];
     let index = match model {
         Model::Duo => DuoSub::Tune.index() | ((word >> 16) & 0xFF) as u16,
         Model::S1 | Model::S2 => ((word >> 16) & 0xFFFF) as u16,
@@ -529,12 +548,12 @@ mod tests {
     #[test]
     fn the_duo_and_the_samplers_pack_the_tuning_word_differently() {
         let word = 0x1234_5678u32;
-        let (v, i, d) = tune_request(Model::S2, word);
+        let (v, i, d) = tune_request(Model::S2, word, false);
         assert_eq!(v, 0x5678);
         assert_eq!(i, 0x1234);
         assert_eq!(d, [0x12, 0x00]);
 
-        let (v, i, d) = tune_request(Model::Duo, word);
+        let (v, i, d) = tune_request(Model::Duo, word, false);
         assert_eq!(v, 0x5678);
         // 0xF2 in the high byte — the sub-command — and only bits 23..16 of the
         // word beside it.
@@ -543,7 +562,21 @@ mod tests {
         assert_eq!(d, [0x12, 0x00]);
 
         // The S1 packs like the S2, not like the DUO.
-        assert_eq!(tune_request(Model::S1, word), tune_request(Model::S2, word));
+        assert_eq!(tune_request(Model::S1, word, false), tune_request(Model::S2, word, false));
+    }
+
+    /// Two tunes from the SDR Console capture of a DUO in remote mode: 10 MHz
+    /// and 7.076018 MHz. Both words fit a clock 1 Hz under nominal, not the
+    /// 2678 Hz correction above, so SDR Console calibrates its own way.
+    #[test]
+    fn a_remote_duo_tunes_with_0x02_in_the_payload() {
+        let clock = 122_880_000.0 - 1.0;
+        let (v, i, d) = tune_request(Model::Duo, tuning_word(10_000_000.0, clock), true);
+        assert_eq!((v, i, d), (0x5558, 0xF2D5, [0x14, 0x02]));
+        let (v, i, d) = tune_request(Model::Duo, tuning_word(7_076_018.0, clock), true);
+        assert_eq!((v, i, d), (0xE055, 0xF2BD, [0x0E, 0x02]));
+        // Only the DUO has a remote mode.
+        assert_eq!(tune_request(Model::S2, 1, true).2, [0, 0]);
     }
 
     #[test]

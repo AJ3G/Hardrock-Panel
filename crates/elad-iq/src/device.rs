@@ -53,6 +53,9 @@ pub struct Device {
     pub warnings: Vec<String>,
     /// Whether the FIFO has been started yet. See [`Device::start_pending`].
     started: bool,
+    /// An FDM-DUO running an image this open uploaded, out of stand-alone.
+    /// See [`crate::remote`].
+    remote: bool,
     trace: Trace,
 }
 
@@ -101,11 +104,35 @@ impl Device {
             firmware: None,
             warnings: Vec::new(),
             started: false,
+            remote: false,
             trace: trace.clone(),
         };
 
         dev.identify();
         dev.read_calibration();
+
+        // An FDM-DUO streams 192 kHz in stand-alone; anything wider is an image
+        // uploaded now. Without one the stream is read at what it really is.
+        if model == Model::Duo && crate::remote::wanted(dev.rate_hz) {
+            match crate::remote::upload_for(dev.rate_hz) {
+                Ok(upload) => {
+                    dev.load_remote(&upload)?;
+                    dev.remote = true;
+                    crate::remote::note_remote();
+                }
+                Err(w) => {
+                    dev.rate_hz = crate::remote::STANDALONE_RATE_HZ;
+                    tracing::warn!("{w}");
+                    dev.trace.note(&w);
+                    dev.warnings.push(w);
+                }
+            }
+        } else if model == Model::Duo && crate::remote::went_remote() {
+            // Back to stand-alone after a remote image this process loaded.
+            if let Err(e) = dev.cat_write("IQ0;") {
+                dev.trace.note(format!("IQ0 not sent: {e}"));
+            }
+        }
 
         if let Some(w) = fpga_warning {
             tracing::warn!("{w}");
@@ -121,12 +148,19 @@ impl Device {
 
         // The order below is the whole reason this is one function. See the
         // module header.
-        if model == Model::Duo {
+        // SDR Console sends neither after a load, so neither is sent here.
+        if model == Model::Duo && !dev.remote {
             dev.duo_fifo(DuoSub::FifoRun, 0, "stop FIFO")?;
             dev.duo_fifo(DuoSub::FifoInit, 0, "init FIFO")?;
         }
         dev.retune()?;
         dev.apply_front_end()?;
+        // Remote mode is held by `IQ1;`; SDR Console tunes once more after it
+        // and before the start.
+        if dev.remote {
+            dev.cat_write("IQ1;")?;
+            dev.tune_word()?;
+        }
         // On the FDM-DUO the start belongs here, at the end of the sequence
         // `gr-elad` performs. On a sampler it is deliberately left until the
         // host is already reading — see `start_pending`.
@@ -227,23 +261,68 @@ impl Device {
         self.model.clock_hz() + self.cal.rate_correction_hz as f64
     }
 
+    /// Upload a remote image into an FDM-DUO, in the order SDR Console does.
+    ///
+    /// SAFETY INTERLOCK (docs/safety-interlocks.md, #10): not while the radio
+    /// transmits — refused before the first request, and stopped between any
+    /// two if a transmission begins. The radio reconfigures its FPGA here, and
+    /// its transmitter goes through that FPGA too.
+    fn load_remote(&mut self, upload: &[u8]) -> Result<()> {
+        let waiting = || {
+            Error::Access(
+                "Waiting for the radio to stop transmitting to load the FDM-DUO's wide image."
+                    .into(),
+            )
+        };
+        if crate::remote::transmitting() {
+            return Err(waiting());
+        }
+        let t0 = std::time::Instant::now();
+        self.trace.note(format!(
+            "loading the {} kHz remote image ({} bytes)",
+            self.rate_hz / 1000,
+            upload.len()
+        ));
+        let gw = Request::DuoGateway;
+        let a = self.usb.control_in(gw, "pre-load F6", 0, DuoSub::PreLoadA.index(), 1)?;
+        let b = self.usb.control_in(gw, "pre-load F9", 0, DuoSub::PreLoadB.index(), 2)?;
+        self.trace.note(format!("pre-load answers {a:02X?} {b:02X?}"));
+        let r = self.usb.control_in(gw, "load begin", 1, DuoSub::LoadBegin.index(), 1)?;
+        expect_ack("beginning the image load", DuoSub::LoadBegin as u8, &r)?;
+        for (n, chunk) in crate::remote::chunks(upload).enumerate() {
+            if crate::remote::transmitting() {
+                self.trace.note(format!("image load stopped at request {n}: transmitting"));
+                return Err(waiting());
+            }
+            let r =
+                self.usb.control_out_quiet(gw, chunk.len() as u16, DuoSub::LoadData.index(), chunk);
+            if let Err(e) = r {
+                self.trace.note(format!("image load failed at request {n}: {e}"));
+                return Err(e);
+            }
+        }
+        let r = self.usb.control_in(gw, "load end", 0, DuoSub::LoadEnd.index(), 2)?;
+        expect_ack("finishing the image load", DuoSub::LoadEnd as u8, &r)?;
+        let v = self.usb.control_in(gw, "post-load FD", 0, DuoSub::PostLoad.index(), 3)?;
+        self.trace.note(format!(
+            "image loaded in {:.1} s: end {r:02X?}, after {v:02X?}",
+            t0.elapsed().as_secs_f32()
+        ));
+        Ok(())
+    }
+
+    /// Send `IQ1;`, which keeps an FDM-DUO in remote mode. Nothing to do in
+    /// stand-alone.
+    pub fn keep_remote(&self) -> Result<()> {
+        if !self.remote {
+            return Ok(());
+        }
+        self.cat_write("IQ1;")
+    }
+
     /// Write the DDC tuning word for the current centre.
     fn retune(&mut self) -> Result<()> {
-        let word = tuning_word(self.center_hz, self.clock_hz());
-        let (value, index, data) = tune_request(self.model, word);
-        self.trace.note(format!(
-            "tune {:.0} Hz: clock {:.0} Hz, word 0x{word:08X} → val 0x{value:04x} idx 0x{index:04x} \
-             data [{:02X} {:02X}]",
-            self.center_hz,
-            self.clock_hz(),
-            data[0],
-            data[1],
-        ));
-        let req = match self.model {
-            Model::Duo => Request::DuoGateway,
-            Model::S1 | Model::S2 => Request::SamplerTune,
-        };
-        self.usb.control_out(req, "tune", value, index, &data)?;
+        self.tune_word()?;
 
         // Tell the transceiver's own front panel where its receiver has gone.
         // Best-effort: it changes nothing about the samples, and a DUO whose
@@ -256,6 +335,25 @@ impl Device {
             }
         }
         Ok(())
+    }
+
+    /// The tune request alone.
+    fn tune_word(&self) -> Result<()> {
+        let word = tuning_word(self.center_hz, self.clock_hz());
+        let (value, index, data) = tune_request(self.model, word, self.remote);
+        self.trace.note(format!(
+            "tune {:.0} Hz: clock {:.0} Hz, word 0x{word:08X} → val 0x{value:04x} idx 0x{index:04x} \
+             data [{:02X} {:02X}]",
+            self.center_hz,
+            self.clock_hz(),
+            data[0],
+            data[1],
+        ));
+        let req = match self.model {
+            Model::Duo => Request::DuoGateway,
+            Model::S1 | Model::S2 => Request::SamplerTune,
+        };
+        self.usb.control_out(req, "tune", value, index, &data)
     }
 
     /// Apply the attenuator and the pre-selection filters.
@@ -513,6 +611,17 @@ impl Device {
         if let Err(e) = r {
             self.trace.note(format!("stopping the stream failed: {e}"));
         }
+        // Lets the radio go back to stand-alone, as SDR Console does.
+        if self.remote
+            && let Err(e) = self.cat_write("IQ0;")
+        {
+            self.trace.note(format!("IQ0 not sent: {e}"));
+        }
+    }
+
+    /// Whether this is an FDM-DUO out of stand-alone.
+    pub fn remote(&self) -> bool {
+        self.remote
     }
 
     pub fn describe(&self) -> String {

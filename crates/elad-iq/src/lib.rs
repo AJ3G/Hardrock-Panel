@@ -39,11 +39,11 @@
 //! [`fpga`], the whole of which exists for issue #178. So on a sampler
 //! `EladConfig::sample_rate_hz` really is a command, issued once per open.
 //!
-//! On the FDM-DUO it is not: the radio boots its own FPGA, has no front-panel
-//! menu for the rate, and arrives in whatever mode it was left in — there the
-//! setting says how the stream is *read*, and the driver measures the
-//! throughput a couple of seconds in and says so if the two disagree (see
-//! `handle::RxStats::check_rate`).
+//! On the FDM-DUO the radio boots its own stand-alone image at 192 kHz, and a
+//! wider rate is a remote image the host uploads over USB and holds with
+//! `IQ1;` — see [`remote`], decoded from a capture of SDR Console doing it. The
+//! driver still measures the throughput a couple of seconds in and says so if
+//! it disagrees with the setting (see `handle::RxStats::check_rate`).
 //!
 //! # Provenance
 //!
@@ -78,6 +78,7 @@ pub mod fpga;
 pub mod handle;
 pub mod priority;
 pub mod protocol;
+pub mod remote;
 pub mod stream;
 pub mod trace;
 pub mod types;
@@ -87,6 +88,7 @@ pub use device::Device;
 pub use error::{Error, Result};
 pub use handle::EladHandle;
 pub use protocol::Model;
+pub use remote::set_transmitting;
 pub use trace::{FIELD_REPORT_HINT, diagnostics, note_dial, note_retune};
 pub use types::{
     Complex32, ELAD_ATTENUATOR_DB, ELAD_DEFAULT_RATE_HZ, ELAD_SAMPLE_RATES, EladConfig, EladDevice,

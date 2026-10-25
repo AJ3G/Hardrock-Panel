@@ -569,6 +569,11 @@ impl Rx {
         self.centre
     }
 
+    /// The I/Q rate last asked for, whether or not it runs yet.
+    pub(crate) fn asked_rate(&self) -> u32 {
+        self.rate
+    }
+
     /// The I/Q rate the pipeline runs at, 0 when it doesn't.
     pub(crate) fn rate(&self) -> f64 {
         self.pipeline.as_ref().map_or(0.0, |p| p.lock().sample_rate)
@@ -677,6 +682,10 @@ impl Rx {
     /// Once a frame: finish opening the ELAD, keep the sound output, the
     /// offset, the split and the DUO's mode in step.
     pub(crate) fn frame(&mut self, s: &mut RxSettings, scope: &Scope, now: RadioNow<'_>) {
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #10): the DUO's wide
+        // image is never loaded while it transmits; the driver checks this
+        // between every request of the load.
+        elad_iq::set_transmitting(now.transmitting);
         if let Some((rx, centre)) = &self.opening {
             let centre = *centre;
             match rx.try_recv() {

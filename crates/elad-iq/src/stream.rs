@@ -221,6 +221,8 @@ fn pump(
     let mut said_tune_poll_failed = false;
     let mut last_tune_status: Option<u8> = None;
     let mut said_tune_answered = false;
+    let mut last_keepalive = Instant::now();
+    let mut said_keepalive_failed = false;
 
     for _ in 0..IN_FLIGHT {
         ep.submit(ep.allocate(TRANSFER_BYTES));
@@ -309,6 +311,24 @@ fn pump(
                         ));
                     }
                 }
+            }
+        }
+
+        // 1c. Hold an FDM-DUO in remote mode; without `IQ1;` it falls back to
+        //     stand-alone. See `crate::remote`.
+        if dev.remote() && last_keepalive.elapsed() >= crate::remote::KEEPALIVE {
+            last_keepalive = Instant::now();
+            while ep.pending() < IN_FLIGHT {
+                ep.submit(ep.allocate(TRANSFER_BYTES));
+            }
+            match dev.keep_remote() {
+                Ok(()) => said_keepalive_failed = false,
+                Err(e) if !said_keepalive_failed => {
+                    said_keepalive_failed = true;
+                    tracing::warn!("ELAD: IQ1 keepalive failed: {e}");
+                    trace.note(format!("IQ1 keepalive failed: {e}"));
+                }
+                Err(_) => {}
             }
         }
 

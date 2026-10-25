@@ -33,7 +33,8 @@
 //! command, and this module is where it is issued.
 //!
 //! An FDM-DUO is a radio with its own controller and boots its own FPGA; none
-//! of this applies to it.
+//! of this applies to it. Its wider rates are uploaded by this crate itself,
+//! through the radio's USB gateway — see [`crate::remote`].
 //!
 //! # Running somebody else's binary
 //!
