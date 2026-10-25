@@ -774,16 +774,19 @@ impl Rx {
         self.keep_slices(s);
         let Some(p) = &self.pipeline else { return };
         // In split the DUO's USB dial read-back is VFO B, so the stream stops
-        // following it (`elad_iq::set_split`) and VFO A over CAT says where
-        // the I/Q is: a band key or the knob moves it, and the I/Q centre is
-        // tuned there over USB. SAFETY INTERLOCK (docs/safety-interlocks.md,
+        // following it (`elad_iq::set_split`), and above 192 kHz (a remote
+        // image) it never follows it. Then VFO A over CAT says where the I/Q
+        // is: a band key or the knob moves it, and the I/Q centre is tuned
+        // there over USB. At 384 kHz a band change to 21 MHz left the scope
+        // on 14 MHz without this (AJ3G, 25 Oct, ea01445). SAFETY INTERLOCK (docs/safety-interlocks.md,
         // #10): not while transmitting, nor just after (`dial_settled`).
         let dial_settled = self.tx_at.is_none_or(|t| t.elapsed() >= DIAL_SETTLE);
         if self.running == IqChoice::Elad
             && !now.transmitting
             && dial_settled
             && let Some((_, r)) = now.cat()
-            && r.split == Some(true)
+            && (r.split == Some(true)
+                || p.lock().sample_rate > f64::from(elad_iq::STANDALONE_RATE_HZ))
             && let Some(a) = r.freq_hz.map(|hz| hz as f64)
             && a > 0.0
             && (a - self.centre).abs() >= 1.0

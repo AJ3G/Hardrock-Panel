@@ -88,7 +88,7 @@ pub use device::Device;
 pub use error::{Error, Result};
 pub use handle::EladHandle;
 pub use protocol::Model;
-pub use remote::{set_split, set_transmitting};
+pub use remote::{STANDALONE_RATE_HZ, set_split, set_transmitting};
 pub use trace::{FIELD_REPORT_HINT, diagnostics, note_dial, note_retune};
 pub use types::{
     Complex32, ELAD_ATTENUATOR_DB, ELAD_DEFAULT_RATE_HZ, ELAD_SAMPLE_RATES, EladConfig, EladDevice,

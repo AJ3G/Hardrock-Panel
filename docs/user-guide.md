@@ -415,8 +415,9 @@ too, and the panel sets the DUO's mode and filter to the receiver's; above
 - *Band changes.* A band key on RADIO or the DUO, or its knob, moves VFO A.
   The scope follows VFO A as read over CAT, the receiver moves with it by
   the same amount, and VFO B and split follow the receiver once it settles.
-  (In split the DUO's own USB dial read-back reports VFO B, so the panel
-  uses CAT here, not the read-back.)
+  (In split, and at any SPAN above 192k, the DUO's own USB dial read-back
+  doesn't say where VFO A is, so the panel uses CAT here, not the read-back.
+  With no CAT link, a band change on the radio isn't seen in those cases.)
 - *SPLIT on RADIO.* Pressing SPLIT turns TX follows RX on or off with it.
   Turning split off with SPLIT is how to take it off for good; otherwise the
   panel would put it back while the receiver is off VFO A.
