@@ -789,7 +789,7 @@ impl Rx {
         if self.running == IqChoice::Elad
             && !now.transmitting
             && dial_settled
-            && let Some((_, r)) = now.cat()
+            && let Some((link, r)) = now.cat()
             && (r.split == Some(true)
                 || p.lock().sample_rate > f64::from(elad_iq::STANDALONE_RATE_HZ))
             && let Some(a) = r.freq_hz.map(|hz| hz as f64)
@@ -804,6 +804,27 @@ impl Rx {
                 mhz(a),
                 if asked { "as the panel asked" } else { "the dial moved on the radio" }
             ));
+            // The receiver and the centre move together now, not when the
+            // stream catches up: in between, the split below wrote VFO B
+            // back on the old band and the panel flipped between the two
+            // bands before settling (AJ3G, 25 Oct 2026, fd4c62e).
+            if !asked {
+                self.rx_hz += a - self.centre;
+                // In split the radio's band output, and so the amplifier's
+                // band, follows VFO B: left on the old band until the split
+                // below caught up, the amplifier and RADIO went back to it
+                // for a moment (AJ3G, 25 Oct 2026). VFO B goes with the
+                // receiver at once. Not while transmitting (#9; checked
+                // above), and the link refuses it then too (#5).
+                if r.split == Some(true)
+                    && let Some(f) =
+                        r.model.protocol().set_freq(Vfo::B, self.rx_hz.round().max(0.0) as u64)
+                {
+                    link.set(vec![f]);
+                }
+            }
+            self.centre = a;
+            self.asked_centre = Some((a, Instant::now()));
         }
         let snap_centre = p.lock().center_hz;
         // SAFETY INTERLOCK (docs/safety-interlocks.md, #9): while the radio
@@ -811,7 +832,12 @@ impl Rx {
         // where it listens (in split it can be VFO B, the transmit
         // frequency): the receiver, and so VFO B with it, is not moved by it. Whatever it says once the over is done
         // is taken as a turn of the knob would be.
-        if snap_centre > 0.0 && snap_centre != self.centre && dial_settled {
+        // A centre asked for and not yet in the stream: what the stream says
+        // meanwhile is the old one, not a turn of the knob.
+        let catching_up = self
+            .asked_centre
+            .is_some_and(|(c, t)| (c - snap_centre).abs() >= 1.0 && t.elapsed() < ASKED_WAIT);
+        if snap_centre > 0.0 && snap_centre != self.centre && dial_settled && !catching_up {
             let asked = self.asked_centre.is_some_and(|(c, _)| (c - snap_centre).abs() < 1.0);
             if self.running == IqChoice::Elad {
                 let why = if asked { "as the panel asked" } else { "the dial moved on the radio" };
@@ -824,7 +850,7 @@ impl Rx {
             self.centre = snap_centre;
             self.asked_centre = None;
         }
-        if self.asked_centre.is_some_and(|(_, t)| t.elapsed() > Duration::from_secs(3)) {
+        if self.asked_centre.is_some_and(|(_, t)| t.elapsed() > ASKED_WAIT) {
             self.asked_centre = None;
         }
         let off = self.rx_hz - self.centre;
@@ -853,6 +879,9 @@ impl Rx {
             && let Some((link, r)) = now.cat()
             && !now.transmitting
             && self.rx_moved.elapsed() >= SPLIT_SETTLE
+            // Only once the panel's centre is where VFO A is: a band change
+            // still going through isn't a receiver off the dial.
+            && r.freq_hz.is_some_and(|a| (a as f64 - self.centre).abs() < 1.0)
         {
             let proto = r.model.protocol();
             let frames = self.split.frames(&*proto, r, self.rx_hz, s.tx_follows_rx);
@@ -1241,6 +1270,9 @@ const DIAL_SETTLE: Duration = Duration::from_millis(1000);
 /// How long after a transmission the receiver stays quiet: long enough for
 /// the radio's own receiver to come back, short enough not to clip a reply.
 const TX_MUTE_HANG: Duration = Duration::from_millis(300);
+
+/// How long a centre the panel asked for is waited for in the stream.
+const ASKED_WAIT: Duration = Duration::from_secs(3);
 
 /// An ELAD stream silent this long, with the radio not transmitting, is
 /// opened again. The DUO streams all the time it is on, at every rate.
