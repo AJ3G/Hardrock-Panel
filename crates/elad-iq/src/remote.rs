@@ -12,8 +12,8 @@
 //!
 //! # Where this comes from
 //!
-//! Three USB captures of SDR Console opening the DUO at 1536, 3072 and
-//! 6144 kHz and one more rate, on the owner's own radio. Every request below
+//! Four USB captures of SDR Console opening the DUO at 384, 768, 1536, 3072
+//! and 6144 kHz, on the owner's own radio. Every request below
 //! is one that capture contains, in its order:
 //!
 //! ```text
@@ -92,11 +92,19 @@ pub struct Image {
 
 /// The images seen in the captures, the rates named by the bandwidth chosen in
 /// SDR Console as each was loaded. Nothing on the wire says which rate an image
-/// is, so a rate is listed only once a capture has tied it to one.
-///
-/// A third image was seen, 802,295 bytes, SHA-256 `d9a7e091…`, and is one of
-/// 384 or 768 kHz; until a capture says which, neither rate is offered.
-pub const IMAGES: [Image; 3] = [
+/// is, so each is tied to one by a capture. All five sit in SDR Console's copy
+/// of the DLL in rising order of rate.
+pub const IMAGES: [Image; 5] = [
+    Image {
+        rate_hz: 384_000,
+        upload_len: 802_295,
+        sha256: hex32("d9a7e0913cc6216e3b1877d3373ae8897204ab6c5498fdb645fbe68564b3525f"),
+    },
+    Image {
+        rate_hz: 768_000,
+        upload_len: 802_295,
+        sha256: hex32("cd1c73a6f3acd672bc726e58282c3610098210c121d897b3f59d5d7acfa3a554"),
+    },
     Image {
         rate_hz: 1_536_000,
         upload_len: 802_571,
@@ -370,15 +378,23 @@ mod tests {
     }
 
     #[test]
-    fn only_rates_above_stand_alone_need_an_image_and_three_are_known() {
+    fn every_rate_above_stand_alone_has_its_own_image() {
         assert!(!wanted(192_000));
         assert!(wanted(384_000));
         assert_eq!(image(1_536_000).map(|i| i.upload_len), Some(802_571));
         assert_eq!(image(3_072_000).map(|i| i.upload_len), Some(801_463));
         assert_eq!(image(6_144_000).map(|i| i.upload_len), Some(801_463));
-        assert_eq!(image(384_000), None);
-        assert_eq!(image(768_000), None);
-        let e = upload_for(768_000).unwrap_err();
-        assert!(e.contains("768 kHz") && e.contains("192 kHz"), "{e}");
+        assert_eq!(image(384_000).map(|i| i.upload_len), Some(802_295));
+        assert_eq!(image(768_000).map(|i| i.upload_len), Some(802_295));
+        // Every rate above stand-alone has one now, and no two share a hash.
+        for r in crate::types::ELAD_SAMPLE_RATES.into_iter().filter(|&r| wanted(r)) {
+            assert!(image(r).is_some(), "{r}");
+        }
+        let mut h: Vec<_> = IMAGES.iter().map(|i| i.sha256).collect();
+        h.sort();
+        h.dedup();
+        assert_eq!(h.len(), IMAGES.len());
+        let e = upload_for(2_000_000).unwrap_err();
+        assert!(e.contains("2000 kHz") && e.contains("192 kHz"), "{e}");
     }
 }
