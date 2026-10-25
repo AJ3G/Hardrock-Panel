@@ -72,11 +72,14 @@ pub const STANDALONE_RATE_HZ: u32 = 192_000;
 /// goes in. SDR Console waits 205 to 222 ms in every capture.
 pub const ERASE_WAIT: Duration = Duration::from_millis(250);
 
-/// The quiet after a load that SDR Console keeps, in every capture: about
-/// 1.05 s to its first tune and 2.3 to 2.8 s to the stream's start. Kept
-/// here as two waits either side of the front-end commands.
+/// The quiet after a load before the first tune. SDR Console keeps about
+/// 1.05 s; FDM-SW2 sends `F9` 0.5 s after `E5` and its first CAT 0.9 s after.
 pub const SETTLE_BEFORE_TUNE: Duration = Duration::from_millis(1100);
-pub const SETTLE_BEFORE_START: Duration = Duration::from_millis(1500);
+/// The wait between the front-end commands and the stream's start after a
+/// load. SDR Console takes 2.3 to 2.8 s from the load to the start, but
+/// FDM-SW2 starts the FIFO 0.1 s after its first tune (SW2_Capture 1), so
+/// this was cut from 1.5 s.
+pub const SETTLE_BEFORE_START: Duration = Duration::from_millis(300);
 
 /// How often `IQ1;` is resent while a remote image streams. SDR Console
 /// resends it every 7.6 s; nothing says how long the radio waits for it.
@@ -205,7 +208,7 @@ pub fn tripped() -> Option<String> {
 }
 
 /// Whether this process has put the radio in remote mode, so a later open at
-/// 192 kHz knows to send `IQ0;` first.
+/// 192 kHz knows to put it back on its own image first.
 static WENT_REMOTE: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn note_remote() {
@@ -215,6 +218,24 @@ pub(crate) fn note_remote() {
 pub(crate) fn went_remote() -> bool {
     WENT_REMOTE.load(Ordering::Relaxed)
 }
+
+/// After the radio has gone back to its own image.
+pub(crate) fn forget_remote() {
+    WENT_REMOTE.store(false, Ordering::Relaxed);
+}
+
+/// The `E3` `wValue` that has the DUO reconfigure from its own stand-alone
+/// image instead of taking an upload. FDM-SW2 sends it going back to 192 kHz,
+/// with no image after it, then polls `E5` until it answers `E5 10`; the DUO
+/// was back in STD ALONE without a power cycle (AJ3G, 25 Oct, SW2_Capture 1).
+pub const RESTORE_BEGIN: u16 = 0x0100;
+
+/// How often `E5` is asked while the DUO restores itself. FDM-SW2 asks about
+/// every 0.5 s and got `E5 10` on the eighth, 3.6 s after `E3`.
+pub const RESTORE_POLL: Duration = Duration::from_millis(500);
+
+/// How long the restore is given before the open gives up on it.
+pub const RESTORE_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// Images already pulled out of the DLL in this process.
 static CACHE: Mutex<Vec<(u32, Arc<Vec<u8>>)>> = Mutex::new(Vec::new());

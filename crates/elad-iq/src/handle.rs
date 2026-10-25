@@ -264,8 +264,8 @@ impl RxStats {
                 d(*a).partial_cmp(&d(*b)).unwrap_or(std::cmp::Ordering::Equal)
             })
             .unwrap_or(crate::types::ELAD_DEFAULT_RATE_HZ);
-        // A DUO this program gave a wide image keeps it when 192 kHz is asked
-        // for: nothing found yet puts it back but a power cycle (AJ3G, 25 Oct).
+        // A DUO this program gave a wide image and could not put back on its
+        // own (see `restore_standalone`) keeps it when 192 kHz is asked for.
         if self.model == Model::Duo && crate::remote::went_remote() {
             return Some(format!(
                 "the FDM-DUO is still running the {:.0} kHz image it was given, so the stream \

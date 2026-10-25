@@ -898,10 +898,17 @@ impl Scope {
     }
 }
 
+/// The share of the I/Q rate the scope shows and tunes in. ELAD's own driver
+/// gives each of the DUO's rates a bandwidth of 0.8 of it (153.6 kHz at 192k,
+/// 307.2 kHz at 384k, …, the DLL's configuration list): outside that the
+/// radio's decimation filter rolls off and what is there is aliased. AJ3G
+/// saw the same limits in FDM-SW2 (25 Oct).
+pub const USABLE_SPAN: f64 = 0.8;
+
 /// The span the snapshot describes, falling back to its newest frame's.
 fn span_of(snap: &sdr::Snapshot) -> Span {
     if snap.sample_rate > 0.0 {
-        Span { center: snap.center_hz, width: snap.sample_rate }
+        Span { center: snap.center_hz, width: snap.sample_rate * USABLE_SPAN }
     } else if let Some(f) = &snap.latest {
         Span { center: f.center_hz, width: f.span_hz }
     } else {
@@ -1124,7 +1131,7 @@ mod tests {
             assert!(!sc.offset_drag);
             // Where it ended is where the pointer let go, and it reads its
             // distance from the dial.
-            let v = view::view(Span { center: 14_100_000.0, width: 192_000.0 }, None);
+            let v = view::view(Span { center: 14_100_000.0, width: 192_000.0 * USABLE_SPAN }, None);
             let hz_b = v.lo + (v.hi - v.lo) * ((340.0 - 0.0) / 1280.0);
             assert!((bar.hz - hz_b).abs() < 3000.0, "{} against {hz_b}", bar.hz);
             assert_eq!(bar.offset_hz(rig.rx_hz, false), bar.hz - 14_074_000.0);

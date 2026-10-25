@@ -145,13 +145,19 @@ impl Device {
                 }
             }
         } else if model == Model::Duo && crate::remote::went_remote() {
-            // Back to 192 kHz after a remote image this process loaded. The
-            // DUO keeps that image until it is power-cycled, SDR Console and
-            // all; loading its own stand-alone image does not put it back (it
-            // stays in remote and streams zeros, AJ3G, 25 Oct). So the wide
-            // image keeps streaming, and the rate check says to power-cycle.
-            if let Err(e) = dev.cat_write("IQ0;") {
-                dev.trace.note(format!("IQ0 not sent: {e}"));
+            // Back to 192 kHz after a remote image this process loaded: have
+            // the DUO reconfigure from its own image, as FDM-SW2 does. Loading
+            // the stand-alone image from the DLL left it in remote streaming
+            // zeros (AJ3G, 25 Oct); this put it back in STD ALONE.
+            match dev.restore_standalone() {
+                Ok(()) => crate::remote::forget_remote(),
+                Err(e @ Error::Access(_)) => return Err(e),
+                Err(e) => {
+                    let w = format!("the FDM-DUO did not go back to stand-alone: {e}");
+                    tracing::warn!("{w}");
+                    dev.trace.note(&w);
+                    dev.warnings.push(w);
+                }
             }
         }
 
@@ -317,6 +323,56 @@ impl Device {
             self.rate_hz / 1000,
             crate::remote::LOAD_ATTEMPTS
         )))
+    }
+
+    /// Put an FDM-DUO back on its own stand-alone image, out of remote mode.
+    ///
+    /// `E3` with [`crate::remote::RESTORE_BEGIN`] and no upload, then `E5`
+    /// every half second until it answers `E5 10`, then `F9`: what FDM-SW2
+    /// sends going back to 192 kHz.
+    ///
+    /// SAFETY INTERLOCK (docs/safety-interlocks.md, #10): not while the radio
+    /// transmits. This reconfigures the FPGA as a load does.
+    fn restore_standalone(&mut self) -> Result<()> {
+        if crate::remote::transmitting() {
+            return Err(Error::Access(
+                "Waiting for the radio to stop transmitting to put the FDM-DUO back in \
+                 stand-alone."
+                    .into(),
+            ));
+        }
+        let t0 = std::time::Instant::now();
+        self.trace.note("putting the DUO back on its stand-alone image");
+        let gw = Request::DuoGateway;
+        let r = self.usb.control_in(
+            gw,
+            "restore begin",
+            crate::remote::RESTORE_BEGIN,
+            DuoSub::LoadBegin.index(),
+            1,
+        )?;
+        expect_ack("beginning the stand-alone restore", DuoSub::LoadBegin as u8, &r)?;
+        loop {
+            let r = self.usb.control_in(gw, "restore end", 0, DuoSub::LoadEnd.index(), 2)?;
+            expect_ack("finishing the stand-alone restore", DuoSub::LoadEnd as u8, &r)?;
+            if crate::remote::load_done(&r) {
+                break;
+            }
+            if t0.elapsed() > crate::remote::RESTORE_TIMEOUT {
+                return Err(Error::Access(format!(
+                    "the FDM-DUO did not finish going back to stand-alone in {:.0} s (last \
+                     answer {r:02X?}). Power-cycle the DUO, then open it again.",
+                    crate::remote::RESTORE_TIMEOUT.as_secs_f32()
+                )));
+            }
+            std::thread::sleep(crate::remote::RESTORE_POLL);
+        }
+        let b = self.usb.control_in(gw, "post-restore F9", 0, DuoSub::PreLoadB.index(), 2)?;
+        self.trace.note(format!(
+            "back on the stand-alone image in {:.1} s, F9 {b:02X?}",
+            t0.elapsed().as_secs_f32()
+        ));
+        Ok(())
     }
 
     /// One upload. `Ok(false)` when the radio's end-of-load answer says the
