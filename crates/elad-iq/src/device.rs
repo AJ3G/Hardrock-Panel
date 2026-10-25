@@ -511,29 +511,50 @@ impl Device {
     /// Ask the radio a CAT question (`GI;`) and return its answer, up to the
     /// `;`, as SDR Console reads them: the question, then the status until it
     /// says an answer is waiting, then [`DuoSub::CatRead`].
+    ///
+    /// Commands such as `RX;` leave an answer of their own waiting, and a read
+    /// takes whatever is there: on 946026d the `GI;` after `RX;` read `RX0;`
+    /// (AJ3G, 25 Oct). So an answer already waiting is read off first, and
+    /// only an answer that starts with the question's own letters is taken.
     pub fn cat_query(&self, cmd: &str) -> Result<String> {
+        for _ in 0..4 {
+            match self.take_cat_answer()? {
+                Some(stale) => {
+                    self.trace.note(format!("CAT answer {stale:?} read off before {cmd:?}"))
+                }
+                None => break,
+            }
+        }
+        let head = &cmd[..cmd.len().min(2)];
         self.cat_write(cmd)?;
         for _ in 0..CAT_POLL_TRIES {
-            let status = self.usb.control_in(
-                Request::DuoGateway,
-                "cat status",
-                0,
-                DuoSub::Status.index(),
-                3,
-            )?;
-            if status.get(2).is_some_and(|b| b & STATUS_CAT_REPLY != 0) {
-                let reply = self.usb.control_in(
-                    Request::DuoGateway,
-                    "cat reply",
-                    CAT_FRAME_LEN as u16,
-                    DuoSub::CatRead.index(),
-                    CAT_REPLY_LEN,
-                )?;
-                return Ok(decode_cat_reply(&reply));
+            match self.take_cat_answer()? {
+                Some(a) if a.starts_with(head) => return Ok(a),
+                Some(other) => {
+                    self.trace.note(format!("CAT answer {other:?} skipped, waiting for {cmd:?}"))
+                }
+                None => std::thread::sleep(CAT_POLL_INTERVAL),
             }
-            std::thread::sleep(CAT_POLL_INTERVAL);
         }
         Err(Error::Access(format!("the FDM-DUO did not answer {cmd:?} within two seconds")))
+    }
+
+    /// The CAT answer waiting in the radio, if the status says there is one.
+    /// Reading it clears the status bit.
+    fn take_cat_answer(&self) -> Result<Option<String>> {
+        let status =
+            self.usb.control_in(Request::DuoGateway, "cat status", 0, DuoSub::Status.index(), 3)?;
+        if !status.get(2).is_some_and(|b| b & STATUS_CAT_REPLY != 0) {
+            return Ok(None);
+        }
+        let reply = self.usb.control_in(
+            Request::DuoGateway,
+            "cat reply",
+            CAT_FRAME_LEN as u16,
+            DuoSub::CatRead.index(),
+            CAT_REPLY_LEN,
+        )?;
+        Ok(Some(decode_cat_reply(&reply)))
     }
 
     /// Whether the DUO says it is transmitting, from its `GI` status.
