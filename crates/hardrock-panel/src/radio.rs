@@ -219,11 +219,9 @@ pub(crate) fn radio_window(
         let _shut = crate::gpu_gate::shut();
         let closed = ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("radio-window"),
-            egui::ViewportBuilder::default()
-                .with_title(title)
-                .with_inner_size([600.0, 820.0])
-                .with_min_inner_size([480.0, 420.0]),
+            crate::popout::builder(ctx, "radio-window", title, [600.0, 820.0], [480.0, 420.0]),
             |ui, _class| {
+                crate::popout::track(ui.ctx(), "radio-window");
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
                     .show(ui, |ui| {

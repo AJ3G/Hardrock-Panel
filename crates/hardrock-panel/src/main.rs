@@ -47,6 +47,7 @@ mod gpu_gate;
 mod logfile;
 mod outside;
 mod panel;
+mod popout;
 mod radio;
 mod rx;
 // The panadapter scope. Some of its API is for the example and the tests.
@@ -151,6 +152,9 @@ struct App {
     rig: Option<Arc<RigLink>>,
     view: AmpMeters,
     show_settings: bool,
+    /// The amplifier's panel, docked as the main window's body or popped out.
+    /// Shown at start; the AMP key on the bar hides it (AJ3G, 25 Oct 2026).
+    show_amp: bool,
     show_radio: bool,
     /// The settings as being edited, applied with APPLY.
     draft: AmpConfig,
@@ -173,6 +177,9 @@ struct App {
     sounds: Vec<String>,
     /// When the tone was started for a TUNE not yet keyed.
     tone_asked: Option<Instant>,
+    /// TUNE was started with the amplifier showing a trip, which keying
+    /// clears; it doesn't stop that TUNE until it has cleared (#6).
+    trip_carried: bool,
     /// Why the tone wouldn't play, last time.
     tone_error: Option<String>,
     /// Since when the radio has been seen transmitting.
@@ -265,6 +272,7 @@ impl App {
             rig,
             view,
             show_settings,
+            show_amp: true,
             show_radio: false,
             ports: serial_ports(),
             band_told: None,
@@ -274,6 +282,7 @@ impl App {
             band_dismissed: false,
             tone: audio::Tone::default(),
             sounds: audio::output_devices(),
+            trip_carried: false,
             tone_asked: None,
             tx_sources: (String::new(), None),
             tone_error: None,
@@ -351,6 +360,10 @@ impl App {
             // After the link's unkey, never before it.
             self.tone.stop();
         }
+        if !amp.alerts.tripped {
+            // Cleared, by this keying or otherwise: any trip from now is new.
+            self.trip_carried = false;
+        }
         let (Some(link), Some(r), Some(t)) = (&self.rig, rig, tuning) else { return };
         if outside {
             // SAFETY INTERLOCK (docs/safety-interlocks.md, #8 with #6): an
@@ -358,10 +371,11 @@ impl App {
             // radio's full power setting (its audio can bring it that high),
             // and stopped when transmitting from outside is turned off.
             let watts = tune::planned_watts(r, Keying::Carrier, 1.0);
-            let why = tune::tune_must_stop(amp, r, self.saved.swr_warn, watts).or_else(|| {
-                (!self.outside.allow_tx())
-                    .then(|| "transmitting from outside programs was turned off".to_string())
-            });
+            let why =
+                tune::tune_must_stop(amp, r, self.saved.swr_warn, watts, false).or_else(|| {
+                    (!self.outside.allow_tx())
+                        .then(|| "transmitting from outside programs was turned off".to_string())
+                });
             match why {
                 Some(why) => link.tune_stop(Some(why)),
                 None => link.tune_alive(),
@@ -376,10 +390,11 @@ impl App {
         // progress is stopped the moment the amplifier trips, leaves the
         // radio's band in line, is driven past its limit (or the Tune slider
         // is raised past it), or either SWR reaches the warning.
-        let why = tune::tune_must_stop(amp, r, self.saved.swr_warn, watts).or_else(|| {
-            (t.keying == Keying::Audio && !self.tone.playing())
-                .then(|| "the tone stopped playing".to_string())
-        });
+        let why = tune::tune_must_stop(amp, r, self.saved.swr_warn, watts, self.trip_carried)
+            .or_else(|| {
+                (t.keying == Keying::Audio && !self.tone.playing())
+                    .then(|| "the tone stopped playing".to_string())
+            });
         match why {
             Some(why) => link.tune_stop(Some(why)),
             None => link.tune_alive(),
@@ -431,6 +446,9 @@ impl App {
         }
         // SAFETY INTERLOCKS (docs/safety-interlocks.md, #6 and #7): checked
         // again here, not only by the greyed buttons.
+        if t.start.is_some() {
+            self.trip_carried = amp.alerts.tripped;
+        }
         match t.start {
             Some(Keying::Carrier) => {
                 let watts = tune::planned_watts(r, Keying::Carrier, self.saved.drive);
@@ -1100,6 +1118,15 @@ impl eframe::App for App {
                     if chrome::chip(ui, self.show_settings, "SETTINGS").clicked() {
                         self.show_settings = !self.show_settings;
                     }
+                    if chrome::chip(ui, self.show_amp, "AMP")
+                        .on_hover_text(
+                            "The amplifier's meters, readings, tuner and keys. Hidden, the \
+                             warnings on this bar still show",
+                        )
+                        .clicked()
+                    {
+                        self.show_amp = !self.show_amp;
+                    }
                     if chrome::chip(ui, self.show_radio, "RADIO")
                         .on_hover_text(
                             "The radio's own readings and menu settings, over its CAT port",
@@ -1217,18 +1244,34 @@ impl eframe::App for App {
         }
 
         let popped = self.saved.amp_popped;
-        let mut out = if popped {
+        let mut out = if !self.show_amp {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
+                .show(ui, |ui| {
+                    chrome::window_body_bg(ui);
+                    ui.label(
+                        RichText::new("The amplifier's panel is hidden: AMP on the bar shows it.")
+                            .size(12.0)
+                            .color(theme::CYAN()),
+                    );
+                });
+            panel::PanelOut::default()
+        } else if popped {
             // Painted in place: no background GPU submit meanwhile (gpu_gate).
             let _shut = gpu_gate::shut();
             let (st, view) = (&st, &mut self.view);
             let mut out = panel::PanelOut::default();
             let closed = ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("amp-window"),
-                egui::ViewportBuilder::default()
-                    .with_title(st.model.label())
-                    .with_inner_size([760.0, 720.0])
-                    .with_min_inner_size([520.0, 420.0]),
+                popout::builder(
+                    ctx,
+                    "amp-window",
+                    st.model.label(),
+                    [760.0, 720.0],
+                    [520.0, 420.0],
+                ),
                 |ui, _class| {
+                    popout::track(ui.ctx(), "amp-window");
                     out = egui::CentralPanel::default()
                         .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
                         .show(ui, |ui| {
@@ -1241,9 +1284,11 @@ impl eframe::App for App {
                     ui.ctx().input(|i| i.viewport().close_requested())
                 },
             );
-            // Closing its window docks it: the amplifier is never out of
-            // sight altogether.
-            out.pop |= closed;
+            // Closing its window hides it, as the other windows do; AMP on
+            // the bar brings it back where it was.
+            if closed {
+                self.show_amp = false;
+            }
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
                 .show(ui, |ui| {
@@ -1320,7 +1365,7 @@ impl eframe::App for App {
                 // CW message transmits through the amplifier at the full
                 // power setting, so only when RIG TUNE could be keyed.
                 if let (Some(f), Some(r)) = (o.cw_send, &rig)
-                    && tune::tune_blocked(&amp_raw, r, tune::planned_watts(r, Keying::Carrier, 1.0))
+                    && tune::key_blocked(&amp_raw, r, tune::planned_watts(r, Keying::Carrier, 1.0))
                         .is_none()
                 {
                     link.set(vec![f]);

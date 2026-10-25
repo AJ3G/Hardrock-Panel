@@ -171,13 +171,23 @@ run (10 s to start, up to 60 s).
   stay in receive; use TX TUNE to watch the amplifier.
 
 Press either again to unkey. They are greyed, with the reason on hover, unless
-the amplifier is connected and not tripped and, in PTT, on the radio's band,
+the amplifier is connected and, in PTT, on the radio's band,
 with the power within its 8 W drive limit (so RIG TUNE at MAX, about 8.3 W,
 only in OFF, and TX TUNE at MAX up to 96%). They unkey by themselves at the
 time limit, on a trip, if the drive goes over the limit, if either SWR reaches
 the SWR warning in Settings, if the radio drops to receive on a high SWR, and
 if the panel closes or stops responding. The reason is shown after it stops.
 These are safety interlocks #5, #6 and #7.
+
+**Clearing a trip.** A trip stops TUNE at once. The HR500 keeps showing the
+trip until it is keyed again and sees normal readings; it has no reset
+(its manual: trip conditions "do not need to be manually reset, all
+conditions are set to normal the next time the amplifier is keyed"). So once
+the cause is fixed (the right antenna picked, say), TUNE keys again to clear
+it, at no more than the 8 W drive limit, in PTT or OFF. That TUNE is not
+stopped by the trip it was started to clear, but a new trip stops it, as do
+all the other stop conditions. Stored CW messages and outside programs stay
+refused until the trip has cleared.
 
 **When the amplifier doesn't key.** If the radio transmits for more than a
 moment with the amplifier in PTT and the amplifier's own TX light stays off,
@@ -244,9 +254,14 @@ radio the window keeps its own look.
 
 **Its own window.** **POP OUT**, at the top right of the amplifier's panel,
 moves it into a window of its own, to put on another screen; **DOCK** there,
-or in the main window while it is out, puts it back. Closing its window
-docks it too, so the amplifier is never hidden. The choice is kept between
-runs.
+or in the main window while it is out, puts it back. **AMP** on the top bar
+shows or hides it, as RADIO, SCOPE, DECODE and GLOBE do theirs; closing its
+window hides it. Hidden, the warnings on the top bar still show.
+
+**Where windows open.** Every window opens docked the first time. Popped out
+and moved or resized, AMP, RADIO, SCOPE, DECODE and GLOBE each open there
+again next time, at that size, and whether each is popped out is kept
+between runs.
 
 **What can be clicked.** Anything in the window that does something when
 clicked shows a pointing hand and a white outline when the mouse is over it.

@@ -72,9 +72,17 @@ pub(crate) fn planned_watts(rig: &RigStatus, keying: Keying, drive: f32) -> Opti
 ///
 /// SAFETY INTERLOCK (docs/safety-interlocks.md, #6): TUNE goes through the
 /// amplifier, so it is keyed only when the amplifier's state is known and
-/// safe for it: connected, not tripped and, in line (PTT), on the radio's
-/// band (a carrier into the wrong low-pass filter meets a mismatch at full
-/// gain) and within its drive limit (as #4: 8 W on the HR500).
+/// safe for it: connected and, in line (PTT), on the radio's band (a carrier
+/// into the wrong low-pass filter meets a mismatch at full gain) and within
+/// its drive limit (as #4: 8 W on the HR500).
+///
+/// A trip the amplifier still shows does not refuse TUNE: the HR500 clears
+/// it only the next time it is keyed (its manual: trip conditions "do not
+/// need to be manually reset"), so refusing left no way to clear it (AJ3G,
+/// 25 Oct 2026). To clear one, TUNE runs at no more than the drive limit
+/// whether the amplifier is in line or not, and a new trip stops it
+/// ([`tune_must_stop`]). Outside programs and stored CW messages are still
+/// refused while it shows ([`key_blocked`]).
 pub(crate) fn tune_blocked(amp: &AmpStatus, rig: &RigStatus, watts: Option<f32>) -> Option<String> {
     if !rig.connected {
         return Some("The radio isn't connected.".into());
@@ -83,7 +91,17 @@ pub(crate) fn tune_blocked(amp: &AmpStatus, rig: &RigStatus, watts: Option<f32>)
         return Some("The amplifier isn't connected, so its state can't be checked.".into());
     };
     if amp.alerts.tripped {
-        return Some("The amplifier has tripped. Clear it first.".into());
+        let limit = amp.model.limits().drive_warn_w;
+        match watts {
+            None => return Some("The radio's power setting hasn't been read yet.".into()),
+            Some(w) if w > limit => {
+                return Some(format!(
+                    "The amplifier has tripped. TUNE clears it, at {limit:.0} W or less: lower \
+                     the power or the Tune slider (about {w:.1} W now)."
+                ));
+            }
+            Some(_) => {}
+        }
     }
     if !r.ptt {
         return None;
@@ -126,13 +144,25 @@ pub(crate) fn tune_blocked(amp: &AmpStatus, rig: &RigStatus, watts: Option<f32>)
 /// transmission the link also reads the radio's input and mode again just
 /// before it keys (#7).
 pub(crate) fn outside_ptt_blocked(amp: &AmpStatus, rig: &RigStatus) -> Option<String> {
+    if amp.alerts.tripped {
+        return Some("The amplifier has tripped. TUNE clears it.".into());
+    }
     if rig.tuning.is_some() {
         return Some("TUNE is running.".into());
     }
     if rig.transmitting() {
         return Some("The radio is already transmitting.".into());
     }
-    tune_blocked(amp, rig, planned_watts(rig, Keying::Carrier, 1.0))
+    key_blocked(amp, rig, planned_watts(rig, Keying::Carrier, 1.0))
+}
+
+/// [`tune_blocked`] for anything but TUNE: a stored CW message or an outside
+/// program. A trip the amplifier shows refuses it; TUNE is what clears one.
+pub(crate) fn key_blocked(amp: &AmpStatus, rig: &RigStatus, watts: Option<f32>) -> Option<String> {
+    if amp.alerts.tripped {
+        return Some("The amplifier has tripped. TUNE clears it.".into());
+    }
+    tune_blocked(amp, rig, watts)
 }
 
 /// Why TUNE's tone may not be keyed, beyond [`tune_blocked`]: no sound
@@ -168,12 +198,20 @@ pub(crate) fn tone_blocked(rig: &RigStatus, device: Option<&str>) -> Option<Stri
 /// Why a TUNE in progress must stop now, or `None`. Everything that would
 /// have refused it, and also: drive past the limit in line, or SWR at or past
 /// the warning on the amplifier (in line) or the radio.
+///
+/// `carried_trip` is a trip the amplifier already showed when this TUNE
+/// started and hasn't cleared since: that one doesn't stop it, since keying
+/// is what clears it. Any other trip does.
 pub(crate) fn tune_must_stop(
     amp: &AmpStatus,
     rig: &RigStatus,
     swr_warn: f32,
     watts: Option<f32>,
+    carried_trip: bool,
 ) -> Option<String> {
+    if amp.alerts.tripped && !carried_trip {
+        return Some("The amplifier tripped.".into());
+    }
     let blocked = tune_blocked(amp, rig, watts);
     if blocked.is_some() {
         return blocked;
@@ -534,24 +572,33 @@ mod tests {
     }
 
     #[test]
-    fn a_trip_blocks_and_stops_tune() {
+    fn a_trip_lets_tune_clear_it_but_a_new_one_stops_it() {
         let mut a = amp(false, 5);
         a.alerts = AmpAlerts { tripped: true, ..AmpAlerts::default() };
         let r = duo(14_074_000, 2);
-        assert!(tune_blocked(&a, &r, w(&r)).is_some());
-        assert!(tune_must_stop(&a, &r, 5.0, w(&r)).is_some());
+        // The HR500 clears a trip only when keyed: TUNE may, at low power.
+        assert_eq!(tune_blocked(&a, &r, w(&r)), None);
+        assert!(tune_blocked(&a, &r, Some(20.0)).unwrap().contains("tripped"));
+        // Carried in from before the TUNE: it runs on. A new one stops it.
+        assert_eq!(tune_must_stop(&a, &r, 5.0, w(&r), true), None);
+        assert!(tune_must_stop(&a, &r, 5.0, w(&r), false).is_some());
+        // Outside programs and CW messages are still refused.
+        assert!(key_blocked(&a, &r, w(&r)).is_some());
+        assert!(outside_ptt_blocked(&a, &r).is_some());
     }
 
     #[test]
     fn a_high_swr_stops_tune() {
         let mut a = amp(true, 5);
         let r = duo(14_074_000, 2);
-        assert_eq!(tune_must_stop(&a, &r, 3.0, w(&r)), None);
+        assert_eq!(tune_must_stop(&a, &r, 3.0, w(&r), false), None);
         a.readings.as_mut().unwrap().swr = 3.2;
-        assert!(tune_must_stop(&a, &r, 3.0, w(&r)).unwrap().contains("SWR"));
+        assert!(tune_must_stop(&a, &r, 3.0, w(&r), false).unwrap().contains("SWR"));
         let mut r = duo(14_074_000, 2);
         r.swr = elad::parse_swr("0 04.00");
-        assert!(tune_must_stop(&amp(false, 5), &r, 3.0, w(&r)).unwrap().contains("radio's SWR"));
+        assert!(
+            tune_must_stop(&amp(false, 5), &r, 3.0, w(&r), false).unwrap().contains("radio's SWR")
+        );
     }
 
     #[test]
@@ -559,6 +606,6 @@ mod tests {
         let mut a = amp(true, 5);
         a.readings.as_mut().unwrap().drive_w = 9.0;
         let r = duo(14_074_000, 2);
-        assert!(tune_must_stop(&a, &r, 5.0, w(&r)).unwrap().contains("Drive"));
+        assert!(tune_must_stop(&a, &r, 5.0, w(&r), false).unwrap().contains("Drive"));
     }
 }

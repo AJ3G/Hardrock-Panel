@@ -1569,11 +1569,9 @@ pub(crate) fn window(
         let _shut = crate::gpu_gate::shut();
         let closed = ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("decode-window"),
-            egui::ViewportBuilder::default()
-                .with_title("Decode")
-                .with_inner_size([720.0, 640.0])
-                .with_min_inner_size([420.0, 320.0]),
+            crate::popout::builder(ctx, "decode-window", "Decode", [720.0, 640.0], [420.0, 320.0]),
             |ui, _class| {
+                crate::popout::track(ui.ctx(), "decode-window");
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
                     .show(ui, |ui| {

@@ -419,11 +419,9 @@ pub(crate) fn window(
         let _shut = crate::gpu_gate::shut();
         let closed = ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("globe-window"),
-            egui::ViewportBuilder::default()
-                .with_title("Globe")
-                .with_inner_size([1360.0, 860.0])
-                .with_min_inner_size([900.0, 560.0]),
+            crate::popout::builder(ctx, "globe-window", "Globe", [1360.0, 860.0], [900.0, 560.0]),
             |ui, _class| {
+                crate::popout::track(ui.ctx(), "globe-window");
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
                     .show(ui, |ui| {

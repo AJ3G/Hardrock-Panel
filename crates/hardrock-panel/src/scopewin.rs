@@ -52,11 +52,9 @@ pub(crate) fn scope_window(
         let _shut = crate::gpu_gate::shut();
         let closed = ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("scope-window"),
-            egui::ViewportBuilder::default()
-                .with_title("Scope")
-                .with_inner_size([1200.0, 900.0])
-                .with_min_inner_size([640.0, 480.0]),
+            crate::popout::builder(ctx, "scope-window", "Scope", [1200.0, 900.0], [640.0, 480.0]),
             |ui, _class| {
+                crate::popout::track(ui.ctx(), "scope-window");
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
                     .show(ui, |ui| {
