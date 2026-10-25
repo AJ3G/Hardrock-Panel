@@ -770,8 +770,13 @@ impl Rx {
         self.match_rate(s, now);
         self.sync_volume(s, now);
         self.recheck_audio(s);
-        self.keep_audio(s);
-        self.keep_slices(s);
+        // The receiver and the slices are quiet while transmitting and for a
+        // moment after: the DUO's I/Q keeps coming during an over (it mutes
+        // its own audio, not the stream), and played it was background static
+        // at 384 kHz (AJ3G, 25 Oct 2026).
+        let tx_quiet = self.tx_at.is_some_and(|t| t.elapsed() < TX_MUTE_HANG);
+        self.keep_audio(s, tx_quiet);
+        self.keep_slices(s, tx_quiet);
         let Some(p) = &self.pipeline else { return };
         // In split the DUO's USB dial read-back is VFO B, so the stream stops
         // following it (`elad_iq::set_split`), and above 192 kHz (a remote
@@ -987,7 +992,7 @@ impl Rx {
     }
 
     /// Open the sound output, or another one, and keep its volume.
-    fn keep_audio(&mut self, s: &RxSettings) {
+    fn keep_audio(&mut self, s: &RxSettings, tx_quiet: bool) {
         let Some(p) = &self.pipeline else {
             self.audio = None;
             return;
@@ -1009,13 +1014,13 @@ impl Rx {
         }
         if let Some(a) = &self.audio {
             a.set_volume(s.volume);
-            a.set_muted(s.muted);
+            a.set_muted(s.muted || tx_quiet);
         }
     }
 
     /// Run the slices inside the span (decision 66), and keep each one's
     /// sound output, volume and mute.
-    fn keep_slices(&mut self, s: &RxSettings) {
+    fn keep_slices(&mut self, s: &RxSettings, tx_quiet: bool) {
         let Some(p) = &self.pipeline else { return };
         let want = slices::specs(&s.slices, self.centre, p.lock().sample_rate);
         if self.slices_sent.as_ref() != Some(&want) {
@@ -1040,7 +1045,7 @@ impl Rx {
             }
             if let Some((_, _, Ok(a))) = self.slice_audio.iter().find(|(id, _, _)| *id == w.id) {
                 a.set_volume(sl.volume);
-                a.set_muted(sl.muted);
+                a.set_muted(sl.muted || tx_quiet);
             }
         }
     }
@@ -1232,6 +1237,10 @@ const SPLIT_SETTLE: Duration = Duration::from_millis(300);
 /// How long after a transmission the radio's dial read-back is believed
 /// again: four of the ELAD driver's reads.
 const DIAL_SETTLE: Duration = Duration::from_millis(1000);
+
+/// How long after a transmission the receiver stays quiet: long enough for
+/// the radio's own receiver to come back, short enough not to clip a reply.
+const TX_MUTE_HANG: Duration = Duration::from_millis(300);
 
 /// An ELAD stream silent this long, with the radio not transmitting, is
 /// opened again. The DUO streams all the time it is on, at every rate.

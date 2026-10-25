@@ -415,6 +415,9 @@ name, VB-Cable's *CABLE Input* included, to feed an outside decoder. The
 scope has its volume and **Mute**. Up to 192 kHz the DUO plays its own audio
 too, and the panel sets the DUO's mode and filter to the receiver's; above
 192 kHz the DUO mutes its own audio and the panel's receiver is the one heard.
+The panel's receiver and its slices go quiet while the radio transmits, and
+for 0.3 s after: the DUO keeps sending I/Q during an over, and it would be
+heard as static.
 
 **TX follows RX** (on to start) makes the radio transmit where you listen.
 
