@@ -12,8 +12,8 @@
 //!
 //! # Where this comes from
 //!
-//! Two USB captures of SDR Console opening the DUO at 384, 768, 3072 and
-//! 6144 kHz, on the owner's own radio. Every request below
+//! Three USB captures of SDR Console opening the DUO at 1536, 3072 and
+//! 6144 kHz and one more rate, on the owner's own radio. Every request below
 //! is one that capture contains, in its order:
 //!
 //! ```text
@@ -91,18 +91,16 @@ pub struct Image {
 }
 
 /// The images seen in the captures, the rates named by the bandwidth chosen in
-/// SDR Console as each was loaded. 1536 kHz is in the same DLL but has not been
-/// seen on the wire yet.
-pub const IMAGES: [Image; 4] = [
+/// SDR Console as each was loaded. Nothing on the wire says which rate an image
+/// is, so a rate is listed only once a capture has tied it to one.
+///
+/// A third image was seen, 802,295 bytes, SHA-256 `d9a7e091…`, and is one of
+/// 384 or 768 kHz; until a capture says which, neither rate is offered.
+pub const IMAGES: [Image; 3] = [
     Image {
-        rate_hz: 384_000,
+        rate_hz: 1_536_000,
         upload_len: 802_571,
         sha256: hex32("1d5efa829738e7a1f96c6e2cb1cb405403bbde6358cd98c86c2b973cf837f2c6"),
-    },
-    Image {
-        rate_hz: 768_000,
-        upload_len: 802_295,
-        sha256: hex32("d9a7e0913cc6216e3b1877d3373ae8897204ab6c5498fdb645fbe68564b3525f"),
     },
     Image {
         rate_hz: 3_072_000,
@@ -355,7 +353,7 @@ mod tests {
         assert_eq!(find_upload(short, &img), None);
     }
 
-    /// SDR Console's split of the 384 kHz image: 12,540 full requests, ten
+    /// SDR Console's split of the 1536 kHz image: 12,540 full requests, ten
     /// bytes, then the closing `0xFF` alone.
     #[test]
     fn the_upload_goes_in_sixty_four_byte_requests_and_its_last_byte_alone() {
@@ -364,7 +362,7 @@ mod tests {
         assert_eq!(lens.len(), 12_542);
         assert!(lens[..12_540].iter().all(|&l| l == 64));
         assert_eq!(&lens[12_540..], &[10, 1]);
-        // The 768 kHz one ends 54 then 1.
+        // The 802,295-byte one ends 54 then 1.
         let u = vec![0u8; 802_295];
         let lens: Vec<usize> = chunks(&u).map(<[u8]>::len).collect();
         assert_eq!(lens.len(), 12_537);
@@ -372,15 +370,15 @@ mod tests {
     }
 
     #[test]
-    fn only_rates_above_stand_alone_need_an_image_and_four_are_known() {
+    fn only_rates_above_stand_alone_need_an_image_and_three_are_known() {
         assert!(!wanted(192_000));
         assert!(wanted(384_000));
-        assert_eq!(image(384_000).map(|i| i.upload_len), Some(802_571));
-        assert_eq!(image(768_000).map(|i| i.upload_len), Some(802_295));
+        assert_eq!(image(1_536_000).map(|i| i.upload_len), Some(802_571));
         assert_eq!(image(3_072_000).map(|i| i.upload_len), Some(801_463));
         assert_eq!(image(6_144_000).map(|i| i.upload_len), Some(801_463));
-        assert_eq!(image(1_536_000), None);
-        let e = upload_for(1_536_000).unwrap_err();
-        assert!(e.contains("1536 kHz") && e.contains("192 kHz"), "{e}");
+        assert_eq!(image(384_000), None);
+        assert_eq!(image(768_000), None);
+        let e = upload_for(768_000).unwrap_err();
+        assert!(e.contains("768 kHz") && e.contains("192 kHz"), "{e}");
     }
 }

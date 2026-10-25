@@ -384,13 +384,14 @@ ctrl+wheel to zoom, drag to pan, double-click for the whole span. When the
 receiver nears the edge, the panel moves VFO A (over CAT) and the span
 follows. Turning the radio's own knob moves the span, and the receiver with
 it. **SPAN** changes the I/Q rate (192 kHz to 6.144 MHz). On the DUO, 192 kHz
-is the radio's own; for 384 kHz, 768 kHz, 3.072 MHz and 6.144 MHz the panel
-takes the radio out of
+is the radio's own; for 1.536, 3.072 and 6.144 MHz the panel takes the radio
+out of
 stand-alone by loading ELAD's wide image into it, as SDR Console does. That
 takes about 7 s each time SPAN changes, and the I/Q line says so meanwhile.
 The image is read from ELAD's driver, `ExtIOmc_ELAD_FDMDUO.dll`, which SDR
-Console or FDM-SW2 installs, so one of them has to be installed. 1.536 MHz is
-not known yet and stays at 192 kHz, with a note. Not while transmitting.
+Console or FDM-SW2 installs, so one of them has to be installed. 384 and
+768 kHz are not known yet and stay at 192 kHz, with a note. Not while
+transmitting.
 
 **Listening.** The receiver plays on the sound output chosen under SETTINGS,
 *Receiver sound*: the computer's default output to start, or any other by
