@@ -294,6 +294,11 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
             name: crate::slices::name(x.id),
         })
         .collect();
+    // With no stream (opening, or an open that failed), SPAN shows the rate
+    // asked for rather than 0k.
+    if snap.sample_rate <= 0.0 && rx.asked_rate() > 0 {
+        scope.last_rate = rx.asked_rate() as f64;
+    }
     out.scope = Some(scope.ui(ui, &snap, a.rig));
     scope.scf_tap(&mut |sink| {
         let sink = sink.map(|s| Box::new(move |b: &IqBlock| s(b.iq, b.rate)) as IqSink);

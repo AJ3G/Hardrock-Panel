@@ -75,6 +75,11 @@ pub struct UsbDev {
     trace: Trace,
 }
 
+/// How long a refused open is retried, and how often. See
+/// [`UsbDev::claim_patiently`].
+const CLAIM_PATIENCE: std::time::Duration = std::time::Duration::from_secs(4);
+const CLAIM_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+
 impl UsbDev {
     /// Open the device with this serial, or the first one found when `serial`
     /// is empty.
@@ -113,7 +118,7 @@ impl UsbDev {
 
         let mut last_err = None;
         for info in &candidates {
-            let dev = match Self::claim(info, trace) {
+            let dev = match Self::claim_patiently(info, trace) {
                 Ok(d) => d,
                 Err(e) => {
                     trace.note(format!("skipping a device that would not open: {e}"));
@@ -148,6 +153,34 @@ impl UsbDev {
              device in Settings → Radio, or clear the serial to use the first \
              one found"
         )))
+    }
+
+    /// [`Self::claim`], tried again for a few seconds while it is refused.
+    ///
+    /// A new rate reopens the device straight after the old stream let go, and
+    /// Windows can still be closing the old handle: the open then fails with
+    /// error 5, access denied (AJ3G, 25 Oct, on a SPAN change). Only a refusal
+    /// is retried; a device that has gone is not.
+    fn claim_patiently(info: &nusb::DeviceInfo, trace: &Trace) -> Result<UsbDev> {
+        let deadline = std::time::Instant::now() + CLAIM_PATIENCE;
+        let mut tries = 0;
+        loop {
+            match Self::claim(info, trace) {
+                Err(Error::Access(e)) if std::time::Instant::now() < deadline => {
+                    tries += 1;
+                    if tries == 1 {
+                        trace.note(format!("open refused, trying again: {e}"));
+                    }
+                    std::thread::sleep(CLAIM_RETRY);
+                }
+                r => {
+                    if tries > 0 && r.is_ok() {
+                        trace.note(format!("opened after {tries} refusals"));
+                    }
+                    return r;
+                }
+            }
+        }
     }
 
     /// Open one enumerated device and claim its interface.

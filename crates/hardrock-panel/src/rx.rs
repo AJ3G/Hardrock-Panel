@@ -731,15 +731,17 @@ impl Rx {
         // lost stream wouldn't open again: looked for again on the
         // watchdog's timer, never while transmitting (#10). A stream that
         // ended and failed to reopen stayed down until the panel was
-        // restarted (AJ3G, 25 Oct 2026).
+        // restarted (AJ3G, 25 Oct 2026). So did one Windows refused to open
+        // (error 5) after a SPAN change, the old handle not yet let go.
         if self.running == IqChoice::Elad
             && self.pipeline.is_none()
             && self.opening.is_none()
             && !now.transmitting
-            && self
-                .error
-                .as_deref()
-                .is_some_and(|e| e.contains("no ELAD") || (self.lost && !e.starts_with("Waiting")))
+            && self.error.as_deref().is_some_and(|e| {
+                e.contains("no ELAD")
+                    || e.to_ascii_lowercase().contains("cannot open")
+                    || (self.lost && !e.starts_with("Waiting"))
+            })
             && self.reopened_at.is_none_or(|t| t.elapsed() >= REOPEN_EVERY)
         {
             if self.lost {
@@ -1638,6 +1640,23 @@ mod tests {
         assert!(rx.error.is_none());
         assert_eq!(rx.source(), IqChoice::Demo);
         assert!(rx.watchdog.as_deref().is_some_and(|w| w.contains("every 20 s")));
+    }
+
+    /// Windows refusing the open after a SPAN change (AJ3G, 25 Oct): not a
+    /// lost stream, but tried again on the same timer.
+    #[test]
+    fn an_open_windows_refused_is_tried_again() {
+        let scope = Scope::new(None, crate::scope::ScopeSettings::default());
+        let mut s = RxSettings { source: IqChoice::Demo, ..RxSettings::default() };
+        let mut rx = Rx::new(&s);
+        rx.running = IqChoice::Elad;
+        rx.error = Some(
+            "cannot open ELAD FDM-DUO at USBROOT(0)-1.4.1: failed to open device (error 5)".into(),
+        );
+        rx.reopened_at = Instant::now().checked_sub(REOPEN_EVERY);
+        rx.frame(&mut s, &scope, now(false));
+        assert!(rx.error.is_none());
+        assert_eq!(rx.source(), IqChoice::Demo);
     }
 
     /// FT8 on the air, as I/Q in real time: each slot from 0.5 s, one

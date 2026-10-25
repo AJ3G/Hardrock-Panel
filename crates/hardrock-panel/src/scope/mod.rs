@@ -247,6 +247,9 @@ pub struct Scope {
     drag: Option<Drag>,
     /// A drag of a measurement marker (its index).
     marker_drag: Option<usize>,
+    /// The last I/Q rate a stream ran at, for the SPAN key while none runs
+    /// (it read "SPAN 0k" after a failed open, AJ3G 25 Oct).
+    pub(crate) last_rate: f64,
     /// A drag of the split or the height grip: the value it started from and
     /// the pointer's y then.
     grip: Option<(bool, f32, f32)>,
@@ -358,6 +361,7 @@ impl Scope {
             shown_view: None,
             drag: None,
             marker_drag: None,
+            last_rate: 0.0,
             grip: None,
             wheel: Wheel::default(),
             last_gen: 0,

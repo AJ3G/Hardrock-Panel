@@ -35,6 +35,9 @@ pub(super) fn soft_keys(
     let kw = ((w - gap * (KEYS.len() as f32 - 1.0)) / KEYS.len() as f32).max(40.0);
     let h = 44.0;
     let (row, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    if snap.sample_rate > 0.0 {
+        sc.last_rate = snap.sample_rate;
+    }
     for (i, k) in KEYS.iter().enumerate() {
         let r =
             Rect::from_min_size(pos2(row.left() + i as f32 * (kw + gap), row.top()), vec2(kw, h));
@@ -68,10 +71,22 @@ pub(super) fn soft_keys(
     }
 }
 
+/// The rate the SPAN key shows and steps from: the stream's, or with none
+/// running the last one that ran, so it never reads 0k.
+fn span_rate(sc: &Scope, snap: &sdr::Snapshot) -> f64 {
+    if snap.sample_rate > 0.0 {
+        snap.sample_rate
+    } else if sc.last_rate > 0.0 {
+        sc.last_rate
+    } else {
+        sdr::SUPPORTED_RATES[0] as f64
+    }
+}
+
 fn key_label(sc: &Scope, k: &str, snap: &sdr::Snapshot) -> (String, bool) {
     let s = &sc.settings;
     match k {
-        "SPAN" => (format!("SPAN {}k", (snap.sample_rate / 1000.0).round()), false),
+        "SPAN" => (format!("SPAN {}k", (span_rate(sc, snap) / 1000.0).round()), false),
         "FIT" => ("FIT".into(), s.fit),
         "SCALE" => (format!("SCALE {}", s.scale.key_label()), false),
         "AVG" => ("AVG".into(), s.avg),
@@ -105,7 +120,7 @@ fn press(sc: &mut Scope, k: &str, snap: &sdr::Snapshot, out: &mut ScopeOut) {
     match k {
         "SPAN" => {
             let rates = sdr::SUPPORTED_RATES;
-            let cur = rates.iter().position(|&r| r as f64 == snap.sample_rate);
+            let cur = rates.iter().position(|&r| r as f64 == span_rate(sc, snap));
             let next = cur.map_or(0, |i| (i + 1) % rates.len());
             out.sample_rate = Some(rates[next]);
             sc.want_view = None;
