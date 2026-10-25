@@ -57,6 +57,8 @@ pub struct Device {
     /// An FDM-DUO running an image this open uploaded, out of stand-alone.
     /// See [`crate::remote`].
     remote: bool,
+    /// The last `GI` answer traced. See `radio_transmitting`.
+    last_gi: std::sync::Mutex<String>,
     trace: Trace,
 }
 
@@ -106,6 +108,7 @@ impl Device {
             warnings: Vec::new(),
             started: false,
             remote: false,
+            last_gi: std::sync::Mutex::new(String::new()),
             trace: trace.clone(),
         };
 
@@ -560,6 +563,14 @@ impl Device {
     /// Whether the DUO says it is transmitting, from its `GI` status.
     fn radio_transmitting(&self) -> Result<bool> {
         let answer = self.cat_query("GI;")?;
+        // Traced when it changes: what the radio reports here is the
+        // evidence interlock #11 stands on.
+        let mut last = self.last_gi.lock().unwrap_or_else(|e| e.into_inner());
+        if *last != answer {
+            self.trace.note(format!("GI answered {answer:?}"));
+            last.clone_from(&answer);
+        }
+        drop(last);
         gi_transmitting(&answer).ok_or_else(|| {
             Error::Access(format!("the FDM-DUO's GI answer {answer:?} could not be read"))
         })
