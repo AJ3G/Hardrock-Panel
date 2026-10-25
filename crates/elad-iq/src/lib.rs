@@ -40,10 +40,10 @@
 //! `EladConfig::sample_rate_hz` really is a command, issued once per open.
 //!
 //! On the FDM-DUO the radio boots its own stand-alone image at 192 kHz, and a
-//! wider rate is a remote image the host uploads over USB and holds with
-//! `IQ1;` — see [`remote`], decoded from a capture of SDR Console doing it. The
-//! driver still measures the throughput a couple of seconds in and says so if
-//! it disagrees with the setting (see `handle::RxStats::check_rate`).
+//! wider rate is a remote image the host uploads over USB — see [`remote`],
+//! decoded from captures of SDR Console doing it. The driver still measures
+//! the throughput a couple of seconds in and says so if it disagrees with the
+//! setting (see `handle::RxStats::check_rate`).
 //!
 //! # Provenance
 //!

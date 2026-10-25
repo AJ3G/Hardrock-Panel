@@ -155,10 +155,12 @@ impl Device {
         }
         dev.retune()?;
         dev.apply_front_end()?;
-        // Remote mode is held by `IQ1;`; SDR Console tunes once more after it
-        // and before the start.
+        // SDR Console sends `IQ1;` here, but that is the DUO's I/Q *transmit*
+        // mode (CAT manual v2.13 p51), which receiving does not need — and with
+        // it the HR500 was found keyed with its bias on (AJ3G, 25 Oct). So it
+        // is switched off rather than on. SAFETY: never send `IQ1;`.
         if dev.remote {
-            dev.cat_write("IQ1;")?;
+            dev.cat_write("IQ0;")?;
             dev.tune_word()?;
         }
         // On the FDM-DUO the start belongs here, at the end of the sequence
@@ -309,15 +311,6 @@ impl Device {
             t0.elapsed().as_secs_f32()
         ));
         Ok(())
-    }
-
-    /// Send `IQ1;`, which keeps an FDM-DUO in remote mode. Nothing to do in
-    /// stand-alone.
-    pub fn keep_remote(&self) -> Result<()> {
-        if !self.remote {
-            return Ok(());
-        }
-        self.cat_write("IQ1;")
     }
 
     /// Write the DDC tuning word for the current centre.
@@ -611,7 +604,7 @@ impl Device {
         if let Err(e) = r {
             self.trace.note(format!("stopping the stream failed: {e}"));
         }
-        // Lets the radio go back to stand-alone, as SDR Console does.
+        // I/Q transmit off on the way out, as SDR Console does.
         if self.remote
             && let Err(e) = self.cat_write("IQ0;")
         {

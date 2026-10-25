@@ -6,9 +6,9 @@
 //! The DUO boots its own FPGA, and the image it boots is the stand-alone one:
 //! the radio's own receiver and front panel, with a 192 kHz I/Q channel on the
 //! side. Every wider rate is a *remote* image that the host uploads over USB,
-//! after which the radio stays in remote mode for as long as the host keeps
-//! sending it `IQ1;`. Nothing in the radio's menus selects a rate, which is why
-//! a DUO left alone reads 192 kHz whatever SPAN asks for.
+//! and the radio then streams at that rate. Nothing in the radio's menus
+//! selects a rate, which is why a DUO left alone reads 192 kHz whatever SPAN
+//! asks for.
 //!
 //! # Where this comes from
 //!
@@ -28,6 +28,14 @@
 //! CAT CF…; IQ1;  tune again;  E1 E9 val 1 start
 //! CAT IQ1; about every eight seconds while streaming, IQ0; on the way out
 //! ```
+//!
+//! # Not `IQ1;`
+//!
+//! SDR Console's `IQ1;` is the DUO's I/Q *transmit* mode (the CAT manual,
+//! v2.13 p51: TX audio from the I/Q stream, timing out unless resent). It is
+//! how SDR Console transmits, not what holds the wide image, and on AJ3G's
+//! station the HR500 was found keyed with its bias on after a wide open. This
+//! crate never sends it; it sends `IQ0;` after the load and on the way out.
 //!
 //! # The images are ELAD's
 //!
@@ -49,15 +57,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 /// The rate the DUO streams at without a host-loaded image.
 pub const STANDALONE_RATE_HZ: u32 = 192_000;
-
-/// How often `IQ1;` is sent while a remote image streams. SDR Console sends it
-/// every four to eight seconds; nothing says how long the radio waits for it,
-/// so this sits inside the shortest gap seen.
-pub const KEEPALIVE: Duration = Duration::from_secs(4);
 
 /// Bytes per upload request.
 pub const CHUNK: usize = 64;
