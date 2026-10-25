@@ -161,6 +161,7 @@ impl Device {
         // is switched off rather than on. SAFETY: never send `IQ1;`.
         if dev.remote {
             dev.cat_write("IQ0;")?;
+            std::thread::sleep(crate::remote::SETTLE_BEFORE_START);
             dev.tune_word()?;
         }
         // On the FDM-DUO the start belongs here, at the end of the sequence
@@ -281,6 +282,7 @@ impl Device {
         }
         for attempt in 1..=crate::remote::LOAD_ATTEMPTS {
             if self.load_once(upload, attempt)? {
+                std::thread::sleep(crate::remote::SETTLE_BEFORE_TUNE);
                 return Ok(());
             }
         }

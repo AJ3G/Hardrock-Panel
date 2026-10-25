@@ -66,6 +66,12 @@ pub const STANDALONE_RATE_HZ: u32 = 192_000;
 /// goes in. SDR Console waits 205 to 222 ms in every capture.
 pub const ERASE_WAIT: Duration = Duration::from_millis(250);
 
+/// The quiet after a load that SDR Console keeps, in every capture: about
+/// 1.05 s to its first tune and 2.3 to 2.8 s to the stream's start. Kept
+/// here as two waits either side of the front-end commands.
+pub const SETTLE_BEFORE_TUNE: Duration = Duration::from_millis(1100);
+pub const SETTLE_BEFORE_START: Duration = Duration::from_millis(1500);
+
 /// How many times an image is sent before the open gives up.
 pub const LOAD_ATTEMPTS: u32 = 2;
 
