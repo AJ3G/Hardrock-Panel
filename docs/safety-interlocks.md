@@ -119,6 +119,8 @@ Before removing or loosening any of these, read why it is there.
 
 ## 11. The DUO's IQ1 only with a transmit check either side
 
+- **Now (25 Oct 2026, later):** `IQ1;` is not sent at all. The DUO streamed 384 kHz without it once the FIFO was stopped and initialised after the load, and the `GI;` read this check needs went unanswered after an `IQ1;`. The driver sends `IQ0;` after every load and on close. The check below stays in the code for the case it comes back.
+
 - **Where:** `crates/elad-iq/src/device.rs`, `Device::hold_remote()`; called at a wide open and every 4 s from the stream (`crates/elad-iq/src/stream.rs`).
 - **Why:** with a wide image loaded (E5 10) the DUO left stand-alone but sent no samples until it had `IQ1;`, as SDR Console sends (AJ3G, 25 Oct 2026). The CAT manual calls `IQ1;` I/Q transmit mode, and a build that sent it unchecked was followed by the HR500 found keyed with no drive (that build's loads were failing too, which may have been the cause).
 - **What it does:** `IQ1;` goes only to a DUO running an image the panel loaded. It is not sent while the panel sees a transmission (`IQ0;` instead, so the operator's own transmission takes its normal audio) or while the DUO's `GI;` says it transmits. After each one the panel reads `GI;` again: if the radio says it transmits, or the answer can't be read, it sends `IQ0;` and `RX;`, closes the stream, and SPAN above 192 kHz stays off until the panel restarts. The first one is followed by `RX;`, as SDR Console does.

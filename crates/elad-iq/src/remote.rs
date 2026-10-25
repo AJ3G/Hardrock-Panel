@@ -40,6 +40,9 @@
 //! `Device::hold_remote`. If the radio ever says it transmits after one,
 //! wide SPAN is off until the program restarts ([`tripped`]).
 //!
+//! Later the same night the DUO streamed 384 kHz with no `IQ1;` once the FIFO
+//! was stopped and initialised after the load, so `IQ1;` is not sent now.
+//!
 //! # The images are ELAD's
 //!
 //! They are not in this crate and must not be. They are read at run time out

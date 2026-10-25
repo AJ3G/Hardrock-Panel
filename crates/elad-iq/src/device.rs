@@ -165,23 +165,24 @@ impl Device {
 
         // The order below is the whole reason this is one function. See the
         // module header.
-        // SDR Console sends neither after a load, so neither is sent here.
-        if model == Model::Duo && !dev.remote {
+        // SDR Console sends neither after a load, and on d6d0cc0, without
+        // them, a loaded 384 kHz image (E5 10) sent nothing. A later open
+        // with them, onto the image still in the radio, streamed 384 kHz
+        // with no `IQ1;` at all (AJ3G, 25 Oct, dfee020). So they are sent
+        // after a load too.
+        if model == Model::Duo {
             dev.duo_fifo(DuoSub::FifoRun, 0, "stop FIFO")?;
             dev.duo_fifo(DuoSub::FifoInit, 0, "init FIFO")?;
         }
         dev.retune()?;
         dev.apply_front_end()?;
-        // SDR Console sends `IQ1;` and `RX;` here, then tunes and starts. With
-        // the image loaded (E5 10) and no `IQ1;` the DUO left stand-alone but
-        // sent nothing (AJ3G, 25 Oct, d6d0cc0), so it is sent, behind
-        // SAFETY INTERLOCK #11: see `hold_remote`.
+        // SDR Console sends `IQ1;` here, then tunes and starts. The FIFO stop
+        // and init above are tried in its place: `IQ1;` is also the DUO's I/Q
+        // transmit mode, and the check that guarded it (`hold_remote`) could
+        // not read the radio's state reliably. `IQ0;` makes sure it is off.
         if dev.remote {
+            dev.cat_write("IQ0;")?;
             std::thread::sleep(crate::remote::SETTLE_BEFORE_START);
-            if let Err(e) = dev.hold_remote(true) {
-                dev.shutdown();
-                return Err(e);
-            }
             dev.tune_word()?;
         }
         // On the FDM-DUO the start belongs here, at the end of the sequence
@@ -597,6 +598,10 @@ impl Device {
     ///   if the radio now says it transmits, `IQ0;` and `RX;` go out and this
     ///   fails, which closes the stream;
     /// - any failure to read `GI` fails the same way, after `IQ0;`.
+    ///
+    /// Not called at present: the FIFO stop and init after a load are being
+    /// tried instead (see `open`). Kept for the bench result that decides.
+    #[allow(dead_code)]
     pub fn hold_remote(&self, opening: bool) -> Result<()> {
         if !self.remote {
             return Ok(());

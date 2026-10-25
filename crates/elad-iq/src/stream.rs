@@ -221,7 +221,6 @@ fn pump(
     let mut said_tune_poll_failed = false;
     let mut last_tune_status: Option<u8> = None;
     let mut said_tune_answered = false;
-    let mut last_hold = Instant::now();
 
     for _ in 0..IN_FLIGHT {
         ep.submit(ep.allocate(TRANSFER_BYTES));
@@ -311,17 +310,6 @@ fn pump(
                     }
                 }
             }
-        }
-
-        // 1c. Keep an FDM-DUO's remote image streaming with `IQ1;`, behind
-        //     SAFETY INTERLOCK #11 (`Device::hold_remote`), whose failure ends
-        //     the stream.
-        if dev.remote() && last_hold.elapsed() >= crate::remote::HOLD_EVERY {
-            last_hold = Instant::now();
-            while ep.pending() < IN_FLIGHT {
-                ep.submit(ep.allocate(TRANSFER_BYTES));
-            }
-            dev.hold_remote(false)?;
         }
 
         // 2. Refill before draining, so the queue is never empty while the
