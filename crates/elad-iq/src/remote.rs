@@ -177,14 +177,16 @@ pub fn transmitting() -> bool {
 /// Set when the DUO said it transmitted after an `IQ1;`. SAFETY INTERLOCK
 /// (#11): from then on no remote image is loaded and no `IQ1;` sent until the
 /// program restarts.
-static TRIPPED: AtomicBool = AtomicBool::new(false);
+static TRIPPED: Mutex<Option<String>> = Mutex::new(None);
 
-pub(crate) fn trip() {
-    TRIPPED.store(true, Ordering::Relaxed);
+/// Trip it, with what the radio answered, for every later open to repeat.
+pub(crate) fn trip(why: String) {
+    *TRIPPED.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
 }
 
-pub fn tripped() -> bool {
-    TRIPPED.load(Ordering::Relaxed)
+/// Why it tripped, if it has.
+pub fn tripped() -> Option<String> {
+    TRIPPED.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Whether this process has put the radio in remote mode, so a later open at

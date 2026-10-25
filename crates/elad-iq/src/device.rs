@@ -117,11 +117,14 @@ impl Device {
 
         // An FDM-DUO streams 192 kHz in stand-alone; anything wider is an image
         // uploaded now. Without one the stream is read at what it really is.
-        if model == Model::Duo && crate::remote::wanted(dev.rate_hz) && crate::remote::tripped() {
+        let tripped = crate::remote::tripped();
+        if model == Model::Duo
+            && crate::remote::wanted(dev.rate_hz)
+            && let Some(why) = tripped
+        {
             // SAFETY INTERLOCK #11: see `hold_remote`.
             let w = format!(
-                "SPAN above {} kHz is off until the panel restarts: the FDM-DUO went to \
-                 transmit after IQ1.",
+                "SPAN above {} kHz is off until the panel restarts: {why}",
                 crate::remote::STANDALONE_RATE_HZ / 1000
             );
             dev.rate_hz = crate::remote::STANDALONE_RATE_HZ;
@@ -560,8 +563,9 @@ impl Device {
         Ok(Some(decode_cat_reply(&reply)))
     }
 
-    /// Whether the DUO says it is transmitting, from its `GI` status.
-    fn radio_transmitting(&self) -> Result<bool> {
+    /// Whether the DUO says it is transmitting, from its `GI` status, with the
+    /// answer it gave.
+    fn radio_transmitting(&self) -> Result<(bool, String)> {
         let answer = self.cat_query("GI;")?;
         // Traced when it changes: what the radio reports here is the
         // evidence interlock #11 stands on.
@@ -571,9 +575,12 @@ impl Device {
             last.clone_from(&answer);
         }
         drop(last);
-        gi_transmitting(&answer).ok_or_else(|| {
-            Error::Access(format!("the FDM-DUO's GI answer {answer:?} could not be read"))
-        })
+        match gi_transmitting(&answer) {
+            Some(tx) => Ok((tx, answer)),
+            None => {
+                Err(Error::Access(format!("the FDM-DUO's GI answer {answer:?} could not be read")))
+            }
+        }
     }
 
     /// Send `IQ1;`, which an FDM-DUO running a remote image needs (SDR Console
@@ -597,34 +604,39 @@ impl Device {
         if crate::remote::transmitting() {
             return self.cat_write("IQ0;");
         }
-        match self.radio_transmitting() {
-            Ok(false) => {}
-            Ok(true) => {
+        let before = match self.radio_transmitting() {
+            Ok((false, a)) => a,
+            Ok((true, _)) => {
                 self.trace.note("IQ1 held back: the DUO says it is transmitting");
                 return self.cat_write("IQ0;");
             }
             Err(e) => return Err(self.drop_iq(e)),
-        }
+        };
         self.cat_write("IQ1;")?;
         if opening {
             self.cat_write("RX;")?;
         }
         match self.radio_transmitting() {
-            Ok(false) => Ok(()),
-            Ok(true) => {
-                crate::remote::trip();
+            Ok((false, _)) => Ok(()),
+            Ok((true, after)) => {
+                let why = format!(
+                    "the FDM-DUO's GI said it went to transmit after IQ1 (before {before:?}, \
+                     after {after:?})."
+                );
+                crate::remote::trip(why.clone());
                 let _ = self.cat_write("IQ0;");
                 let _ = self.cat_write("RX;");
-                let w = "The FDM-DUO went to transmit after IQ1: IQ0 and RX sent, the wide \
-                         stream closed, and SPAN above 192 kHz is off until the panel restarts. \
-                         Check the DUO and the amplifier."
-                    .to_string();
+                let w = format!(
+                    "IQ0 and RX sent, the wide stream closed, and SPAN above 192 kHz is off \
+                     until the panel restarts: {why} Check the DUO and the amplifier."
+                );
                 self.trace.note(&w);
                 Err(Error::Access(w))
             }
             Err(e) => {
-                crate::remote::trip();
-                Err(self.drop_iq(e))
+                let e = self.drop_iq(e);
+                crate::remote::trip(format!("after IQ1, {e}"));
+                Err(e)
             }
         }
     }
