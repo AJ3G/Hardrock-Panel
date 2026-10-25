@@ -201,21 +201,30 @@ radio.
 
 ## Band switching
 
-With the radio connected and **Amplifier follows the radio's band** ticked (it
-is, to start), the amplifier's band follows the radio's dial, as in SDRoxide.
-It changes only between transmissions: while there is RF in the amplifier the
-change waits, and goes out once you unkey. Untick it if the amplifier already
-gets its band over its own CAT or ACC cable.
+SETTINGS, Radio, **Amplifier band** says where the amplifier's band comes from:
+
+- **From the radio's cable to the amplifier**: the FDM-DUO sets it over the
+  interface cable between them, with the HR500's Transceiver menu on ELAD FDM
+  DUO. The panel sends no band.
+- **From this program, over the radio's CAT** (to start, as in SDRoxide): the
+  panel reads the radio's dial over its USB CAT port and sends it to the
+  amplifier when the band changes. Use it as a backup if the interface cable
+  fails, with the HR500's menu set to **Transceiver: None**. It changes only
+  between transmissions: while there is RF in the amplifier the change waits,
+  and goes out once you unkey.
+
+The line under the choice says which Transceiver menu setting it needs.
 
 **A radio cabled to the amplifier.** If the radio is also wired to the
 amplifier's ACC jack (the FDM-DUO's EXT IO, for example) and the HR500's
 **Transceiver** menu names that radio, the amplifier takes its band from the
 cable and puts back any other, whatever the panel's setting. The panel can't
 change that menu: the amplifier has no command for it. If DN or UP doesn't
-hold, the line along the top turns yellow and says so. To control the band
-from the panel, set the amplifier's menu to **Transceiver: None** and connect
-the radio under SETTINGS; **Amplifier follows the radio's band** then does
-what the cable did, and can be turned off.
+hold, the line along the top turns yellow and says so; **DISMISS** beside it
+hides the note until a band press holds again. To control the band from the
+panel, set the amplifier's menu to **Transceiver: None**, connect the radio
+under SETTINGS and set **Amplifier band** to this program; it then does what
+the cable did.
 
 With no radio connected, nothing tells the panel the radio's frequency, so it
 never changes the amplifier's band on its own. Switch bands with **DN** and

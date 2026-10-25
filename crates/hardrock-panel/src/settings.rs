@@ -245,14 +245,53 @@ pub(crate) fn settings_radio_tab(
                  digital-mode program. Taken at once, without APPLY.",
             );
         ui.end_row();
+
+        // Where the amplifier's band comes from. The HR500 takes it from the
+        // radio's cable when its Transceiver menu names a radio, and puts back
+        // any other; with the menu on None, from its USB serial port, which is
+        // this program. The panel can't set that menu (decision 13).
+        ui.label("Amplifier band");
+        let word = |follow: bool| {
+            if follow {
+                "From this program, over the radio's CAT"
+            } else {
+                "From the radio's cable to the amplifier"
+            }
+        };
+        ComboBox::from_id_salt("rig-band-source")
+            .width(260.0)
+            .selected_text(word(cfg.follow_band))
+            .show_styled(ui, |ui| {
+                for f in [false, true] {
+                    if ui.selectable_label(cfg.follow_band == f, word(f)).clicked() {
+                        cfg.follow_band = f;
+                    }
+                }
+            })
+            .response
+            .on_hover_text(
+                "The radio's cable: the FDM-DUO sets the HR500's band itself, over the \
+                 interface cable between them, with the HR500's Transceiver menu on ELAD FDM \
+                 DUO. This program: the panel reads the radio's frequency over its USB CAT \
+                 port and sends it to the amplifier when the band changes, as SDRoxide does, \
+                 held until the amplifier shows no RF so a band relay never switches \
+                 mid-transmission. A backup for when the interface cable fails; set the \
+                 HR500's Transceiver menu to None for it, or the amplifier keeps the cable's \
+                 band.",
+            );
+        ui.end_row();
+        ui.label("");
+        ui.label(
+            RichText::new(if cfg.follow_band {
+                "On the HR500: MENU, Transceiver, None."
+            } else {
+                "On the HR500: MENU, Transceiver, ELAD FDM DUO."
+            })
+            .size(11.0)
+            .color(theme::CYAN()),
+        );
+        ui.end_row();
     });
-    ui.add_space(4.0);
-    chrome::checkbox(ui, &mut cfg.follow_band, "Amplifier follows the radio's band").on_hover_text(
-        "Sends the radio's frequency to the amplifier when it moves to another band, \
-             as SDRoxide does. Held until the amplifier shows no RF, so a band relay never \
-             switches mid-transmission. Leave it off if the amplifier already gets the band \
-             over its own CAT or ACC cable.",
-    );
     ui.add_space(8.0);
     let (text, col) = match status {
         None => ("Off".to_string(), theme::TEXT()),

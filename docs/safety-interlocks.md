@@ -28,7 +28,7 @@ Before removing or loosening any of these, read why it is there.
 - **When:** the panel holds it while the radio reports transmitting (FDM-DUO `FP` with a trusted reading) or the amplifier shows drive of 0.1 W or more or output of 1 W or more. The link then holds it again until a status read just before sending shows no transmission, no drive and no output; no answer counts as not safe, as in #1. It is tried again every half second and sent once the amplifier is clear.
 - **Why:** a band change switches the low-pass filter relays; under full power that arcs the contacts and can leave the output devices driving an open or wrong filter. The band is sent as soon as the transmission ends.
 - **Not with a transverter:** while a transverter LO is set in the radio window, the radio's dial is an IF, so the band is not sent at all (`follow_band()`).
-- **Only when:** a radio is connected under SETTINGS and "Amplifier follows the radio's band" is ticked. Without one, the band changes only with DN and UP, which #1 and #2 guard, or over the amplifier's own CAT or ACC input.
+- **Only when:** a radio is connected under SETTINGS and Amplifier band is "From this program, over the radio's CAT". Without one, the band changes only with DN and UP, which #1 and #2 guard, or over the amplifier's own CAT or ACC input.
 
 ## 4. No OFF to PTT while the drive is over the amplifier's limit (panel and link)
 

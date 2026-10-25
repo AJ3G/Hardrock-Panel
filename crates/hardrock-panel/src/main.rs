@@ -162,6 +162,9 @@ struct App {
     /// The last band press here was undone by the amplifier: its band is
     /// set by the radio's cable (decision 13).
     band_held: bool,
+    /// The operator dismissed the band-held note; it stays away until a
+    /// band press here sticks again.
+    band_dismissed: bool,
     /// TUNE's tone, and the sound outputs it can play on.
     tone: audio::Tone,
     sounds: Vec<String>,
@@ -265,6 +268,7 @@ impl App {
             amp_was_connected: false,
             band_press: None,
             band_held: false,
+            band_dismissed: false,
             tone: audio::Tone::default(),
             sounds: audio::output_devices(),
             tone_asked: None,
@@ -503,6 +507,9 @@ impl App {
             let now = r.and_then(|r| r.band);
             if before.is_some() && now.is_some() {
                 self.band_held = now == before;
+                if !self.band_held {
+                    self.band_dismissed = false;
+                }
             }
         }
     }
@@ -1147,7 +1154,7 @@ impl eframe::App for App {
                             ),
                             theme::YELLOW(),
                         )
-                    } else if self.band_held {
+                    } else if self.band_held && !self.band_dismissed {
                         (
                             "Band held by the radio's cable. To switch it here, set the HR500's \
                              Transceiver menu to None."
@@ -1168,16 +1175,25 @@ impl eframe::App for App {
                              menu. SDRoxide keyed the radio with an ordinary transmission \
                              (TX), which the panel's TUNE also uses.",
                         );
-                    } else if self.band_held {
+                    } else if self.band_held && !self.band_dismissed {
                         notice.on_hover_text(
                             "DN or UP was pressed and the amplifier went straight back to its \
                              band. With its Transceiver menu set to a radio (ELAD FDM DUO here), \
                              the HR500 takes its band from the radio's cable and puts back any \
                              other. Its firmware has no command to change that menu, so it is \
                              set on the amplifier: MENU, Transceiver, None. With the FDM-DUO \
-                             connected under SETTINGS, the panel can follow the radio's band \
-                             instead, and that can be turned off.",
+                             connected under SETTINGS, Amplifier band can be set to come \
+                             from this program instead, as a backup to the cable.",
                         );
+                        if chrome::chip(ui, false, "DISMISS")
+                            .on_hover_text(
+                                "Hide this note. It comes back only after a band press here \
+                                 works and a later one is undone again.",
+                            )
+                            .clicked()
+                        {
+                            self.band_dismissed = true;
+                        }
                     }
                 });
             });
