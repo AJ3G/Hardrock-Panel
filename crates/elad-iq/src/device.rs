@@ -159,6 +159,17 @@ impl Device {
                     dev.warnings.push(w);
                 }
             }
+        } else if model == Model::Duo {
+            // A remote split left from an earlier run (or another program)
+            // keeps the DUO's band keys stuck, and its SPLIT key does not
+            // clear it (AJ3G, 25 Oct). Only `SP0;` does. ELAD's manual numbers
+            // remote and stand-alone split one way for `SP` and the other for
+            // `GI`, so any split is cleared; the panel does not use split.
+            match dev.cat_query("SP;") {
+                Ok(a) if a.starts_with("SP") && !a.starts_with("SP0") => dev.split_off(),
+                Ok(a) => dev.trace.note(format!("split {a:?}")),
+                Err(e) => dev.trace.note(format!("SP not read: {e}")),
+            }
         }
 
         if let Some(w) = fpga_warning {
