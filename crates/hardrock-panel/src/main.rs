@@ -99,6 +99,8 @@ struct Saved {
     audio_out: Option<String>,
     /// The radio's window was popped out into its own.
     radio_popped: bool,
+    /// The amplifier's panel was popped out into its own (AJ3G, 25 Oct 2026).
+    amp_popped: bool,
     /// The meters' needle picks (see [`AmpMeters::saved`]).
     meters: Option<[u8; 4]>,
     /// The panel's receiver and where its I/Q comes from (decision 22).
@@ -127,6 +129,7 @@ impl Default for Saved {
             drive: tune::DEFAULT_DRIVE,
             audio_out: None,
             radio_popped: false,
+            amp_popped: false,
             meters: None,
             rx: rx::RxSettings::default(),
             scope: scope::ScopeSettings::default(),
@@ -1213,15 +1216,67 @@ impl eframe::App for App {
             self.do_tune(t, &amp_raw, r);
         }
 
-        let out = egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
-            .show(ui, |ui| {
-                chrome::window_body_bg(ui);
-                panel::fit_panel(ui, |ui, scale| {
-                    panel::amp_panel(ui, &st, &mut self.view, None, Some(scale))
+        let popped = self.saved.amp_popped;
+        let mut out = if popped {
+            // Painted in place: no background GPU submit meanwhile (gpu_gate).
+            let _shut = gpu_gate::shut();
+            let (st, view) = (&st, &mut self.view);
+            let mut out = panel::PanelOut::default();
+            let closed = ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("amp-window"),
+                egui::ViewportBuilder::default()
+                    .with_title(st.model.label())
+                    .with_inner_size([760.0, 720.0])
+                    .with_min_inner_size([520.0, 420.0]),
+                |ui, _class| {
+                    out = egui::CentralPanel::default()
+                        .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
+                        .show(ui, |ui| {
+                            chrome::window_body_bg(ui);
+                            panel::fit_panel(ui, |ui, scale| {
+                                panel::amp_panel(ui, st, view, Some(true), Some(scale))
+                            })
+                        })
+                        .inner;
+                    ui.ctx().input(|i| i.viewport().close_requested())
+                },
+            );
+            // Closing its window docks it: the amplifier is never out of
+            // sight altogether.
+            out.pop |= closed;
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
+                .show(ui, |ui| {
+                    chrome::window_body_bg(ui);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("The amplifier is in a window of its own.")
+                                .size(12.0)
+                                .color(theme::CYAN()),
+                        );
+                        if chrome::chip(ui, false, "DOCK")
+                            .on_hover_text("Put the AMP window back inside the main window")
+                            .clicked()
+                        {
+                            out.pop = true;
+                        }
+                    });
+                });
+            out
+        } else {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
+                .show(ui, |ui| {
+                    chrome::window_body_bg(ui);
+                    panel::fit_panel(ui, |ui, scale| {
+                        panel::amp_panel(ui, &st, &mut self.view, Some(false), Some(scale))
+                    })
                 })
-            })
-            .inner;
+                .inner
+        };
+        if std::mem::take(&mut out.pop) {
+            self.saved.amp_popped = !popped;
+        }
         if let Some(link) = &self.link {
             for &a in &out.actions {
                 link.action(a);

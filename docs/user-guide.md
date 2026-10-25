@@ -242,6 +242,12 @@ six soft keys under the screen, each with its label above it. Everything
 below is the same in either look; only the drawing changes. Without a
 radio the window keeps its own look.
 
+**Its own window.** **POP OUT**, at the top right of the amplifier's panel,
+moves it into a window of its own, to put on another screen; **DOCK** there,
+or in the main window while it is out, puts it back. Closing its window
+docks it too, so the amplifier is never hidden. The choice is kept between
+runs.
+
 **What can be clicked.** Anything in the window that does something when
 clicked shows a pointing hand and a white outline when the mouse is over it.
 If the outline appears, it's a control; if it doesn't, it's only a display.
