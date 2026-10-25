@@ -264,6 +264,16 @@ impl RxStats {
                 d(*a).partial_cmp(&d(*b)).unwrap_or(std::cmp::Ordering::Equal)
             })
             .unwrap_or(crate::types::ELAD_DEFAULT_RATE_HZ);
+        // A DUO this program gave a wide image keeps it when 192 kHz is asked
+        // for: nothing found yet puts it back but a power cycle (AJ3G, 25 Oct).
+        if self.model == Model::Duo && crate::remote::went_remote() {
+            return Some(format!(
+                "the FDM-DUO is still running the {:.0} kHz image it was given, so the stream \
+                 arrives at that rate. Power-cycle the DUO to put it back in stand-alone at \
+                 192 kHz.",
+                nearest as f64 / 1000.0,
+            ));
+        }
         let remedy = if self.model.needs_fpga_load() {
             format!(
                 "the rate is decided by which FPGA image is loaded, so either ELAD's \

@@ -263,7 +263,14 @@ fn pump(
         //     only its own front panel can make the answer differ from what we
         //     last commanded.
         let tune_poll_every = TUNE_POLL * (1 << tune_poll_failures.min(TUNE_POLL_BACKOFF_MAX));
-        if shared.read_dial.load(Ordering::Relaxed) && last_tune_poll.elapsed() >= tune_poll_every {
+        //     Not on a DUO running a remote image: its read-back then reports
+        //     VFO B, the operating frequency, while the I/Q centre is the one
+        //     this driver set, and following it walked the centre between the
+        //     two (AJ3G, 25 Oct).
+        if shared.read_dial.load(Ordering::Relaxed)
+            && !dev.remote()
+            && last_tune_poll.elapsed() >= tune_poll_every
+        {
             last_tune_poll = Instant::now();
             match dev.read_tuned() {
                 Ok(Some(t)) => {
