@@ -451,6 +451,9 @@ pub(crate) struct Rx {
     reopened_at: Option<Instant>,
     /// What the stream watchdog did, for the scope window.
     pub watchdog: Option<String>,
+    /// The watchdog lost the stream and hasn't opened it again yet: a
+    /// reopen that fails is tried again on its timer, whatever the error.
+    lost: bool,
     /// The slices last given the pipeline, and each one's sound output (or
     /// why it couldn't be opened) by id, with the device asked for.
     slices_sent: Option<Vec<SliceSpec>>,
@@ -495,6 +498,7 @@ impl Default for Rx {
             tx_at: None,
             reopened_at: None,
             watchdog: None,
+            lost: false,
             slices_sent: None,
             slice_audio: Vec::new(),
             audio_checked: None,
@@ -667,6 +671,13 @@ impl Rx {
             match rx.try_recv() {
                 Ok(Ok(h)) => {
                     self.opening = None;
+                    if self.lost {
+                        self.lost = false;
+                        self.watchdog = Some(format!(
+                            "The ELAD's stream was lost and opened again at {}.",
+                            clock_now()
+                        ));
+                    }
                     // The DUO's knob moves its I/Q: follow it over USB.
                     h.follow_radio_dial(true);
                     self.notes = h.warnings.clone();
@@ -696,15 +707,29 @@ impl Rx {
             self.tx_at = Some(Instant::now());
         }
         // An ELAD that has gone from USB (unplugged, or dropped off the bus,
-        // as RF on the USB lead during a transmission can make it): looked
-        // for again on the watchdog's timer, never while transmitting (#10).
+        // as RF on the USB lead during a transmission can make it), or whose
+        // lost stream wouldn't open again: looked for again on the
+        // watchdog's timer, never while transmitting (#10). A stream that
+        // ended and failed to reopen stayed down until the panel was
+        // restarted (AJ3G, 25 Oct 2026).
         if self.running == IqChoice::Elad
             && self.pipeline.is_none()
             && self.opening.is_none()
             && !now.transmitting
-            && self.error.as_deref().is_some_and(|e| e.contains("no ELAD"))
+            && self
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("no ELAD") || (self.lost && !e.starts_with("Waiting")))
             && self.reopened_at.is_none_or(|t| t.elapsed() >= REOPEN_EVERY)
         {
+            if self.lost {
+                self.watchdog = Some(format!(
+                    "The ELAD's stream was lost; trying to open it every 20 s, last at {}. \
+                     TRY AGAIN tries now. If it keeps failing, unplug the radio's USB lead \
+                     and plug it back in.",
+                    clock_now()
+                ));
+            }
             self.start(s, scope, now);
             self.reopened_at = Some(Instant::now());
         }
@@ -805,7 +830,8 @@ impl Rx {
         let due = self.reopened_at.is_none_or(|t| t.elapsed() >= REOPEN_EVERY);
         if (!alive || quiet >= STREAM_SILENT) && due {
             let why = if alive { "stopped sending I/Q" } else { "stream ended" };
-            let msg = format!("The ELAD {why}; opened it again at {}.", clock_now());
+            let msg = format!("The ELAD {why} at {}; opening it again.", clock_now());
+            self.lost = true;
             self.start(s, scope, now);
             self.reopened_at = Some(Instant::now());
             self.heard = (0, Instant::now());
@@ -1490,6 +1516,25 @@ mod tests {
         rx.frame(&mut s, &scope, now(false));
         assert!(rx.error.is_none());
         assert_eq!(rx.source(), IqChoice::Demo);
+    }
+
+    #[test]
+    fn a_lost_stream_that_fails_to_reopen_is_tried_again() {
+        let scope = Scope::new(None, crate::scope::ScopeSettings::default());
+        // The retry starts the demo, standing in for the ELAD coming back.
+        let mut s = RxSettings { source: IqChoice::Demo, ..RxSettings::default() };
+        let mut rx = Rx::new(&s);
+        rx.running = IqChoice::Elad;
+        rx.lost = true;
+        rx.error = Some("the ELAD device is busy".into());
+        rx.reopened_at = Some(Instant::now());
+        rx.frame(&mut s, &scope, now(false));
+        assert!(rx.pipeline.is_none(), "tried again before the timer");
+        rx.reopened_at = Instant::now().checked_sub(REOPEN_EVERY);
+        rx.frame(&mut s, &scope, now(false));
+        assert!(rx.error.is_none());
+        assert_eq!(rx.source(), IqChoice::Demo);
+        assert!(rx.watchdog.as_deref().is_some_and(|w| w.contains("every 20 s")));
     }
 
     /// FT8 on the air, as I/Q in real time: each slot from 0.5 s, one

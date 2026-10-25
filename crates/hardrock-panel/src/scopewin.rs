@@ -143,6 +143,17 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
         }
         if rx.error.is_some() && chrome::chip(ui, false, "TRY AGAIN").clicked() {
             out.reopen = true;
+        } else if rx.error.is_none()
+            && rx.source() == IqChoice::Elad
+            && !rx.opening()
+            && chrome::chip(ui, false, "REOPEN")
+                .on_hover_text(
+                    "Close the ELAD's I/Q and open it again, as at start, without closing the \
+                     panel. Waits if the radio is transmitting.",
+                )
+                .clicked()
+        {
+            out.reopen = true;
         }
         if let Some(log) = elad_iq::diagnostics()
             && chrome::chip(ui, false, "COPY ELAD LOG")

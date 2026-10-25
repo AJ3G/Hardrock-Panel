@@ -357,7 +357,12 @@ with APPLY:
   own FDM-SW2 can't see it until its driver is put back. If it won't open, the
   scope's I/Q line says why in the driver's words, with **TRY AGAIN**. The
   panel waits a few seconds for the CAT link to read VFO A and opens the I/Q
-  there, so opening doesn't move the radio.
+  there, so opening doesn't move the radio. While it runs, **REOPEN** on the
+  same line closes the I/Q and opens it again without closing the panel. If
+  the stream stops, the panel opens it again by itself (never while
+  transmitting) and keeps trying every 20 s until it is back; the yellow line
+  under it says when. If it keeps failing, unplug the radio's I/Q USB lead
+  and plug it back in.
 - **Demo signals**: a made-up band to try the scope, DECODE and the
   skimmers with no radio. On whichever band you tune to there are made-up
   FT8, FT4, JT9 and JTTY stations on that band's dials (14.074, 14.080,
