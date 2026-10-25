@@ -65,10 +65,55 @@ pub(super) fn soft_keys(
                 egui::StrokeKind::Outside,
             );
         }
-        if resp.clicked() {
-            press(sc, k, snap, out);
+        if *k == "SPAN" {
+            span_menu(sc, ui, &resp, snap, out);
+        } else if resp.clicked() {
+            press(sc, k, snap);
         }
     }
+}
+
+/// SPAN's list: every rate, up or down, in one load. Stepping through each in
+/// turn loaded an image at every step, about 7 s each (AJ3G, 25 Oct).
+fn span_menu(
+    sc: &mut Scope,
+    ui: &mut egui::Ui,
+    resp: &egui::Response,
+    snap: &sdr::Snapshot,
+    out: &mut ScopeOut,
+) {
+    let cur = span_rate(sc, snap);
+    let mut picked = None;
+    chrome::menu_popup(ui, resp, |ui| {
+        chrome::menu_caption(ui, "SPAN · I/Q RATE · WIDTH SHOWN");
+        for &r in sdr::SUPPORTED_RATES.iter() {
+            if chrome::chip(ui, r as f64 == cur, span_choice(r as f64)).clicked() {
+                picked = Some(r);
+            }
+        }
+    });
+    if let Some(r) = picked {
+        egui::Popup::close_id(ui.ctx(), egui::Popup::default_response_id(resp));
+        if r as f64 != cur {
+            out.sample_rate = Some(r);
+            sc.want_view = None;
+        }
+    }
+}
+
+/// One line of SPAN's list: the rate and the width the scope shows of it.
+fn span_choice(rate: f64) -> String {
+    let fmt = |hz: f64| {
+        if hz >= 1e6 { format!("{:.3}M", hz / 1e6) } else { format!("{:.0}k", hz / 1e3) }
+    };
+    let shown = rate * super::USABLE_SPAN;
+    let shown = if shown >= 1e6 {
+        format!("{:.2} MHz", shown / 1e6)
+    } else {
+        format!("{:.1} kHz", shown / 1e3)
+    };
+    let own = if rate as u32 == elad_iq::STANDALONE_RATE_HZ { "  (the DUO's own)" } else { "" };
+    format!("{} · {shown}{own}", fmt(rate))
 }
 
 /// The rate the SPAN key shows and steps from: the stream's, or with none
@@ -100,7 +145,10 @@ fn key_label(sc: &Scope, k: &str, snap: &sdr::Snapshot) -> (String, bool) {
 
 fn key_help(k: &str) -> &'static str {
     match k {
-        "SPAN" => "The next IQ span (sample rate). Above 192 kHz the DUO mutes its own audio",
+        "SPAN" => {
+            "Pick the IQ span (sample rate). Above 192 kHz the DUO mutes its own audio, and \
+             each change loads an image into the radio, about 7 s"
+        }
         "FIT" => "Keep the floor just under the noise and the ceiling over the strongest signal",
         "SCALE" => "Levels in dBm, S-units, or both",
         "AVG" => "Average four frames",
@@ -115,16 +163,9 @@ fn key_help(k: &str) -> &'static str {
     }
 }
 
-fn press(sc: &mut Scope, k: &str, snap: &sdr::Snapshot, out: &mut ScopeOut) {
+fn press(sc: &mut Scope, k: &str, snap: &sdr::Snapshot) {
     let s = &mut sc.settings;
     match k {
-        "SPAN" => {
-            let rates = sdr::SUPPORTED_RATES;
-            let cur = rates.iter().position(|&r| r as f64 == span_rate(sc, snap));
-            let next = cur.map_or(0, |i| (i + 1) % rates.len());
-            out.sample_rate = Some(rates[next]);
-            sc.want_view = None;
-        }
         "FIT" => s.fit = !s.fit,
         "SCALE" => s.scale = s.scale.next(),
         "AVG" => s.avg = !s.avg,

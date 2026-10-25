@@ -243,7 +243,13 @@ fn title_bar(ui: &mut Ui, sh: &Shown, th: &AmpTheme) {
 
 /// Each meter's TOP and BOTTOM pickers, side by side over the meters.
 fn pick_row(ui: &mut Ui, view: &mut AmpMeters, th: &AmpTheme, s: f32) {
-    let rect = band(ui, th, 28.0 * s);
+    // As tall as the pickers measured last frame need. At a fixed 28 points
+    // they spilled out of the band and the meter faces covered their lower
+    // half (AJ3G, 25 Oct 2026).
+    let need = (0..2)
+        .filter_map(|i| ui.data(|d| d.get_temp::<f32>(egui::Id::new(("amp-pickers-height", i)))))
+        .fold(0.0f32, f32::max);
+    let rect = band(ui, th, (need + 8.0 * s).max(28.0 * s));
     let half = rect.width() / 2.0;
     ui.painter().vline(rect.center().x, rect.y_range(), Stroke::new(1.0, th.screen_line));
     let ink = PickInk {

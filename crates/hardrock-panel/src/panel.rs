@@ -1353,10 +1353,14 @@ fn pickers(ui: &mut egui::Ui, i: usize, pair: &mut Pair, s: f32, ink: &PickInk) 
     // A row of fixed height, each item centred in it. In `ui.horizontal`
     // the row grew at the first picker and everything after was centred
     // lower, BOTTOM a few points below TOP (AJ3G, 24 Oct 2026): a picker
-    // takes more room than its button shows. The height is the row's, as
-    // measured last frame.
+    // takes more room than its button shows. The height is the tallest
+    // picker's, as measured last frame, and never less than a picker's text
+    // and padding: measured as the row, it stayed at the row's own first
+    // guess, the pickers spilled out of it and the meter face covered their
+    // lower half (AJ3G, 25 Oct 2026).
     let row_id = egui::Id::new(("amp-pickers-height", i));
-    let row_h = ui.data(|d| d.get_temp::<f32>(row_id)).unwrap_or(ui.spacing().interact_size.y);
+    let least = ui.spacing().interact_size.y.max(pt + 2.0 * ui.spacing().button_padding.y + 6.0);
+    let row_h = ui.data(|d| d.get_temp::<f32>(row_id)).unwrap_or(0.0).max(least);
     ui.allocate_ui_with_layout(
         Vec2::new(ui.available_width(), row_h),
         egui::Layout::left_to_right(egui::Align::Center),
@@ -1364,14 +1368,17 @@ fn pickers(ui: &mut egui::Ui, i: usize, pair: &mut Pair, s: f32, ink: &PickInk) 
             ui.label(word("TOP"));
             let mut top = pair.top;
             dot(ui, ink.top, s);
-            egui::ComboBox::from_id_salt(("amp-top", i))
+            let top_h = egui::ComboBox::from_id_salt(("amp-top", i))
                 .width(64.0 * s)
                 .selected_text(RichText::new(top.label()).size(pt).color(ink.top_text))
                 .show_ui(ui, |ui| {
                     for m in AmpMeter::ALL {
                         ui.selectable_value(&mut top, m, m.label());
                     }
-                });
+                })
+                .response
+                .rect
+                .height();
             if top != pair.top {
                 pair.set_top(top);
             }
@@ -1380,7 +1387,7 @@ fn pickers(ui: &mut egui::Ui, i: usize, pair: &mut Pair, s: f32, ink: &PickInk) 
             let mut bottom = pair.bottom;
             let shown = bottom.map_or("none", |b| b.label());
             dot(ui, if bottom.is_some() { ink.bottom } else { ink.none }, s);
-            egui::ComboBox::from_id_salt(("amp-bottom", i))
+            let bottom_h = egui::ComboBox::from_id_salt(("amp-bottom", i))
                 .width(64.0 * s)
                 .selected_text(RichText::new(shown).size(pt).color(ink.bottom_text))
                 .show_ui(ui, |ui| {
@@ -1388,11 +1395,14 @@ fn pickers(ui: &mut egui::Ui, i: usize, pair: &mut Pair, s: f32, ink: &PickInk) 
                     for m in AmpMeter::ALL {
                         ui.selectable_value(&mut bottom, Some(m), m.label());
                     }
-                });
+                })
+                .response
+                .rect
+                .height();
             if bottom != pair.bottom {
                 pair.set_bottom(bottom);
             }
-            let h = ui.min_rect().height();
+            let h = top_h.max(bottom_h) + 2.0 * s;
             ui.data_mut(|d| d.insert_temp(row_id, h));
         },
     )
