@@ -250,7 +250,10 @@ impl AmpLimits {
             AmpGauge::Drive if !r.ptt => AmpLevel::Green,
             AmpGauge::Drive => above(r.drive_w, self.drive_warn_w, self.drive_trip_w),
             AmpGauge::Idd => above(r.idd_a, self.idd_warn_a, self.idd_trip_a),
-            AmpGauge::Temp => above(r.temp_c(), self.temp_warn_c, self.temp_red_c),
+            AmpGauge::Temp => match r.known_temp_c() {
+                Some(t) => above(t, self.temp_warn_c, self.temp_red_c),
+                None => AmpLevel::Green,
+            },
             // Zero means not measured yet.
             AmpGauge::Vdd if r.vdd_v > 0.0 && r.vdd_v < self.vdd_low_v => AmpLevel::Yellow,
             AmpGauge::Vdd => AmpLevel::Green,
@@ -268,7 +271,7 @@ impl AmpLimits {
 
     /// Hot enough that the amplifier has gone off line until it cools.
     pub fn over_temp(&self, r: &AmpReadings) -> bool {
-        r.temp_c() > self.temp_trip_c
+        r.known_temp_c().is_some_and(|t| t > self.temp_trip_c)
     }
 }
 
@@ -446,6 +449,14 @@ impl AmpReadings {
     pub fn temp_c(&self) -> f32 {
         if self.celsius == Some(false) { (self.temperature - 32.0) / 1.8 } else { self.temperature }
     }
+
+    /// The temperature in Celsius once the amplifier has said which scale it
+    /// reports in. Until then a Fahrenheit reading would be taken as
+    /// Celsius: 95 °F read as 95 °C showed "over temperature" for the first
+    /// seconds after the panel was started (AJ3G, 25 Oct 2026).
+    pub fn known_temp_c(&self) -> Option<f32> {
+        self.celsius.map(|_| self.temp_c())
+    }
 }
 
 /// The tuner, when there is one.
@@ -560,6 +571,10 @@ mod tests {
         assert_eq!(l.level(AmpGauge::Temp, &f(120.0)), AmpLevel::Yellow);
         assert_eq!(l.level(AmpGauge::Temp, &at(66.0)), AmpLevel::Red);
         assert!(!l.over_temp(&at(69.0)) && l.over_temp(&at(71.0)));
+        // Not before the amplifier has said its scale: 95 °F is no trip.
+        let unknown = AmpReadings { temperature: 95.0, celsius: None, ..AmpReadings::default() };
+        assert!(!l.over_temp(&unknown));
+        assert_eq!(l.level(AmpGauge::Temp, &unknown), AmpLevel::Green);
         let fwd = |w: f32| AmpReadings { fwd_w: w, ..AmpReadings::default() };
         assert_eq!(l.level(AmpGauge::Fwd, &fwd(500.0)), AmpLevel::Green);
         assert_eq!(l.level(AmpGauge::Fwd, &fwd(550.0)), AmpLevel::Yellow);

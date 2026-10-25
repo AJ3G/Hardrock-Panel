@@ -1520,7 +1520,7 @@ fn tiles(sh: &Shown) -> [Tile; 7] {
         frac(AmpMeter::Drv),
         frac(AmpMeter::Vdd),
         frac(AmpMeter::Idd),
-        r.temp_c() / limits.temp_trip_c,
+        r.known_temp_c().unwrap_or(0.0) / limits.temp_trip_c,
         // 1:1 to 5:1.
         if r.swr >= 1.0 { (r.swr - 1.0) / 4.0 } else { 0.0 },
     ];
