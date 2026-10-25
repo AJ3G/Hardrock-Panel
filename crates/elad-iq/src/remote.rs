@@ -29,13 +29,16 @@
 //! CAT IQ1; about every eight seconds while streaming, IQ0; on the way out
 //! ```
 //!
-//! # Not `IQ1;`
+//! # `IQ1;`, behind a check
 //!
-//! SDR Console's `IQ1;` is the DUO's I/Q *transmit* mode (the CAT manual,
-//! v2.13 p51: TX audio from the I/Q stream, timing out unless resent). It is
-//! how SDR Console transmits, not what holds the wide image, and on AJ3G's
-//! station the HR500 was found keyed with its bias on after a wide open. This
-//! crate never sends it; it sends `IQ0;` after the load and on the way out.
+//! The DUO's CAT manual (v2.13 p51) calls `IQ1;` I/Q *transmit* mode, timing
+//! out unless resent, and a build that sent it was followed by the HR500
+//! found keyed with no drive (that build's loads were also failing, which may
+//! have been the cause). Without it, a load that took (E5 10) left the radio
+//! out of stand-alone but sending nothing (AJ3G, 25 Oct). So it is sent as
+//! SDR Console sends it, behind SAFETY INTERLOCK #11: see
+//! `Device::hold_remote`. If the radio ever says it transmits after one,
+//! wide SPAN is off until the program restarts ([`tripped`]).
 //!
 //! # The images are ELAD's
 //!
@@ -71,6 +74,10 @@ pub const ERASE_WAIT: Duration = Duration::from_millis(250);
 /// here as two waits either side of the front-end commands.
 pub const SETTLE_BEFORE_TUNE: Duration = Duration::from_millis(1100);
 pub const SETTLE_BEFORE_START: Duration = Duration::from_millis(1500);
+
+/// How often `IQ1;` is resent while a remote image streams. SDR Console
+/// resends it every 7.6 s; nothing says how long the radio waits for it.
+pub const HOLD_EVERY: Duration = Duration::from_secs(4);
 
 /// How many times an image is sent before the open gives up.
 pub const LOAD_ATTEMPTS: u32 = 2;
@@ -165,6 +172,19 @@ pub fn set_transmitting(on: bool) {
 
 pub fn transmitting() -> bool {
     TRANSMITTING.load(Ordering::Relaxed)
+}
+
+/// Set when the DUO said it transmitted after an `IQ1;`. SAFETY INTERLOCK
+/// (#11): from then on no remote image is loaded and no `IQ1;` sent until the
+/// program restarts.
+static TRIPPED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn trip() {
+    TRIPPED.store(true, Ordering::Relaxed);
+}
+
+pub fn tripped() -> bool {
+    TRIPPED.load(Ordering::Relaxed)
 }
 
 /// Whether this process has put the radio in remote mode, so a later open at

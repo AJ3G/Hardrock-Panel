@@ -22,8 +22,9 @@ use crate::types::EladConfig;
 
 use crate::error::{Error, Result};
 use crate::protocol::{
-    CAT_FRAME_LEN, Calibration, DuoSub, DuoTuning, FRONT_END_ATTENUATOR, FRONT_END_FILTER, Model,
-    Request, STATUS_CAT_BUSY, TUNE_READ_LEN, decode_tune_read, eeprom, eeprom_f32, eeprom_i32,
+    CAT_FRAME_LEN, CAT_REPLY_LEN, Calibration, DuoSub, DuoTuning, FRONT_END_ATTENUATOR,
+    FRONT_END_FILTER, Model, Request, STATUS_CAT_BUSY, STATUS_CAT_REPLY, TUNE_READ_LEN,
+    decode_cat_reply, decode_tune_read, eeprom, eeprom_f32, eeprom_i32, gi_transmitting,
     s2_front_end_code, tune_request, tuning_word,
 };
 use crate::trace::Trace;
@@ -113,7 +114,17 @@ impl Device {
 
         // An FDM-DUO streams 192 kHz in stand-alone; anything wider is an image
         // uploaded now. Without one the stream is read at what it really is.
-        if model == Model::Duo && crate::remote::wanted(dev.rate_hz) {
+        if model == Model::Duo && crate::remote::wanted(dev.rate_hz) && crate::remote::tripped() {
+            // SAFETY INTERLOCK #11: see `hold_remote`.
+            let w = format!(
+                "SPAN above {} kHz is off until the panel restarts: the FDM-DUO went to \
+                 transmit after IQ1.",
+                crate::remote::STANDALONE_RATE_HZ / 1000
+            );
+            dev.rate_hz = crate::remote::STANDALONE_RATE_HZ;
+            dev.trace.note(&w);
+            dev.warnings.push(w);
+        } else if model == Model::Duo && crate::remote::wanted(dev.rate_hz) {
             match crate::remote::upload_for(dev.rate_hz) {
                 Ok(upload) => {
                     dev.load_remote(&upload)?;
@@ -155,13 +166,16 @@ impl Device {
         }
         dev.retune()?;
         dev.apply_front_end()?;
-        // SDR Console sends `IQ1;` here, but that is the DUO's I/Q *transmit*
-        // mode (CAT manual v2.13 p51), which receiving does not need — and with
-        // it the HR500 was found keyed with its bias on (AJ3G, 25 Oct). So it
-        // is switched off rather than on. SAFETY: never send `IQ1;`.
+        // SDR Console sends `IQ1;` and `RX;` here, then tunes and starts. With
+        // the image loaded (E5 10) and no `IQ1;` the DUO left stand-alone but
+        // sent nothing (AJ3G, 25 Oct, d6d0cc0), so it is sent, behind
+        // SAFETY INTERLOCK #11: see `hold_remote`.
         if dev.remote {
-            dev.cat_write("IQ0;")?;
             std::thread::sleep(crate::remote::SETTLE_BEFORE_START);
+            if let Err(e) = dev.hold_remote(true) {
+                dev.shutdown();
+                return Err(e);
+            }
             dev.tune_word()?;
         }
         // On the FDM-DUO the start belongs here, at the end of the sequence
@@ -494,6 +508,104 @@ impl Device {
         )
     }
 
+    /// Ask the radio a CAT question (`GI;`) and return its answer, up to the
+    /// `;`, as SDR Console reads them: the question, then the status until it
+    /// says an answer is waiting, then [`DuoSub::CatRead`].
+    pub fn cat_query(&self, cmd: &str) -> Result<String> {
+        self.cat_write(cmd)?;
+        for _ in 0..CAT_POLL_TRIES {
+            let status = self.usb.control_in(
+                Request::DuoGateway,
+                "cat status",
+                0,
+                DuoSub::Status.index(),
+                3,
+            )?;
+            if status.get(2).is_some_and(|b| b & STATUS_CAT_REPLY != 0) {
+                let reply = self.usb.control_in(
+                    Request::DuoGateway,
+                    "cat reply",
+                    CAT_FRAME_LEN as u16,
+                    DuoSub::CatRead.index(),
+                    CAT_REPLY_LEN,
+                )?;
+                return Ok(decode_cat_reply(&reply));
+            }
+            std::thread::sleep(CAT_POLL_INTERVAL);
+        }
+        Err(Error::Access(format!("the FDM-DUO did not answer {cmd:?} within two seconds")))
+    }
+
+    /// Whether the DUO says it is transmitting, from its `GI` status.
+    fn radio_transmitting(&self) -> Result<bool> {
+        let answer = self.cat_query("GI;")?;
+        gi_transmitting(&answer).ok_or_else(|| {
+            Error::Access(format!("the FDM-DUO's GI answer {answer:?} could not be read"))
+        })
+    }
+
+    /// Send `IQ1;`, which an FDM-DUO running a remote image needs (SDR Console
+    /// sends it before the start and every few seconds after). Nothing to do in
+    /// stand-alone. `opening` is the first one, before the start.
+    ///
+    /// SAFETY INTERLOCK (docs/safety-interlocks.md, #11): `IQ1;` is also the
+    /// DUO's I/Q *transmit* mode (CAT manual v2.13 p51), and a build that sent
+    /// it unchecked was followed by the HR500 found keyed with no drive. So:
+    /// - it is never sent while the panel sees a transmission; `IQ0;` is sent
+    ///   instead, so the operator's own transmission takes its normal audio;
+    /// - it is never sent while the DUO's `GI` says it transmits;
+    /// - after it, `RX;` on the first one, as SDR Console does, and `GI` again:
+    ///   if the radio now says it transmits, `IQ0;` and `RX;` go out and this
+    ///   fails, which closes the stream;
+    /// - any failure to read `GI` fails the same way, after `IQ0;`.
+    pub fn hold_remote(&self, opening: bool) -> Result<()> {
+        if !self.remote {
+            return Ok(());
+        }
+        if crate::remote::transmitting() {
+            return self.cat_write("IQ0;");
+        }
+        match self.radio_transmitting() {
+            Ok(false) => {}
+            Ok(true) => {
+                self.trace.note("IQ1 held back: the DUO says it is transmitting");
+                return self.cat_write("IQ0;");
+            }
+            Err(e) => return Err(self.drop_iq(e)),
+        }
+        self.cat_write("IQ1;")?;
+        if opening {
+            self.cat_write("RX;")?;
+        }
+        match self.radio_transmitting() {
+            Ok(false) => Ok(()),
+            Ok(true) => {
+                crate::remote::trip();
+                let _ = self.cat_write("IQ0;");
+                let _ = self.cat_write("RX;");
+                let w = "The FDM-DUO went to transmit after IQ1: IQ0 and RX sent, the wide \
+                         stream closed, and SPAN above 192 kHz is off until the panel restarts. \
+                         Check the DUO and the amplifier."
+                    .to_string();
+                self.trace.note(&w);
+                Err(Error::Access(w))
+            }
+            Err(e) => {
+                crate::remote::trip();
+                Err(self.drop_iq(e))
+            }
+        }
+    }
+
+    /// `IQ0;` after a `GI` that could not be read, and the error to stop on.
+    fn drop_iq(&self, e: Error) -> Error {
+        let _ = self.cat_write("IQ0;");
+        let w =
+            format!("IQ1 not sent, IQ0 sent instead: the DUO's transmit state is unknown ({e})");
+        self.trace.note(&w);
+        Error::Access(w)
+    }
+
     /// What the radio says it is tuned to, or `None` on anything but a DUO.
     ///
     /// The FDM-DUO's receive window rides on its VFO, so the front-panel knob
@@ -634,7 +746,7 @@ impl Device {
         if let Err(e) = r {
             self.trace.note(format!("stopping the stream failed: {e}"));
         }
-        // I/Q transmit off on the way out, as SDR Console does.
+        // `IQ0;` on the way out, as SDR Console does.
         if self.remote
             && let Err(e) = self.cat_write("IQ0;")
         {

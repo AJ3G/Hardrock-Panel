@@ -172,6 +172,10 @@ pub enum DuoSub {
     /// `0xF1` — write a 16-byte ASCII CAT command into the radio's own command
     /// buffer, the same commands the CAT serial port takes.
     CatWrite = 0xF1,
+    /// `0xF0` — read the radio's answer to the last CAT query: eighteen bytes,
+    /// `F0`, then the answer in ASCII up to its `;`. Read once the status's
+    /// [`STATUS_CAT_REPLY`] bit is set.
+    CatRead = 0xF0,
     /// `0xF2` — write the DDC tuning word. The low sixteen bits go in `wValue`
     /// and the next eight in the *low* byte of `wIndex`, beside this code.
     Tune = 0xF2,
@@ -208,6 +212,39 @@ impl DuoSub {
 /// Bit 2 of the third status byte: the CAT buffer has not finished the previous
 /// command. Writing another one before this clears loses it.
 pub const STATUS_CAT_BUSY: u8 = 0x04;
+
+/// Bit 3 of the third status byte: an answer to a CAT query is waiting for
+/// [`DuoSub::CatRead`]. SDR Console waits for it (`FC 25 09`) before reading.
+pub const STATUS_CAT_REPLY: u8 = 0x08;
+
+/// Bytes in a [`DuoSub::CatRead`] reply.
+pub const CAT_REPLY_LEN: u16 = 18;
+
+/// The ASCII answer in a [`DuoSub::CatRead`] reply, up to and including its
+/// `;`. Empty when the reply is not one.
+pub fn decode_cat_reply(reply: &[u8]) -> String {
+    if reply.first() != Some(&(DuoSub::CatRead as u8)) {
+        return String::new();
+    }
+    let body = &reply[1..];
+    let end = body.iter().position(|&b| b == b';').map_or(0, |i| i + 1);
+    String::from_utf8_lossy(&body[..end]).into_owned()
+}
+
+/// Whether a `GI` answer says the radio is transmitting (P4: 0 receive, 1
+/// transmit, 2 tune; CAT manual v2.13 p50). `None` for anything that is not a
+/// `GI` answer.
+pub fn gi_transmitting(answer: &str) -> Option<bool> {
+    let b = answer.as_bytes();
+    if !answer.starts_with("GI") || b.len() < 8 || !answer.ends_with(';') {
+        return None;
+    }
+    match b[7] {
+        b'0' => Some(false),
+        b'1' | b'2' => Some(true),
+        _ => None,
+    }
+}
 
 /// Longest a CAT command written through the USB gateway may be. Fixed-length:
 /// the request always carries sixteen bytes whatever the command is.
@@ -687,5 +724,26 @@ mod tests {
         // A device that has not been opened has no serial, so it cannot be the
         // one that was pinned.
         assert!(!serial_matches("123456", None));
+    }
+
+    #[test]
+    fn a_cat_answer_is_read_up_to_its_semicolon() {
+        let mut r = vec![0xF0];
+        r.extend_from_slice(b"GI0018002110000;");
+        r.push(0x09);
+        assert_eq!(decode_cat_reply(&r), "GI0018002110000;");
+        assert_eq!(decode_cat_reply(&[0xFC, 0x25, 0x09]), "");
+        assert_eq!(decode_cat_reply(&[]), "");
+    }
+
+    #[test]
+    fn gi_says_whether_the_radio_transmits() {
+        // SDR Console's capture, receiving at a wide rate.
+        assert_eq!(gi_transmitting("GI0018002110000;"), Some(false));
+        assert_eq!(gi_transmitting("GI0018012110000;"), Some(true));
+        assert_eq!(gi_transmitting("GI0018022110000;"), Some(true));
+        assert_eq!(gi_transmitting("RX0;"), None);
+        assert_eq!(gi_transmitting("GI00;"), None);
+        assert_eq!(gi_transmitting(""), None);
     }
 }
