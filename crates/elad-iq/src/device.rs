@@ -372,7 +372,27 @@ impl Device {
             "back on the stand-alone image in {:.1} s, F9 {b:02X?}",
             t0.elapsed().as_secs_f32()
         ));
+        self.split_off();
         Ok(())
+    }
+
+    /// Take the DUO out of the split that remote mode left on.
+    ///
+    /// In remote the DUO keeps VFO A on the I/Q centre and works on VFO B, and
+    /// after the restore it was in STD ALONE but still showed SP, with its band
+    /// changes stuck (AJ3G, 25 Oct, cbd28cf). `SP0;` is split off, `FR0;` and
+    /// `FT0;` put receive and transmit on VFO A. Best-effort: the answers
+    /// before and after go in the trace, and a failure doesn't stop the open.
+    fn split_off(&self) {
+        let read = |c: &str| self.cat_query(c).unwrap_or_else(|e| format!("({e})"));
+        let before = [read("SP;"), read("FR;"), read("FT;")];
+        for cmd in ["SP0;", "FR0;", "FT0;"] {
+            if let Err(e) = self.cat_write(cmd) {
+                self.trace.note(format!("{cmd} not sent: {e}"));
+            }
+        }
+        let after = [read("SP;"), read("FR;"), read("FT;")];
+        self.trace.note(format!("split before {before:?}, after SP0 FR0 FT0 {after:?}"));
     }
 
     /// One upload. `Ok(false)` when the radio's end-of-load answer says the
