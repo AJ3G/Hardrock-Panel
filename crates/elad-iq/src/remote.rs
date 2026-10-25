@@ -127,7 +127,19 @@ pub struct Image {
 /// SDR Console as each was loaded. Nothing on the wire says which rate an image
 /// is, so each is tied to one by a capture. All five sit in SDR Console's copy
 /// of the DLL in rising order of rate.
-pub const IMAGES: [Image; 5] = [
+///
+/// The 192 kHz entry is the DUO's own stand-alone image (the DLL's "default
+/// stand-alone and single channel" configuration, first in the DLL). It was
+/// not in a capture: it is found by the same end-of-image rule that gives all
+/// five captured images their exact bytes (AJ3G's DLL, 25 Oct). Loading it is
+/// how a DUO given a wide image goes back to stand-alone without a power
+/// cycle, if it works; see `Device::open`.
+pub const IMAGES: [Image; 6] = [
+    Image {
+        rate_hz: STANDALONE_RATE_HZ,
+        upload_len: 802_019,
+        sha256: hex32("b96188c54b50ca169c470ad067d7d8f1809afab779a3336beacd1930bdd05875"),
+    },
     Image {
         rate_hz: 384_000,
         upload_len: 802_295,
@@ -198,6 +210,11 @@ static WENT_REMOTE: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn note_remote() {
     WENT_REMOTE.store(true, Ordering::Relaxed);
+}
+
+/// The radio is back on its stand-alone image.
+pub(crate) fn forget_remote() {
+    WENT_REMOTE.store(false, Ordering::Relaxed);
 }
 
 pub(crate) fn went_remote() -> bool {

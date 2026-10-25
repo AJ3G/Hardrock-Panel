@@ -145,9 +145,27 @@ impl Device {
                 }
             }
         } else if model == Model::Duo && crate::remote::went_remote() {
-            // Back to stand-alone after a remote image this process loaded.
+            // Back to stand-alone after a remote image this process loaded:
+            // the DUO keeps a wide image until it is power-cycled, SDR Console
+            // and all (AJ3G, 25 Oct), so its own stand-alone image goes back in.
             if let Err(e) = dev.cat_write("IQ0;") {
                 dev.trace.note(format!("IQ0 not sent: {e}"));
+            }
+            match crate::remote::upload_for(dev.rate_hz) {
+                Ok(upload) => {
+                    dev.load_remote(&upload)?;
+                    crate::remote::forget_remote();
+                    dev.trace.note("stand-alone image back in");
+                }
+                Err(w) => {
+                    let w = format!(
+                        "The FDM-DUO still holds its wide image and its stand-alone image could \
+                         not be read ({w}); power-cycle the DUO to go back to 192 kHz."
+                    );
+                    tracing::warn!("{w}");
+                    dev.trace.note(&w);
+                    dev.warnings.push(w);
+                }
             }
         }
 
@@ -326,7 +344,7 @@ impl Device {
         };
         let t0 = std::time::Instant::now();
         self.trace.note(format!(
-            "loading the {} kHz remote image ({} bytes), try {attempt}",
+            "loading the {} kHz image ({} bytes), try {attempt}",
             self.rate_hz / 1000,
             upload.len()
         ));

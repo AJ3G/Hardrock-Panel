@@ -389,7 +389,9 @@ stand-alone by loading ELAD's wide image into it, as SDR Console does. That
 takes about 7 s each time SPAN changes, and the I/Q line says so meanwhile.
 The image is read from ELAD's driver, `ExtIOmc_ELAD_FDMDUO.dll`, which SDR
 Console or FDM-SW2 installs, so one of them has to be installed. Not while
-transmitting.
+transmitting. While a wide image runs, the DUO shows SP and its band keys and
+the panel's band changes don't move it. Going back to 192 kHz loads the DUO's
+own stand-alone image the same way; if that ever fails, power-cycle the DUO.
 
 **Listening.** The receiver plays on the sound output chosen under SETTINGS,
 *Receiver sound*: the computer's default output to start, or any other by
