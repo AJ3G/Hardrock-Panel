@@ -182,6 +182,9 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
     if let Some(w) = &rx.watchdog {
         ui.label(RichText::new(w).size(11.5).color(theme::YELLOW()));
     }
+    if let Some(w) = &rx.rate_note {
+        ui.label(RichText::new(w).size(11.5).color(theme::YELLOW()));
+    }
 
     ui.horizontal_wrapped(|ui| {
         caption(ui, "Receiver");

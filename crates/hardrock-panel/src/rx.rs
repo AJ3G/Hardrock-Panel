@@ -454,6 +454,12 @@ pub(crate) struct Rx {
     /// The watchdog lost the stream and hasn't opened it again yet: a
     /// reopen that fails is tried again on its timer, whatever the error.
     lost: bool,
+    /// The I/Q's real rate, measured: the pipeline's sample count when the
+    /// window began, and the rate the last window found when it disagreed.
+    rate_probe: Option<(Instant, u64)>,
+    rate_seen: Option<u32>,
+    /// SPAN changed to the rate the DUO is really sending, and why.
+    pub rate_note: Option<String>,
     /// The slices last given the pipeline, and each one's sound output (or
     /// why it couldn't be opened) by id, with the device asked for.
     slices_sent: Option<Vec<SliceSpec>>,
@@ -499,6 +505,9 @@ impl Default for Rx {
             reopened_at: None,
             watchdog: None,
             lost: false,
+            rate_probe: None,
+            rate_seen: None,
+            rate_note: None,
             slices_sent: None,
             slice_audio: Vec::new(),
             audio_checked: None,
@@ -661,6 +670,8 @@ impl Rx {
         self.slice_audio.clear();
         self.pipeline = Some(p);
         self.heard = (0, Instant::now());
+        self.rate_probe = None;
+        self.rate_seen = None;
     }
 
     /// Once a frame: finish opening the ELAD, keep the sound output, the
@@ -744,6 +755,7 @@ impl Rx {
             );
         }
         self.watch_stream(s, scope, now);
+        self.match_rate(s, now);
         self.sync_volume(s, now);
         self.recheck_audio(s);
         self.keep_audio(s);
@@ -837,6 +849,55 @@ impl Rx {
             self.heard = (0, Instant::now());
             self.watchdog = Some(msg);
         }
+    }
+
+    /// The FDM-DUO's I/Q rate is set on the radio, and nothing over USB
+    /// changes it: SPAN only says how the stream is read. Read at 384 kHz,
+    /// a DUO left at 192 kHz gave the receiver half the samples it needed,
+    /// and its audio stuttered with every block (AJ3G, 25 Oct 2026). So the
+    /// rate arriving is measured over two-second windows clear of any
+    /// transmission, and when two in a row agree on another of the ELAD's
+    /// rates, SPAN is set to it and the scope says so.
+    fn match_rate(&mut self, s: &mut RxSettings, now: RadioNow<'_>) {
+        let Some(p) = &self.pipeline else { return };
+        let (samples, load) = {
+            let g = p.lock();
+            (g.samples, g.load)
+        };
+        let near_tx = self.tx_at.is_some_and(|t| t.elapsed() < RATE_WINDOW * 2);
+        // A receiver that can't keep up reads fewer samples than arrive.
+        if self.running != IqChoice::Elad || now.transmitting || near_tx || load > 0.8 {
+            self.rate_probe = None;
+            return;
+        }
+        let Some((t0, n0)) = self.rate_probe else {
+            self.rate_probe = Some((Instant::now(), samples));
+            return;
+        };
+        let dt = t0.elapsed();
+        if dt < RATE_WINDOW {
+            return;
+        }
+        self.rate_probe = Some((Instant::now(), samples));
+        let measured = samples.saturating_sub(n0) as f64 / dt.as_secs_f64();
+        let Some(r) = arriving_rate(measured, s.rate) else {
+            self.rate_seen = None;
+            return;
+        };
+        if self.rate_seen != Some(r) {
+            self.rate_seen = Some(r);
+            return;
+        }
+        self.rate_note = Some(format!(
+            "The DUO is sending I/Q at {} kHz, and SPAN was {} kHz: SPAN set to {} kHz to \
+             match. The DUO's I/Q rate is set on the radio; change it there for another span.",
+            r / 1000,
+            s.rate / 1000,
+            r / 1000
+        ));
+        tracing::info!("I/Q arriving at {measured:.0} Hz, read as {}: SPAN set to {r}", s.rate);
+        s.rate = r;
+        self.restart = true;
     }
 
     /// One volume (AJ3G): the radio's VM (E1 on VOL, RADIO's VOLUME, the
@@ -1105,6 +1166,7 @@ impl Rx {
             && rate != s.rate
         {
             s.rate = rate;
+            self.rate_note = None;
             self.restart = true;
         }
     }
@@ -1140,6 +1202,26 @@ const STREAM_SILENT: Duration = Duration::from_secs(3);
 /// An ELAD lost from USB this soon after a transmission is said to have
 /// gone around it.
 const AFTER_TX_DROP: Duration = Duration::from_secs(120);
+
+/// The window the I/Q's real rate is measured over (see `match_rate`).
+const RATE_WINDOW: Duration = Duration::from_secs(2);
+
+/// The ELAD rate a stream measured at `measured` samples a second is really
+/// at, when it is not `reading`: the rates are octaves apart, so anything
+/// within a quarter of `reading` is taken as right, and a stream that has all
+/// but stopped is the watchdog's business.
+fn arriving_rate(measured: f64, reading: u32) -> Option<u32> {
+    if measured < 0.25 * elad_iq::ELAD_SAMPLE_RATES[0] as f64
+        || (measured / reading as f64 - 1.0).abs() <= 0.25
+    {
+        return None;
+    }
+    let nearest = elad_iq::ELAD_SAMPLE_RATES
+        .iter()
+        .copied()
+        .min_by(|a, b| (*a as f64 - measured).abs().total_cmp(&(*b as f64 - measured).abs()))?;
+    (nearest != reading).then_some(nearest)
+}
 
 /// The watchdog reopens no more often than this.
 const REOPEN_EVERY: Duration = Duration::from_secs(20);
@@ -1516,6 +1598,18 @@ mod tests {
         rx.frame(&mut s, &scope, now(false));
         assert!(rx.error.is_none());
         assert_eq!(rx.source(), IqChoice::Demo);
+    }
+
+    #[test]
+    fn the_rate_the_duo_really_sends_is_found() {
+        // Read as 384 kHz, arriving at 192: the DUO's own rate.
+        assert_eq!(arriving_rate(191_996.0, 384_000), Some(192_000));
+        assert_eq!(arriving_rate(770_000.0, 192_000), Some(768_000));
+        // Right, or near enough.
+        assert_eq!(arriving_rate(191_996.0, 192_000), None);
+        assert_eq!(arriving_rate(330_000.0, 384_000), None);
+        // All but stopped: the watchdog's business, not a rate.
+        assert_eq!(arriving_rate(1_000.0, 384_000), None);
     }
 
     #[test]
