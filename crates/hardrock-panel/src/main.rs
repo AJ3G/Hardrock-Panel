@@ -313,6 +313,7 @@ impl App {
             secs: &mut self.saved.tune_secs,
             drive: &mut self.saved.drive,
             tone_error: self.tone_error.clone(),
+            panel_vol: (!self.rx.sound_via_radio(&self.saved.rx)).then_some(self.saved.rx.volume),
         }
     }
 
@@ -1358,6 +1359,16 @@ impl eframe::App for App {
             if let Some(r) = &rig {
                 self.do_tune(o.tune, &amp_raw, r);
             }
+            // E1's VOL and NR are the DUO's (VM, NR, NC), heard only on the
+            // DUO's own audio. AJ3G (31 Oct 2026): "the outcome is on ELAD
+            // Stand Alone only". So they set the panel's Sound and NR too,
+            // and turn what is heard whichever audio that is.
+            if !transmitting {
+                follow_e1(&o.frames, &mut self.saved.rx);
+            }
+            if let Some(v) = o.panel_volume {
+                self.saved.rx.volume = v;
+            }
             if let Some(link) = &self.rig {
                 // Read back after each; refused while transmitting (#5).
                 link.set(o.frames);
@@ -1817,5 +1828,51 @@ mod tests {
         let s: Saved = serde_json::from_str(r#"{"swr_warn": 3.0}"#).unwrap();
         assert!(!s.rig.enabled);
         assert_eq!(s.rig.baud, 38_400);
+    }
+}
+
+/// The panel's NR following E1's NR (`NR` on or off, `NC` level 1 to 10,
+/// taken to the panel's 1 to 4). E1's VOL turns the panel's Sound itself
+/// when an outside speaker is picked (`TuneArgs::panel_vol`).
+fn follow_e1(frames: &[rigcat::Frame], s: &mut rx::RxSettings) {
+    for f in frames {
+        let Ok(t) = std::str::from_utf8(&f.bytes) else { continue };
+        let Some(body) = t.strip_suffix(';') else { continue };
+        let (k, v) = body.split_at(body.len().min(2));
+        let n: Option<u32> = v.trim().parse().ok();
+        match (k, n) {
+            ("NR", Some(0)) => s.nr = 0,
+            ("NR", Some(_)) if s.nr == 0 => s.nr = 1,
+            ("NC", Some(0)) => s.nr = 0,
+            ("NC", Some(n)) => s.nr = nr_level(n),
+            _ => {}
+        }
+    }
+}
+
+/// The DUO's NR level, 1 to 10, as the panel's 1 to 4.
+fn nr_level(duo: u32) -> u8 {
+    (duo.min(10) * 4).div_ceil(10).max(1) as u8
+}
+
+#[cfg(test)]
+mod e1_tests {
+    use super::*;
+
+    #[test]
+    fn e1s_nr_sets_the_panels_nr() {
+        let mut s = rx::RxSettings::default();
+        let fr = |t: &str| rigcat::Frame::new(t.to_string(), rigcat::FrameKind::SetSetting);
+        follow_e1(&[fr("NR1;"), fr("NC003;")], &mut s);
+        assert_eq!(s.nr, 2);
+        follow_e1(&[fr("NC010;")], &mut s);
+        assert_eq!(s.nr, 4);
+        follow_e1(&[fr("NC001;")], &mut s);
+        assert_eq!(s.nr, 1);
+        follow_e1(&[fr("NR0;")], &mut s);
+        assert_eq!(s.nr, 0);
+        // Nothing else moves them.
+        follow_e1(&[fr("FA00014074000;")], &mut s);
+        assert_eq!(s.nr, 0);
     }
 }

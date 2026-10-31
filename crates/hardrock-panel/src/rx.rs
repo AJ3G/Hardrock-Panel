@@ -448,6 +448,9 @@ pub(crate) struct Rx {
     duo_sent: Option<(Mode, u32)>,
     /// The radio's volume and the panel's kept as one.
     vol: VolSync,
+    /// The DUO's VM before the panel muted it for an outside speaker, and
+    /// when it last asked.
+    vm_muted: Option<(i32, Instant)>,
     /// Restart at the scope's new SPAN.
     pub restart: bool,
     /// The DSP choices the pipeline was started with or last sent.
@@ -510,6 +513,7 @@ impl Default for Rx {
             split: SplitState::default(),
             duo_sent: None,
             vol: VolSync::default(),
+            vm_muted: None,
             restart: false,
             dsp: s.dsp,
             heard: (0, Instant::now()),
@@ -1001,6 +1005,11 @@ impl Rx {
         self.restart = true;
     }
 
+    /// Whether the panel's sound plays into the ELAD's own USB audio.
+    pub(crate) fn sound_via_radio(&self, s: &RxSettings) -> bool {
+        sound_via_radio(s.audio_out.as_deref(), self.audio.as_ref().map(|a| a.device()))
+    }
+
     /// One volume (AJ3G): the radio's VM (E1 on VOL, RADIO's VOLUME, the
     /// radio's own knob) and SCOPE's Sound slider follow each other, so the
     /// one heard, the radio's audio or the panel's, turns with either. Only
@@ -1008,15 +1017,45 @@ impl Rx {
     /// speaker picked, Sound and MUTE are that speaker's alone, and the
     /// radio's VM pulled the slider back (AJ3G, 24 Oct 2026).
     fn sync_volume(&mut self, s: &mut RxSettings, now: RadioNow<'_>) {
-        if !sound_via_radio(s.audio_out.as_deref(), self.audio.as_ref().map(|a| a.device())) {
-            // The radio's word wins again when it is picked again.
-            self.vol = VolSync::default();
-            return;
-        }
         let Some((link, r)) = now.cat() else { return };
         let proto = r.model.protocol();
         let Some(c) = crate::radio::logic::find(&*proto, "VM") else { return };
-        let radio = crate::radio::logic::readback(c, r).and_then(|v| v.trim().parse().ok());
+        let radio: Option<i32> =
+            crate::radio::logic::readback(c, r).and_then(|v| v.trim().parse().ok());
+        if !self.sound_via_radio(s) {
+            // The radio's word wins again when it is picked again.
+            self.vol = VolSync::default();
+            // An outside speaker: the DUO's own speaker is muted (VM 0),
+            // its level kept to put back (AJ3G, 31 Oct 2026: "When External
+            // Speaker used, Mute ELAD"). Not while transmitting (#5).
+            if let Some(v) = radio
+                && v != 0
+                && !now.transmitting
+                && self.vm_muted.is_none_or(|(_, t)| t.elapsed() > Duration::from_millis(1500))
+                && let Ok(f) = crate::radio::logic::control_frame(&*proto, c, "0", r)
+            {
+                let before = self.vm_muted.map_or(v, |(b, _)| b);
+                self.vm_muted =
+                    Some((if v != 0 && before == 0 { v } else { before }, Instant::now()));
+                link.set(vec![f]);
+            }
+            return;
+        }
+        // Back on the DUO's audio: its volume as it was.
+        if let Some((before, _)) = self.vm_muted {
+            if now.transmitting {
+                return;
+            }
+            self.vm_muted = None;
+            if radio == Some(0)
+                && before > 0
+                && let Ok(f) =
+                    crate::radio::logic::control_frame(&*proto, c, &before.to_string(), r)
+            {
+                link.set(vec![f]);
+                return;
+            }
+        }
         if let Some(to) = self.vol.step(radio, &mut s.volume, now.transmitting, Instant::now())
             && let Ok(f) = crate::radio::logic::control_frame(&*proto, c, &to.to_string(), r)
         {

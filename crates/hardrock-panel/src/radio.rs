@@ -51,6 +51,8 @@ pub(crate) struct RadioOut {
     /// SPLIT was pressed: TX follows RX goes on or off with it, so the scope
     /// doesn't put back a split the operator just took off.
     pub tx_follows_rx: Option<bool>,
+    /// E1 VOL turned with an outside speaker picked: the panel's Sound.
+    pub panel_volume: Option<f32>,
 }
 
 /// Which pop-out is open under the face. One at a time.
@@ -144,6 +146,8 @@ pub(crate) struct Face<'a> {
     /// Why RIG TUNE couldn't be keyed now, for the CW messages.
     pub carrier_blocked: Option<String>,
     pub xvtr: i64,
+    /// The panel's Sound when it plays on an outside speaker (E1 VOL).
+    pub panel_vol: Option<f32>,
     pub st: &'a mut RadioUi,
     pub out: &'a mut RadioOut,
 }
@@ -340,6 +344,7 @@ fn radio_body(
         lock,
         carrier_blocked: tune.carrier_blocked.clone(),
         xvtr: prefs.xvtr_hz,
+        panel_vol: tune.panel_vol,
         st: rui,
         out,
     };

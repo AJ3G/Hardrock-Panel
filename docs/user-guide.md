@@ -133,8 +133,12 @@ says more.
   RADIO's VOLUME and SCOPE's Sound slider: move any of them, or the radio's
   own knob, and the others follow, so it turns whichever audio you hear (the
   radio's at 192 kHz SPAN, the panel's receiver wider). That is only while
-  the panel's sound goes to the ELAD's own USB audio: with another speaker
-  picked, Sound and MUTE are that speaker's alone.
+  the panel's sound goes to the ELAD's own USB audio. With another speaker
+  picked (the Klipsch, say), E1's VOL turns the panel's Sound instead and
+  the caption reads VOL n PC; the DUO's own speaker is muted (its volume set
+  to 0) and set back as it was when you pick the ELAD's audio again. E1's NR
+  also sets SCOPE's NR (DUO NR 1 to 10 maps to the panel's 1 to 4), so it
+  acts on what you hear at any SPAN.
 - **E2.** Turning changes the receive filter, the CW pitch (in CW) or the RIT
   offset (while RIT is on); a click picks the next.
 - **Lock.** Holding E1 or E2 locks the knobs and the dial, as pressing both
@@ -422,7 +426,7 @@ too, and the panel sets the DUO's mode and filter to the receiver's; above
 what it can predict, a CW note or a voice, and drops the hiss: 1 or 2 for
 SSB, 3 or 4 for CW. It works on what you hear only; the decoders get the
 audio untouched. The DUO's own NR, on RADIO's E1 knob, works on the DUO's
-audio, which is what you hear at 192 kHz SPAN.
+audio, which is what you hear at 192 kHz SPAN; turning it also sets this NR.
 The panel's receiver and its slices go quiet while the radio transmits, and
 for 0.3 s after: the DUO keeps sending I/Q during an over, and it would be
 heard as static.

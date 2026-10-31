@@ -797,6 +797,15 @@ fn e1_knob(f: &mut Face<'_>, n: usize, input: &KnobIn) {
         return;
     }
     let e = f.st.knobs.e1;
+    // With an outside speaker the DUO's own is muted, and VOL turns the
+    // panel's Sound (AJ3G, 31 Oct 2026).
+    if e == E1::Vol
+        && let Some(v) = f.panel_vol
+    {
+        let to = (v + input.steps as f32 * 0.01).clamp(0.0, 1.0);
+        f.out.panel_volume = Some(to);
+        return;
+    }
     let Some(from) = knob_base(f, e.name(), knobs::e1_value(f.p, f.s, e)) else {
         f.st.note = Some(format!("E1: the radio hasn't answered {} yet.", e.name()));
         return;
@@ -970,7 +979,11 @@ pub(crate) fn knobs(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, height: f
     let col = if lit { th.cap_lit } else { th.dim };
     p.text(pos2(main_c.x, status_y), egui::Align2::CENTER_CENTER, &status, label_font(10.0), col);
     let e1 = ks.e1;
-    let e1_text = knobs::e1_text(e1, knobs::e1_value(f.p, f.s, e1));
+    let e1_text = match f.panel_vol {
+        // An outside speaker: VOL is the panel's Sound.
+        Some(v) if e1 == knobs::E1::Vol => format!("VOL {:.0} PC", v * 100.0),
+        _ => knobs::e1_text(e1, knobs::e1_value(f.p, f.s, e1)),
+    };
     let e2_text = e2_text(f);
     let font = label_font(9.5);
     p.text(
