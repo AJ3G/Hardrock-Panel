@@ -1394,6 +1394,9 @@ impl eframe::App for App {
             if self.saved.decode.skim_log {
                 skimlog::window(ctx, &mut self.saved.decode.skim_log, &mut self.decode.skim_log);
             }
+            if let Some(k) = o.identified {
+                self.scope.show_data(k.digi().filter(|d| d.key), None);
+            }
             if let Some(k) = o.picked {
                 // The scope's DATA row shows the mode picked here, whether
                 // or not the radio is taken to it.

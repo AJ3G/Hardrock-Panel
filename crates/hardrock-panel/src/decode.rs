@@ -1458,7 +1458,13 @@ pub(crate) fn hms(utc: f64) -> String {
 /// AUTO ID (decision 61): its key, and while it listens what it has
 /// measured and its guesses, best first, each with USE where DECODE has the
 /// mode.
-fn autoid_box(ui: &mut egui::Ui, d: &mut Decode, s: &mut DecodeSettings, rx: &Rx) {
+/// Returns the mode USE picked, if one was.
+fn autoid_box(
+    ui: &mut egui::Ui,
+    d: &mut Decode,
+    s: &mut DecodeSettings,
+    rx: &Rx,
+) -> Option<Kind> {
     ui.horizontal_wrapped(|ui| {
         let r = chrome::chip(ui, d.autoid_on, "AUTO ID").on_hover_text(
             "Put the receiver's passband over one signal and press: it listens to the audio \
@@ -1473,7 +1479,7 @@ fn autoid_box(ui: &mut egui::Ui, d: &mut Decode, s: &mut DecodeSettings, rx: &Rx
             ui.label(RichText::new("Starts with the receiver").size(11.5).color(theme::TEXT()));
         }
     });
-    let Some(run) = &d.autoid else { return };
+    let Some(run) = &d.autoid else { return None };
     let rep = &run.report;
     let mut info =
         format!("Listening {:.0} s to {:.0}–{:.0} Hz", rep.heard_s, run.band.0, run.band.1);
@@ -1534,7 +1540,9 @@ fn autoid_box(ui: &mut egui::Ui, d: &mut Decode, s: &mut DecodeSettings, rx: &Rx
         }
         s.reverse = reverse;
         d.autoid_on = false;
+        return Some(kind);
     }
+    None
 }
 
 fn caption(ui: &mut egui::Ui, t: &str) {
@@ -1546,6 +1554,9 @@ fn caption(ui: &mut egui::Ui, t: &str) {
 pub(crate) struct DecodeOut {
     /// A mode was picked: snap to it, if `snap` is on.
     pub picked: Option<Kind>,
+    /// AUTO ID's USE picked a mode where the receiver already is: show it on
+    /// the scope's DATA row, without retuning.
+    pub identified: Option<Kind>,
     /// Pop out (`true`) or dock (`false`).
     pub pop: Option<bool>,
 }
@@ -1808,7 +1819,12 @@ fn body(
             );
         }
     });
-    autoid_box(ui, d, s, rx);
+    // The scope's DATA row lights the mode USE picked; AUTO ID found it where
+    // the receiver is, so the radio isn't taken to its calling frequency
+    // (AJ3G, 31 Oct 2026: the DATA row didn't follow USE).
+    if let Some(k) = autoid_box(ui, d, s, rx) {
+        out.identified = Some(k);
+    }
     if s.kind.family() == Family::Wsjt
         && let Some(mode) = s.kind.wsjt()
     {
