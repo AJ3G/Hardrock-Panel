@@ -334,16 +334,17 @@ fn the_threads_find_psk31_in_the_narrow_lane() {
     let len = (fs * 12.0) as usize;
     let x = mix(&bpsk(len, fs, 31.25, 1800.0, 0.3, false, &mut rng), &noise(len, 1.0, &mut rng));
     let iq = interleave(&x);
-    for c in iq.chunks(2 * 4800) {
+    // Fed until the thread has averaged enough blocks, going round the
+    // signal again if it must: the GPU thread drops blocks it has no time
+    // for, as it should live, and a software GPU (lavapipe, beside other
+    // tests) can drop most of them, so one pass of 12 s was not always
+    // enough to reach seven.
+    let t = std::time::Instant::now();
+    for c in iq.chunks(2 * 4800).cycle() {
         sh.seen_ms.store(sh.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
         rt.tap_tx.send((c.to_vec(), fs)).unwrap();
-        // Ten times real time: the GPU thread drops blocks it has no time
-        // for, as it should live, and lavapipe beside other tests is slow.
+        // Ten times real time.
         std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    let t = std::time::Instant::now();
-    loop {
-        sh.seen_ms.store(sh.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
         let st = lock(&sh.status).clone();
         if st.blocks >= 7 && !st.features.is_empty() {
             assert_eq!(st.lane_rate, 3000.0);
@@ -357,8 +358,7 @@ fn the_threads_find_psk31_in_the_narrow_lane() {
             assert!((f.f_hz - 300.0).abs() < 200.0, "{f:?}");
             break;
         }
-        assert!(t.elapsed().as_secs() < 60, "no feature: {} blocks, {:?}", st.blocks, st.error);
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(t.elapsed().as_secs() < 120, "no feature: {} blocks, {:?}", st.blocks, st.error);
     }
 }
 
