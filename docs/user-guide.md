@@ -656,8 +656,11 @@ For the WSJT modes:
 - **SKIM LOG** opens a window listing everything heard, of every mode: the
   receiver's own decodes (RX), SKIM WIDE's FT8 and FT4 on the other dials
   (WIDE), and SKIM CW/PSK/RTTY's stations (SKIM), each with its UTC, mode,
-  RF, SNR and message. The chips across the top show one mode; COPY ALL
-  copies the list. Every line is also kept in `SKIM.TXT`, beside `ALL.TXT`.
+  RF, SNR and message. Across the top is a key for every mode the panel
+  decodes (FT8 to MSK144, JTTY, CW, RTTY, PSK31, NAVTEX, OLIVIA, THOR, SSTV,
+  WEFAX, HFDL, ACARS, VDL2, AIS, MODE S), each with how many lines it has.
+  Press one to show only that mode, press more to add them, press a lit one
+  to drop it, and ALL to show everything. COPY ALL copies what is shown. Every line is also kept in `SKIM.TXT`, beside `ALL.TXT`.
 - **AUTO ID** names the mode of the signal under the receiver's passband.
   Set the passband over one signal and press it. After about 6 s it shows
   what it measured (centre, width, tones and shift, keying speed), and below

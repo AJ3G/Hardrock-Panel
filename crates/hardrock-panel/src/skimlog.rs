@@ -84,8 +84,8 @@ pub const HEADER: &str = "UTC            Mode  From       RF MHz  SNR  Message";
 #[derive(Default)]
 pub struct SkimLog {
     lines: VecDeque<Line>,
-    /// Show only this mode.
-    pub only: Option<&'static str>,
+    /// Show only these modes' lines (MODE_KEYS); empty shows every line.
+    pub only: Vec<&'static str>,
     path: Option<PathBuf>,
     pub error: Option<String>,
     pending: Vec<String>,
@@ -176,16 +176,26 @@ impl SkimLog {
         self.error = r.err().map(|e| format!("SKIM.TXT {}: {e}", path.display()));
     }
 
-    fn modes(&self) -> Vec<&'static str> {
-        let mut m: Vec<&'static str> = Vec::new();
-        for l in &self.lines {
-            if !m.contains(&l.mode) {
-                m.push(l.mode);
-            }
-        }
-        m.sort_unstable();
-        m
+    /// How many lines each mode key has.
+    fn counts(&self) -> Vec<usize> {
+        MODE_KEYS.iter().map(|k| self.lines.iter().filter(|l| is_mode(k, l.mode)).count()).collect()
     }
+}
+
+/// A key for every mode the panel decodes, as DECODE's mode list has them
+/// (AJ3G, 31 Oct 2026: "buttons to sort all modes this program is able to
+/// decode to include CW"), so a mode is there to pick before anything in
+/// it is heard.
+pub const MODE_KEYS: &[&str] = &[
+    "FT8", "FT4", "WSPR", "JT65", "JT9", "FST4", "Q65", "MSK144", "JTTY", "CW", "RTTY", "PSK31",
+    "NAVTEX", "OLIVIA", "THOR", "SSTV", "WEFAX", "HFDL", "ACARS", "VDL2", "AIS", "MODE S",
+];
+
+/// Whether a line in `mode` (as its decoder names it: "PSK", "FST4-60",
+/// "Q65-30A", "Olivia 8/500", "THOR16") is under the key `key`.
+fn is_mode(key: &str, mode: &str) -> bool {
+    let m = mode.to_ascii_uppercase();
+    m.starts_with(key) || (key == "PSK31" && m == "PSK")
 }
 
 /// The SKIM LOG window, a window of its own on the desktop.
@@ -214,17 +224,36 @@ pub fn window(ctx: &egui::Context, open: &mut bool, log: &mut SkimLog) {
 }
 
 fn shown(log: &SkimLog) -> Vec<&Line> {
-    log.lines.iter().filter(|l| log.only.is_none_or(|m| m == l.mode)).collect()
+    log.lines
+        .iter()
+        .filter(|l| log.only.is_empty() || log.only.iter().any(|k| is_mode(k, l.mode)))
+        .collect()
 }
 
 fn body(ui: &mut egui::Ui, log: &mut SkimLog) {
     ui.horizontal_wrapped(|ui| {
-        if chrome::chip(ui, log.only.is_none(), "ALL").clicked() {
-            log.only = None;
+        if chrome::chip(ui, log.only.is_empty(), "ALL")
+            .on_hover_text("Every line, of every mode")
+            .clicked()
+        {
+            log.only.clear();
         }
-        for m in log.modes() {
-            if chrome::chip(ui, log.only == Some(m), m).clicked() {
-                log.only = Some(m);
+        // One key a mode, with how many lines it has; press several to see
+        // them together, and again to drop one.
+        for (k, n) in MODE_KEYS.iter().zip(log.counts()) {
+            let on = log.only.contains(k);
+            let label = if n > 0 { format!("{k} {n}") } else { k.to_string() };
+            let tip = if n > 0 {
+                format!("Show {k}'s lines; press others to add them")
+            } else {
+                format!("Nothing heard in {k} yet")
+            };
+            if chrome::chip(ui, on, &label).on_hover_text(tip).clicked() {
+                if on {
+                    log.only.retain(|m| m != k);
+                } else {
+                    log.only.push(k);
+                }
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -320,9 +349,17 @@ mod tests {
         );
         assert!(log.lines()[1].text_line().contains("FT4   RX "));
         assert_eq!(log.pending.len(), 2);
-        assert_eq!(log.modes(), vec!["FT4", "FT8"]);
-        log.only = Some("FT8");
+        assert_eq!(&log.counts()[..2], &[1, 1]);
+        log.only = vec!["FT8"];
         assert_eq!(shown(&log).len(), 1);
+        log.only.push("FT4");
+        assert_eq!(shown(&log).len(), 2);
+        log.only = vec!["CW"];
+        assert!(shown(&log).is_empty());
+        // The decoders' own names come under their keys.
+        assert!(is_mode("PSK31", "PSK") && is_mode("FST4", "FST4-60") && is_mode("Q65", "Q65-30A"));
+        assert!(is_mode("OLIVIA", "Olivia 8/500") && is_mode("THOR", "THOR16"));
+        assert!(!is_mode("FT8", "FT4") && !is_mode("JT9", "JT65"));
     }
 
     #[test]
