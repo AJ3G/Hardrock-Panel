@@ -222,6 +222,22 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
         {
             s.muted = !s.muted;
         }
+        // NR (AJ3G, 31 Oct 2026): the panel receiver's own noise reduction,
+        // a click for the next level. The DUO's NR (RADIO's E1) works on the
+        // DUO's audio, heard up to 192 kHz; this one on the panel's.
+        let nr_text = if s.nr == 0 { "NR".to_string() } else { format!("NR {}", s.nr) };
+        let r = chrome::chip(ui, s.nr > 0, &nr_text).on_hover_text(
+            "Noise reduction on the panel's receiver: click for OFF, 1, 2, 3, 4. 1 or 2 \
+                 for SSB, 3 or 4 for CW. Right-click: off. Only what you hear: the decoders \
+                 get the audio untouched. The DUO's own NR is on RADIO's E1 knob and works on \
+                 the DUO's audio (192 kHz SPAN)",
+        );
+        if r.clicked() {
+            s.nr = (s.nr + 1) % 5;
+        }
+        if r.secondary_clicked() {
+            s.nr = 0;
+        }
         match (rx.audio_state(), &rx.audio_error) {
             (_, Some(e)) => {
                 ui.label(RichText::new(e).size(11.5).color(theme::ALERT()));

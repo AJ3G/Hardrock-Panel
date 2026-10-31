@@ -64,6 +64,8 @@ pub(crate) struct RxSettings {
     pub audio_out: Option<String>,
     pub volume: f32,
     pub muted: bool,
+    /// The panel receiver's noise reduction (`sdr::nr`): 0 off, 1 to 4.
+    pub nr: u8,
     /// Put the radio in split with VFO B on the receiver, so it transmits
     /// where the panel listens (decision 22).
     pub tx_follows_rx: bool,
@@ -197,6 +199,7 @@ impl Default for RxSettings {
             audio_out: None,
             volume: 0.5,
             muted: false,
+            nr: 0,
             tx_follows_rx: true,
             rx_hz: 14_212_500.0,
             centre_hz: 14_200_000.0,
@@ -421,6 +424,8 @@ pub(crate) struct Rx {
     pub label: String,
     audio: Option<AudioOut>,
     audio_dev: Option<Option<String>>,
+    /// The NR level last sent to the pipeline.
+    nr_sent: Option<u8>,
     pub audio_error: Option<String>,
     pub taps: Arc<Taps>,
     /// The receiver, the radio's own Hz, its mode and passband.
@@ -489,6 +494,7 @@ impl Default for Rx {
             label: String::new(),
             audio: None,
             audio_dev: None,
+            nr_sent: None,
             audio_error: None,
             taps: Arc::new(Taps::default()),
             rx_hz: s.rx_hz,
@@ -678,6 +684,7 @@ impl Rx {
         // slices started on it.
         self.audio = None;
         self.audio_dev = None;
+        self.nr_sent = None;
         self.slices_sent = None;
         self.slice_audio.clear();
         self.pipeline = Some(p);
@@ -1048,6 +1055,10 @@ impl Rx {
             self.audio = None;
             return;
         };
+        if self.nr_sent != Some(s.nr) {
+            p.send(Command::SetNr(s.nr));
+            self.nr_sent = Some(s.nr);
+        }
         if self.audio_dev.as_ref() != Some(&s.audio_out) {
             self.audio_dev = Some(s.audio_out.clone());
             self.audio = None;

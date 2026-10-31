@@ -46,9 +46,10 @@ pub(crate) struct KnobUi {
     pub press: [PressTracker; 3],
     /// Wheel travel short of a step, each knob.
     pub wheel: [f32; 3],
-    /// Drag angle short of a step, and the pointer's angle last frame.
-    pub drag: f32,
-    pub drag_last: Option<f32>,
+    /// Drag angle short of a step, and the pointer's angle last frame,
+    /// each knob.
+    pub drag: [f32; 3],
+    pub drag_last: [Option<f32>; 3],
     /// How far each knob's mark has turned, for the drawing.
     pub turned: [f32; 3],
     /// A setting turned to and when, until the radio reads it back, so

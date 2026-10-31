@@ -25,6 +25,7 @@ pub mod demod;
 pub mod design;
 pub mod fir;
 pub mod nco;
+pub mod nr;
 pub mod passband;
 pub mod pipeline;
 pub mod receiver;

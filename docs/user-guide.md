@@ -116,7 +116,7 @@ read only, and the panel's own display settings: the LCD backlight in receive
 and in transmit, and a transverter offset.
 
 **The knobs.** The silver knobs beside the LCD work as the radio's own. Scroll
-over one to turn it (the main knob can also be dragged round), click it for the
+over one, or drag round it, to turn it, click it for the
 radio's push, and hold it down for the radio's push and hold (menu 71 HOLD
 TIME, 1 s as shipped). The line under each says what it does now, and hovering
 says more.
@@ -415,6 +415,12 @@ name, VB-Cable's *CABLE Input* included, to feed an outside decoder. The
 scope has its volume and **Mute**. Up to 192 kHz the DUO plays its own audio
 too, and the panel sets the DUO's mode and filter to the receiver's; above
 192 kHz the DUO mutes its own audio and the panel's receiver is the one heard.
+**NR**, beside MUTE, is the panel receiver's noise reduction: click for 1, 2,
+3, 4 and back to off (right-click: off). It is an adaptive filter that keeps
+what it can predict, a CW note or a voice, and drops the hiss: 1 or 2 for
+SSB, 3 or 4 for CW. It works on what you hear only; the decoders get the
+audio untouched. The DUO's own NR, on RADIO's E1 knob, works on the DUO's
+audio, which is what you hear at 192 kHz SPAN.
 The panel's receiver and its slices go quiet while the radio transmits, and
 for 0.3 s after: the DUO keeps sending I/Q during an over, and it would be
 heard as static.

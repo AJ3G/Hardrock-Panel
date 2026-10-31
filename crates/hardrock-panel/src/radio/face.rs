@@ -642,7 +642,8 @@ struct KnobIn {
 }
 
 /// Read knob `k` (0 main, 1 E1, 2 E2) at `c`, radius `r`: the wheel over
-/// it, a drag round it (`drag`, the main knob only), and a push or hold.
+/// it, a drag round it (`drag`; all three since AJ3G couldn't turn E1, 31
+/// Oct 2026), and a push or hold.
 fn knob_input(
     ui: &Ui,
     f: &mut Face<'_>,
@@ -686,15 +687,15 @@ fn knob_input(
             // Too near the centre the angle means nothing.
             if v.length() > r * 0.2 {
                 let a = v.y.atan2(v.x);
-                if let Some(last) = ks.drag_last {
-                    steps += knobs::angle_to_steps(a - last, &mut ks.drag);
+                if let Some(last) = ks.drag_last[k] {
+                    steps += knobs::angle_to_steps(a - last, &mut ks.drag[k]);
                 }
-                ks.drag_last = Some(a);
+                ks.drag_last[k] = Some(a);
             }
         }
     } else if drag {
-        ks.drag_last = None;
-        ks.drag = 0.0;
+        ks.drag_last[k] = None;
+        ks.drag[k] = 0.0;
     }
     if steps != 0 {
         ks.press[k].cancel();
@@ -915,8 +916,8 @@ pub(crate) fn knobs(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, height: f
     let n = logic::digit_count(prefs.xvtr_hz);
     let tuning = logic::dial_hz(f.s).is_some();
     let main_in = knob_input(ui, f, 0, main_c, d_main / 2.0, live && tuning, true);
-    let e1_in = knob_input(ui, f, 1, e1_c, d_small / 2.0, live, false);
-    let e2_in = knob_input(ui, f, 2, e2_c, d_small / 2.0, live, false);
+    let e1_in = knob_input(ui, f, 1, e1_c, d_small / 2.0, live, true);
+    let e2_in = knob_input(ui, f, 2, e2_c, d_small / 2.0, live, true);
     if live {
         if f.st.knobs.locked {
             // Locked, only a hold of E1 or E2 does anything: it unlocks.
@@ -1029,7 +1030,7 @@ pub(crate) fn knobs(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, height: f
             E1::Nb => "the noise blanker, off or its level (CAT NB, NK)",
         };
         format!(
-            "E1: {e1_text}. Scroll to change {what}. Click: the next of VOL, SQL, AGC, NR, NB. \
+            "E1: {e1_text}. Scroll or drag round to change {what}. Click: the next of VOL, SQL, AGC, NR, NB. \
              {lock_tail}"
         )
     };
@@ -1049,7 +1050,7 @@ pub(crate) fn knobs(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, height: f
             E2::Rit => "the RIT offset, 10 Hz a step (CAT RU, RD)",
         };
         format!(
-            "E2: {e2_text}. Scroll to change {what}. Click: the next of FIL, PITCH (CW) and RIT \
+            "E2: {e2_text}. Scroll or drag round to change {what}. Click: the next of FIL, PITCH (CW) and RIT \
              (while RIT is on). {lock_tail}"
         )
     };

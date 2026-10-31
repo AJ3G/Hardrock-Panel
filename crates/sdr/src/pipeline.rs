@@ -66,6 +66,8 @@ pub enum Command {
     /// `[low, high]` Hz relative to the dial.
     SetPassband(f32, f32),
     SetAgc(AgcMode),
+    /// The receiver's noise reduction on its listening audio: 0 off, 1 to 4.
+    SetNr(u8),
     /// The listening AGC's attack, decay, hang and target.
     SetAgcParams(AgcParams),
     /// The decoders' AGC.
@@ -451,6 +453,7 @@ fn run(
                         Command::SetMode(m) => receiver.set_mode(m),
                         Command::SetPassband(lo, hi) => receiver.set_passband(lo, hi),
                         Command::SetAgc(a) => receiver.set_agc(a),
+                        Command::SetNr(n) => receiver.set_nr(n),
                         Command::SetAgcParams(p) => receiver.set_agc_params(p),
                         Command::SetDecoderAgc(p) => receiver.set_decoder_agc(p),
                         Command::SetGain(g) => receiver.set_gain_db(g),

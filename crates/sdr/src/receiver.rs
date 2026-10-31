@@ -23,6 +23,7 @@
 use crate::agc::{Agc, AgcParams};
 use crate::ddc::{Ddc, DecimatorKind};
 use crate::demod::{AmDemod, Demodulator, FmDemod, SsbDemod};
+use crate::nr::Nr;
 use crate::passband::FilterShape;
 use crate::types::{AgcMode, Complex32, MAX_MANUAL_GAIN_DB, Mode};
 
@@ -67,6 +68,8 @@ pub struct Receiver {
     env: Vec<f32>,
     /// The decoders' audio from the last block.
     decoder: Vec<f32>,
+    /// NR on the listening audio only: the decoders hear it untouched.
+    nr: Nr,
 }
 
 impl Receiver {
@@ -93,6 +96,7 @@ impl Receiver {
             channel: Vec::new(),
             env: Vec::new(),
             decoder: Vec::new(),
+            nr: Nr::default(),
         };
         r.agc.set_mode(r.agc_mode);
         r.agc.set_manual_gain_db(r.gain_db);
@@ -282,6 +286,19 @@ impl Receiver {
         self.decoder.extend_from_slice(&out[start..]);
         self.decoder_agc.process_with_envelope(&mut self.decoder, &self.env);
         self.agc.process_with_envelope(&mut out[start..], &self.env);
+        self.nr.process(&mut out[start..]);
+    }
+
+    /// The listening audio's noise reduction: off (0) or level 1 to 4
+    /// ([`crate::nr`]). The decoders' audio is never touched by it.
+    pub fn set_nr(&mut self, level: u8) {
+        if level != self.nr.level() {
+            self.nr.set_level(level);
+        }
+    }
+
+    pub fn nr(&self) -> u8 {
+        self.nr.level()
     }
 
     /// The decoders' audio for the block [`Self::process`] last ran: the same
