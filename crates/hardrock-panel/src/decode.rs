@@ -459,6 +459,7 @@ fn reception(
         utc,
         src,
         row,
+        from: None,
     })
 }
 
@@ -1459,12 +1460,7 @@ pub(crate) fn hms(utc: f64) -> String {
 /// measured and its guesses, best first, each with USE where DECODE has the
 /// mode.
 /// Returns the mode USE picked, if one was.
-fn autoid_box(
-    ui: &mut egui::Ui,
-    d: &mut Decode,
-    s: &mut DecodeSettings,
-    rx: &Rx,
-) -> Option<Kind> {
+fn autoid_box(ui: &mut egui::Ui, d: &mut Decode, s: &mut DecodeSettings, rx: &Rx) -> Option<Kind> {
     ui.horizontal_wrapped(|ui| {
         let r = chrome::chip(ui, d.autoid_on, "AUTO ID").on_hover_text(
             "Put the receiver's passband over one signal and press: it listens to the audio \

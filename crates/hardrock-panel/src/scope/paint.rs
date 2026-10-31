@@ -774,6 +774,12 @@ fn paint_offset(sc: &mut Scope, p: &egui::Painter, rect: Rect, cx: &Ctx, spectru
         Some((s, _)) => format!("{text} · {}", s.call),
         None => text,
     };
+    // TX on the flag when the radio will transmit on the bar.
+    let text = if sc.tx_follows && sc.tx_at(&cx.rig, cx.span.center, cx.span.width).from_bar {
+        format!("TX {text}")
+    } else {
+        text
+    };
     let text = match (inside, xx < rect.left()) {
         (true, _) => text,
         (false, true) => format!("◀ {text}"),
@@ -1449,12 +1455,17 @@ fn pointer_on(
     if pressed && let Some(pos) = here {
         sc.skim_press = None;
         if close_at(pos) {
-            sc.offset = None;
+            // SAFETY INTERLOCK (docs/safety-interlocks.md, #9): the bar is
+            // where the radio transmits; locked while it does.
+            if !tx {
+                sc.offset = None;
+            }
         } else if let Some(i) = label_at(pos) {
             sc.skim_press = Some(i);
-        } else if shift || (bar_at(pos.x) && (tx || !rx_grab(pos.x))) {
+        } else if !tx && (shift || (bar_at(pos.x) && !rx_grab(pos.x))) {
             // The offset bar: shift drops it here (and drags it on), a
-            // press on it drags it. It moves nothing but itself.
+            // press on it drags it. It is the transmit marker (`TxAt`), so
+            // not while transmitting (interlock #9).
             sc.offset = Some(OffsetBar { hz: bar_hz(pos.x) });
             sc.offset_drag = true;
         } else if let Some(i) = marker_at(pos.x).filter(|_| {
@@ -1473,7 +1484,7 @@ fn pointer_on(
 
     // Drag.
     if down && let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-        if sc.offset_drag {
+        if sc.offset_drag && !tx {
             sc.offset = Some(OffsetBar { hz: bar_hz(pos.x) });
             ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
         }

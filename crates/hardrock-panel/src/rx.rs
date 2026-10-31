@@ -434,6 +434,10 @@ pub(crate) struct Rx {
     /// Since when the receiver has been where it is (for the split's settle).
     rx_moved: Instant,
     last_rx: f64,
+    /// VFO B's dial last worked out, and where the radio transmits (the
+    /// receiver, or the offset bar), for the readouts.
+    last_tx: f64,
+    pub(crate) tx_plan: Option<scope::TxAt>,
     split: SplitState,
     /// The mode and filter width last sent to the DUO.
     duo_sent: Option<(Mode, u32)>,
@@ -495,6 +499,8 @@ impl Default for Rx {
             offset_sent: f64::NAN,
             rx_moved: Instant::now(),
             last_rx: s.rx_hz,
+            last_tx: s.rx_hz,
+            tx_plan: None,
             split: SplitState::default(),
             duo_sent: None,
             vol: VolSync::default(),
@@ -522,6 +528,7 @@ impl Rx {
             rate: s.rate,
             rx_hz: s.rx_hz,
             last_rx: s.rx_hz,
+            last_tx: s.rx_hz,
             mode: mode_of(&s.mode),
             passband: s.passband,
             centre: s.centre_hz,
@@ -858,8 +865,23 @@ impl Rx {
             p.set_offset_hz(off);
             self.offset_sent = off;
         }
-        if self.rx_hz != self.last_rx {
+        // Where to transmit: the receiver, or the offset bar when it is up
+        // (`scope::TxAt`). A bar moved is a receiver moved, for the settle.
+        let tx = scope.tx_at(
+            &scope::ScopeRig {
+                rx_hz: self.rx_hz,
+                mode: self.mode,
+                passband: self.passband,
+                transmitting: now.transmitting,
+                on_air: now.transmitting,
+            },
+            self.centre,
+            self.rate as f64 * scope::USABLE_SPAN,
+        );
+        self.tx_plan = Some(tx);
+        if self.rx_hz != self.last_rx || tx.dial_hz != self.last_tx {
             self.last_rx = self.rx_hz;
+            self.last_tx = tx.dial_hz;
             self.rx_moved = Instant::now();
         }
         if self.running == IqChoice::Elad {
@@ -884,7 +906,7 @@ impl Rx {
             && r.freq_hz.is_some_and(|a| (a as f64 - self.centre).abs() < 1.0)
         {
             let proto = r.model.protocol();
-            let frames = self.split.frames(&*proto, r, self.rx_hz, s.tx_follows_rx);
+            let frames = self.split.frames(&*proto, r, tx.dial_hz, s.tx_follows_rx);
             // Read back after each; refused while transmitting (#5).
             link.set(frames);
         }

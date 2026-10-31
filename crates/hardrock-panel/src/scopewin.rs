@@ -292,6 +292,7 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
             name: crate::slices::name(x.id),
         })
         .collect();
+    scope.tx_follows = s.tx_follows_rx;
     // With no stream (opening, or an open that failed), SPAN shows the rate
     // asked for rather than 0k.
     if snap.sample_rate <= 0.0 && rx.asked_rate() > 0 {

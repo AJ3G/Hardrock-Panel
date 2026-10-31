@@ -84,6 +84,7 @@ use eframe::egui_wgpu::RenderState;
 use sdr::{SpectrumFrame, ZoomRequest};
 
 pub use digimodes::Digi;
+pub use offset::TxAt;
 pub(crate) use paint::bw_text;
 pub use settings::ScopeSettings;
 pub use skim::{KeyTag, SkimFeed, SkimSpot};
@@ -337,6 +338,9 @@ pub struct Scope {
     skim_on_bar: Option<usize>,
     /// The slices running besides the receiver, set before each `ui`.
     pub(crate) slices: Vec<SliceMark>,
+    /// TX follows RX is on, so the radio transmits on the bar (set before
+    /// each `ui`).
+    pub(crate) tx_follows: bool,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -418,6 +422,7 @@ impl Scope {
             offset_close: None,
             skim_on_bar: None,
             slices: Vec::new(),
+            tx_follows: false,
         }
     }
 
@@ -484,6 +489,32 @@ impl Scope {
     pub fn show_data(&mut self, d: Option<&'static Digi>, note: Option<String>) {
         self.digi = d;
         self.digi_note = note;
+    }
+
+    /// Where the radio is to transmit, from the offset bar (`offset::tx_at`),
+    /// for the receiver `rig` and the span centred on `centre_hz`, `width_hz`
+    /// wide on screen.
+    pub fn tx_at(&self, rig: &ScopeRig, centre_hz: f64, width_hz: f64) -> TxAt {
+        // A data mode's audio range, for the sideband ones: in AM and FM the
+        // bar is a channel, as in voice.
+        let data = self
+            .digi
+            .filter(|d| {
+                matches!(
+                    d.side,
+                    digimodes::Side::Usb | digimodes::Side::Lsb | digimodes::Side::Voice
+                )
+            })
+            .map(|d| (d.lo, d.hi));
+        let half = width_hz / 2.0;
+        offset::tx_at(
+            rig.rx_hz,
+            rig.mode.is_lower(),
+            rig.passband,
+            self.offset,
+            data,
+            (centre_hz - half, centre_hz + half),
+        )
     }
 
     /// Set the transverter LO from elsewhere (the radio window's offset), Hz.

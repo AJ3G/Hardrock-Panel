@@ -28,6 +28,10 @@ pub(crate) enum Source {
     Skim,
     /// PSK Reporter: stations that heard AJ3G.
     PskReporter,
+    /// PSK Reporter: everyone's reports on GLOBE's band in the last 15
+    /// minutes, between other stations. They feed PROP, PATHS, REACH, BEST
+    /// and HEARD ≥, not the station list or the map's dots.
+    PskBand,
 }
 
 impl Source {
@@ -36,6 +40,7 @@ impl Source {
             Source::Decode => "DECODE",
             Source::Skim => "SKIM",
             Source::PskReporter => "PSK REPORTER",
+            Source::PskBand => "PSK BAND",
         }
     }
 
@@ -60,6 +65,9 @@ pub(crate) struct Reception {
     pub src: Source,
     /// Its DECODE line, for SHOW IN DECODE.
     pub row: Option<u64>,
+    /// Where the path starts: `None` is the station itself; PSK BAND's
+    /// reports, between two other stations, carry their receiver's place.
+    pub from: Option<LatLon>,
 }
 
 impl Reception {
@@ -182,7 +190,7 @@ pub(crate) fn build(
             out[i].best_db = Some(out[i].best_db.map_or(m, |b| b.max(m)));
         }
         let cells = &mut out[i].cells;
-        for p in hop_points(qth, r.pos) {
+        for p in hop_points(r.from.unwrap_or(qth), r.pos) {
             let pl = super::sphere::ll_of(p);
             let dlat = reach_rad.to_degrees();
             let row_lo = (((90.0 - pl.lat - dlat) / CELL_DEG).floor().max(0.0)) as usize;
@@ -233,22 +241,26 @@ fn secant(km: f64) -> f64 {
 
 /// HEARD ≥: the highest frequency that has demonstrably got through near
 /// `qth`, as a 3000 km path would carry it, MHz: a floor (the ionosphere was
-/// at least this good), never an estimate. A path counts when its middle is
-/// within 1500 km of `qth` and it is longer than 300 km (shorter ones may
-/// never have touched the layer), and two different stations must show it.
+/// at least this good), never an estimate. A path counts when the middle of
+/// one of its hops is within 1500 km of `qth` and it is longer than 300 km
+/// (shorter ones may never have touched the layer), and two different
+/// stations must show it. A path between two other stations (PSK BAND)
+/// counts the same way: its hop over the station's sky is what matters.
 pub(crate) fn heard_floor(recs: &[Reception], qth: LatLon, since: f64) -> Option<f64> {
     let q = vec_ll(qth);
     let mut found: Vec<(f64, &str)> = recs
         .iter()
         .filter(|r| r.utc >= since && r.band().is_some())
         .filter_map(|r| {
-            let km = distance_km(qth, r.pos);
+            let a = r.from.unwrap_or(qth);
+            let km = distance_km(a, r.pos);
             if km < 300.0 {
                 return None;
             }
             let hops = (km / 3000.0).ceil().max(1.0);
-            let first = slerp(q, vec_ll(r.pos), 0.5 / hops);
-            (angle(first, q) * EARTH_KM <= 1500.0)
+            hop_points(a, r.pos)
+                .into_iter()
+                .any(|p| angle(p, q) * EARTH_KM <= 1500.0)
                 .then(|| (r.rf_hz / 1e6 * secant(3000.0) / secant(km / hops), r.call.as_str()))
         })
         .collect();
@@ -338,6 +350,7 @@ mod tests {
             utc,
             src: Source::Decode,
             row: None,
+            from: None,
         }
     }
 

@@ -11,6 +11,7 @@
 //! | api.open-meteo.com | The weather at the station's grid | 15 min |
 //! | api.weather.gov | Weather alerts at the station (United States only) | 15 min |
 //! | retrieve.pskreporter.info | Who heard the station's callsign in the last hour (PSK REPORTER on) | 5 min |
+//! | retrieve.pskreporter.info | Everyone's reports on GLOBE's band in the last 15 minutes (PSK BAND on) | 15 min |
 //!
 //! Each is parsed here by a plain function, so the tests read sample answers
 //! and the container never calls out. Nothing is ever sent but the request.
@@ -120,6 +121,10 @@ pub(crate) struct Fetched {
     pub hamqsl: Option<HamQsl>,
     /// PSK Reporter: who heard the station, the whole last hour.
     pub heard_me: Vec<Reception>,
+    /// PSK Reporter: everyone's reports on `band_for`'s band, the last 15
+    /// minutes, as paths from each receiver to its sender (PSK BAND).
+    pub band_paths: Vec<Reception>,
+    pub band_for: Option<(u64, u64)>,
     /// Bumped each time anything arrives.
     pub serial: u64,
     /// By source name: SWPC, OVATION, KC2G, CLOUDS, WX, NWS, PSKR.
@@ -154,6 +159,9 @@ pub(crate) struct Ask {
     pub call: Option<String>,
     pub pskr: bool,
     pub clouds: bool,
+    /// PSK BAND: the band's edges, Hz, to ask PSK Reporter about; `None` is
+    /// off.
+    pub pskr_band: Option<(u64, u64)>,
 }
 
 /// The fetcher's thread, while the window is open.
@@ -247,6 +255,10 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
         ("WX", 15),
         ("NWS", 15),
         ("PSKR", 5),
+        // Everyone's reports on one band are a big answer, and PSK Reporter
+        // asks for few queries: one band, every 15 minutes, the window it
+        // asks for.
+        ("PSKBAND", 15),
         // N0NBH updates hourly and asks that it be fetched no more often.
         ("HAMQSL", 60),
     ]
@@ -261,6 +273,7 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
             call: None,
             pskr: false,
             clouds: false,
+            pskr_band: None,
         });
         // A new grid or callsign: the station's own sources again at once.
         if last_ask.as_ref().is_some_and(|l| {
@@ -269,6 +282,16 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
             for d in &mut due {
                 if matches!(d.name, "WX" | "NWS" | "PSKR" | "CLOUDS") {
                     d.next = Instant::now();
+                }
+            }
+        }
+        // Another band: its reports as soon as allowed, never sooner than
+        // five minutes after the last band asked.
+        if last_ask.as_ref().is_some_and(|l| l.pskr_band != a.pskr_band) {
+            for d in &mut due {
+                if d.name == "PSKBAND" {
+                    let soonest = d.next.checked_sub(d.every).map(|t| t + Duration::from_secs(300));
+                    d.next = soonest.unwrap_or_else(Instant::now).max(Instant::now());
                 }
             }
         }
@@ -326,6 +349,15 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
                         .map(|r| with(&data, |f| f.heard_me = r)),
                     None => Err("no callsign in SETTINGS → Station".into()),
                 },
+                "PSKBAND" if a.pskr_band.is_some() => {
+                    let band = a.pskr_band.expect("checked");
+                    get_text(&ag, &pskr_band_url(band)).map(|t| parse_pskr_band(&t)).map(|r| {
+                        with(&data, |f| {
+                            f.band_paths = r;
+                            f.band_for = Some(band);
+                        })
+                    })
+                }
                 // Turned off: asked again as soon as it is turned on.
                 _ => {
                     d.next = Instant::now();
@@ -666,6 +698,46 @@ fn pskr_url(call: &str) -> String {
     )
 }
 
+/// Everyone's reports between `lo` and `hi` Hz in the last 15 minutes, as
+/// SDRoxide asks for its band's spots. Only read: nothing is ever sent.
+fn pskr_band_url((lo, hi): (u64, u64)) -> String {
+    format!(
+        "https://retrieve.pskreporter.info/query?flowStartSeconds=-900&rronly=1&noactive=1&frange={lo}-{hi}"
+    )
+}
+
+/// PSK Reporter's band-wide answer: each report with both locators, as a
+/// path from its receiver to its sender (PSK BAND).
+pub(crate) fn parse_pskr_band(t: &str) -> Vec<Reception> {
+    let place = |grid: &str| {
+        let g: String = grid.chars().take(if grid.len() >= 6 { 6 } else { 4 }).collect();
+        let pos = grid_to_latlon(&g)
+            .or_else(|| grid_to_latlon(&grid.chars().take(4).collect::<String>()))?;
+        Some((g, pos))
+    };
+    t.split("<receptionReport")
+        .skip(1)
+        .filter_map(|rest| {
+            let tag = &rest[..rest.find('>')?];
+            let tag = format!(" {tag}");
+            let (grid, pos) = place(attr(&tag, "senderLocator")?)?;
+            let (_, from) = place(attr(&tag, "receiverLocator")?)?;
+            Some(Reception {
+                call: attr(&tag, "senderCallsign")?.to_string(),
+                grid,
+                pos,
+                rf_hz: attr(&tag, "frequency")?.parse().ok()?,
+                mode: attr(&tag, "mode").unwrap_or("").to_string(),
+                snr: attr(&tag, "sNR").and_then(|s| s.parse().ok()),
+                utc: attr(&tag, "flowStartSeconds")?.parse().ok()?,
+                src: Source::PskBand,
+                row: None,
+                from: Some(from),
+            })
+        })
+        .collect()
+}
+
 /// The value of `name="…"` in an XML tag's text.
 fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let key = format!(" {name}=\"");
@@ -697,6 +769,7 @@ pub(crate) fn parse_pskreporter(t: &str) -> Vec<Reception> {
                 utc: attr(&tag, "flowStartSeconds")?.parse().ok()?,
                 src: Source::PskReporter,
                 row: None,
+                from: None,
             })
         })
         .collect()
@@ -868,6 +941,22 @@ mod tests {
         );
         assert_eq!(r[0].src, Source::PskReporter);
         assert_eq!(r[0].band(), Some("20"));
+    }
+
+    #[test]
+    fn psk_band_reports_become_paths_between_two_other_stations() {
+        let x = r#"<receptionReports>
+            <receptionReport receiverCallsign="EA5XYZ" receiverLocator="IM98wk" senderCallsign="K1ABC" senderLocator="FN42"
+              frequency="14075123" flowStartSeconds="1792681200" mode="FT8" sNR="-13" />
+            <receptionReport receiverCallsign="NOGRID" senderCallsign="K1ABC" senderLocator="FN42" frequency="14075123" flowStartSeconds="1792681200" mode="FT8" />
+            </receptionReports>"#;
+        let r = parse_pskr_band(x);
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].call.as_str(), r[0].grid.as_str()), ("K1ABC", "FN42"));
+        assert_eq!(r[0].src, Source::PskBand);
+        let from = r[0].from.expect("the receiver's place");
+        assert!((from.lat - grid_to_latlon("IM98wk").unwrap().lat).abs() < 1e-9);
+        assert!(pskr_band_url((14_000_000, 14_350_000)).ends_with("&frange=14000000-14350000"));
     }
 
     #[test]

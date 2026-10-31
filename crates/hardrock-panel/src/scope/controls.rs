@@ -440,19 +440,39 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
         if chip(ui, false, "Clear").clicked() {
             sc.markers.clear();
         }
+        // CENTRE RX (31 Oct 2026, AJ3G: "recenter the ELAD VFO to where I am
+        // listening"): VFO A to the receiver, and the span with it; split
+        // then comes off, the receiver being on the dial. SAFETY INTERLOCK
+        // (docs/safety-interlocks.md, #9 and #10): VFO A is never moved while
+        // transmitting; the key is dark then and `Rx::recentre` refuses too.
+        let tx = cx.rig.transmitting;
+        let r = ui.add_enabled_ui(!tx, |ui| chip(ui, false, "CENTRE RX")).inner.on_hover_text(
+            "Move the radio's VFO A, and the span with it, to where the receiver is \
+                 listening. Not while transmitting",
+        );
+        if r.clicked() && !tx {
+            out.recentre = Some(cx.rig.rx_hz.round());
+        }
         note(ui, "· right-click places one, drag to move it · readouts to 0.1 Hz");
         caption(ui, "· Offset bar");
         let on = sc.offset.is_some();
-        let r = chip(ui, on, if on { "OFFSET ×" } else { "OFFSET" }).on_hover_text(
-            "A bar that reads how far it is from the dial, in DECODE's Hz, and where it is. \
-             Dropped at the receiver's passband; shift-click the scope to put it anywhere, \
-             drag it to move it. It tunes nothing",
-        );
-        if r.clicked() {
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #9): the bar is where
+        // the radio transmits, so it is locked while it does.
+        let r = ui
+            .add_enabled_ui(!tx, |ui| chip(ui, on, if on { "OFFSET ×" } else { "OFFSET" }))
+            .inner
+            .on_hover_text(
+                "Your transmit marker. With TX follows RX on, the radio transmits on the bar: \
+                 in voice and CW VFO B moves with it (split), in a data mode it is the audio \
+                 offset. Dropped at the receiver's passband; shift-click the scope to put it \
+                 anywhere, drag it to move it. Locked while transmitting",
+            );
+        if r.clicked() && !tx {
             sc.offset =
                 if on { None } else { Some(OffsetBar::at_receiver(cx.rig.rx_hz, cx.rig.passband)) };
         }
         if on
+            && !tx
             && chip(ui, false, "CENTRE")
                 .on_hover_text("Put the offset bar in the middle of the receiver's passband")
                 .clicked()
@@ -468,6 +488,25 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
                     fmt_tenth(cx.map.shown(b.hz))
                 ),
             );
+            let at = sc.tx_at(&cx.rig, cx.span.center, cx.span.width);
+            let says = match (sc.tx_follows, at.from_bar, at.audio_hz) {
+                (false, ..) => "· TX follows RX is off: the bar only measures".to_string(),
+                (true, false, _) => {
+                    "· TX on the receiver (the bar is off the span or on another band)".into()
+                }
+                (true, true, Some(a)) if at.dial_hz == cx.rig.rx_hz => {
+                    format!("· TX audio {} (set it in your data program)", fmt_offset(a))
+                }
+                (true, true, Some(a)) => format!(
+                    "· TX: VFO B {} with audio {} (set it in your data program)",
+                    fmt_tenth(cx.map.shown(at.dial_hz)),
+                    fmt_offset(a)
+                ),
+                (true, true, None) => {
+                    format!("· TX on the bar: VFO B {}", fmt_tenth(cx.map.shown(at.dial_hz)))
+                }
+            };
+            note(ui, &says);
         }
     });
 

@@ -436,6 +436,23 @@ heard as static.
   (In split, and at any SPAN above 192k, the DUO's own USB dial read-back
   doesn't say where VFO A is, so the panel uses CAT here, not the read-back.
   With no CAT link, a band change on the radio isn't seen in those cases.)
+- *The offset bar is the transmit marker.* With the red bar up, the radio
+  transmits on the bar instead of on the receiver, anywhere inside the span:
+  - *SSB, CW, AM and FM:* VFO B moves as far as the bar is from where OFFSET
+    drops it (the middle of the passband), with split on. A bar dropped there
+    transmits on the receiver; drag it 2 kHz up and you transmit 2 kHz up
+    while still listening on the receiver.
+  - *Data modes (a DATA key lit):* VFO B stays on the receiver's dial and the
+    bar's offset is the transmit audio offset, as WSJT-X's red goalpost is.
+    Set that figure as the TX offset in your data program. Past the mode's
+    audio range (FT8: 200 to 3000 Hz), VFO B moves instead so the middle of
+    the range lands on the bar, and the readout gives that audio figure.
+  - The Markers row says where you will transmit (*TX on the bar: VFO B
+    14.076 600.0*, *TX audio +1 234 Hz*), and the bar's flag starts with TX.
+  - A bar off the span, or left on another band by a band change, is ignored:
+    you transmit on the receiver. No bar: the receiver, as before.
+  - The bar is locked while you transmit (OFFSET, CENTRE, the × and dragging),
+    and VFO B and split are never changed then.
 - *SPLIT on RADIO.* Pressing SPLIT turns TX follows RX on or off with it.
   Turning split off with SPLIT is how to take it off for good; otherwise the
   panel would put it back while the receiver is off VFO A.
@@ -504,9 +521,10 @@ that marker away. › marks the one the next right-click places. **MKR→PEAK** 
 strongest signal in view and follows it. Pressed again while lit, or with
 **Clear**, the markers go and nothing stays lit.
 
-**The offset bar**, a thin red line, marks where you will put your transmit
-signal and measures how far it is from the dial, in the same hertz DECODE
-shows in its AF column. It doesn't set the transmit frequency itself. **Shift-click** the spectrum or the
+**The offset bar**, a thin red line, is your transmit marker: with TX follows
+RX on, the radio transmits on it (see TX follows RX above). It also measures
+how far it is from the dial, in the same hertz DECODE shows in its AF
+column. **Shift-click** the spectrum or the
 waterfall to drop it there (keep the button down to slide it), or press
 **OFFSET** in the Markers row to drop it in the middle of the receiver's
 passband. Drag it to move it; **CENTRE**, beside OFFSET while the bar is
@@ -514,9 +532,13 @@ up, puts it back in the middle of the passband. Its flag at the top of the spect
 offset and the frequency (*+1 315 Hz · 14.075 315.2*), and the waterfall's
 foot repeats the offset. Put near a station DECODE has labelled, it jumps onto
 that station's frequency, so it reads exactly DECODE's figure. The **×** on
-its flag, or OFFSET again, takes it away. It tunes nothing, so it works while
-you transmit; it stays on its frequency when you retune, and the reading
-follows the dial (in LSB it counts down from the dial, as the audio does).
+its flag, or OFFSET again, takes it away. It is locked while you transmit; it
+stays on its frequency when you retune, and the reading follows the dial (in
+LSB it counts down from the dial, as the audio does).
+
+**CENTRE RX**, in the Markers row, moves the radio's VFO A to where the
+receiver is listening, and the span with it. The receiver is then on the
+dial, so split comes off. It is greyed while you transmit.
 
 ![The skimmer's labels and the offset bar, DECODE on FT8](images/skimmer-offset.png)
 
@@ -716,7 +738,13 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
   colours each place by its best band.
 - **SOURCES.** DECODE and SKIM are the panel's own. **PSK REPORTER** (off to
   start) asks pskreporter.info every five minutes who heard your callsign in
-  the last hour, and draws those as dashed paths.
+  the last hour, and draws those as dashed paths. **PSK BAND** (on to start)
+  asks pskreporter.info every 15 minutes for everyone's reports on the band
+  GLOBE shows, in the last 15 minutes: real copies between other stations,
+  as SDRoxide reads them. They go into PROP, PATHS, REACH, BEST and HEARD ≥
+  (a path counts for HEARD ≥ when one of its hops is over your area), but
+  not into the station list or the map's dots. It only reads; the panel
+  never sends PSK Reporter anything from it.
 - **FORECAST.** Each band from 160 to 10 m, hour by hour for the next 24
   hours at your grid, dark for closed and blue to white for likely open. It
   is a rough model, not VOACAP: the MUF rises with the Sun and the solar
@@ -788,7 +816,8 @@ panel won't switch the antenna, band or tuner:
 - The amplifier's band is not changed to follow the radio until the
   transmission ends.
 - The scope, and outside programs, don't retune the receiver or the radio,
-  and the panel doesn't change split, until the transmission ends.
+  and the panel doesn't change split, until the transmission ends. The
+  offset bar, where the radio transmits, is locked, and CENTRE RX is greyed.
 - The ELAD's I/Q isn't opened, and its centre isn't moved over USB, until the
   transmission ends.
 - An outside program can't key the radio unless TUNE could be keyed at the

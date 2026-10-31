@@ -55,6 +55,9 @@ pub(crate) struct GlobeSettings {
     pub skim: bool,
     /// Ask PSK Reporter who heard the station (off until turned on).
     pub pskr: bool,
+    /// Ask PSK Reporter for everyone's reports on GLOBE's band (31 Oct
+    /// 2026, AJ3G: copies "under band conditions", as SDRoxide reads them).
+    pub pskr_band: bool,
     pub proj: Proj,
     /// How long PROP's evidence takes to halve, minutes.
     pub half_life_min: f64,
@@ -80,6 +83,7 @@ impl Default for GlobeSettings {
             decode: true,
             skim: true,
             pskr: false,
+            pskr_band: true,
             proj: Proj::Globe,
             half_life_min: 45.0,
             popped: false,
@@ -93,6 +97,7 @@ impl GlobeSettings {
             Source::Decode => self.decode,
             Source::Skim => self.skim,
             Source::PskReporter => self.pskr,
+            Source::PskBand => self.pskr_band,
         }
     }
 }
@@ -121,7 +126,7 @@ pub(crate) struct Globe {
     fields: Vec<BandField>,
     /// Bumped each time the field is built again.
     fields_id: u64,
-    built: Option<(f64, usize, (bool, bool, bool), u64)>,
+    built: Option<(f64, usize, (bool, bool, bool, bool, usize), u64)>,
     floor: Option<f64>,
     tex: Option<egui::TextureHandle>,
     painting: Option<mpsc::Receiver<Vec<u8>>>,
@@ -266,7 +271,17 @@ impl Globe {
     }
 
     fn step(&mut self, s: &GlobeSettings, st: &StationSettings, now: f64) {
-        let ask = Ask { qth: st.pos(), call: st.call(), pskr: s.pskr, clouds: s.clouds };
+        let edges = bandplan::HAM_BANDS
+            .iter()
+            .find(|b| b.name == band_static(&s.band))
+            .map(|b| (b.lo as u64, b.hi as u64));
+        let ask = Ask {
+            qth: st.pos(),
+            call: st.call(),
+            pskr: s.pskr,
+            clouds: s.clouds,
+            pskr_band: edges.filter(|_| s.pskr_band),
+        };
         match &self.fetcher {
             Some(f) => f.set_ask(ask),
             None => self.fetcher = Some(Fetcher::start(ask)),
@@ -286,7 +301,7 @@ impl Globe {
             self.centre = LatLon { lat: (qth.lat - 15.0).clamp(-60.0, 60.0), lon: qth.lon + 30.0 };
             self.placed = true;
         }
-        let key = (s.decode, s.skim, s.pskr);
+        let key = (s.decode, s.skim, s.pskr, s.pskr_band, self.got.band_paths.len());
         let hl = (s.half_life_min * 60.0).max(60.0);
         let due = match self.built {
             None => true,
@@ -298,7 +313,9 @@ impl Globe {
             }
         };
         if due {
-            let recs = self.history.all();
+            let mut recs = self.history.all();
+            // PSK BAND's paths feed PROP and the table, not the list.
+            recs.extend(self.got.band_paths.iter().cloned());
             self.fields = field::build(&recs, qth, now, hl, &|src| s.source_on(src));
             self.floor = field::heard_floor(
                 &recs.into_iter().filter(|r| s.source_on(r.src)).collect::<Vec<_>>(),
@@ -647,6 +664,13 @@ fn toolbar(ui: &mut egui::Ui, g: &mut Globe, s: &mut GlobeSettings) {
                 &mut s.pskr,
                 "PSK REPORTER",
                 "Asks PSK Reporter every 5 minutes who heard your callsign in the last hour",
+            ),
+            (
+                &mut s.pskr_band,
+                "PSK BAND",
+                "Asks PSK Reporter every 15 minutes for everyone's reports on the band GLOBE \
+                 shows, the last 15 minutes: real copies between other stations, for PROP, \
+                 PATHS, REACH, BEST and HEARD ≥. Only read; nothing is sent",
             ),
         ] {
             if chrome::chip(ui, *on, label).on_hover_text(tip).clicked() {
@@ -1979,6 +2003,7 @@ mod tests {
             utc: 0.0,
             src: Source::Decode,
             row: Some(3),
+            from: None,
         };
         let p = tune_pick(&r).unwrap();
         assert_eq!(p.dial, 21_074_000);
@@ -2060,6 +2085,7 @@ mod tests {
             utc: 0.0,
             src: Source::Decode,
             row: None,
+            from: None,
         });
         g.follow_rx(&mut s, None);
         assert_eq!(s.band, "10");
