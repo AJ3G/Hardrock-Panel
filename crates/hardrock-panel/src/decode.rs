@@ -1788,8 +1788,11 @@ fn body(
         if s.skim_keys {
             caption(ui, "CW WPM");
             let (lo, hi) = &mut s.skim_cw_wpm;
-            ui.add(egui::DragValue::new(lo).range(6..=*hi).suffix(" –"))
+            // Two numbers with "to" between them: a dash inside the first box
+            // read as a minus sign (AJ3G, 31 Oct 2026: "6-35").
+            ui.add(egui::DragValue::new(lo).range(6..=*hi))
                 .on_hover_text("The slowest CW the skimmer reads and labels, WPM");
+            ui.label("to");
             ui.add(egui::DragValue::new(hi).range(*lo..=70))
                 .on_hover_text("The fastest CW the skimmer reads and labels, WPM");
         }
