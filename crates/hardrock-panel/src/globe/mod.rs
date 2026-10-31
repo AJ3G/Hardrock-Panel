@@ -1808,8 +1808,8 @@ fn band_conditions(
             cell(ui, *w, RichText::new(h).size(9.5).strong().color(theme::TEXT()));
         }
     });
-    // 10 m at the top, as FORECAST's chart reads.
-    for (k, (band, _)) in forecast::BANDS.iter().enumerate().rev() {
+    // 160 m at the top and 10 m at the foot (AJ3G, 31 Oct 2026).
+    for (k, (band, _)) in forecast::BANDS.iter().enumerate() {
         let f = g.fields.iter().find(|f| f.band == *band);
         let rx = g.rx_band == Some(*band);
         ui.horizontal(|ui| {
