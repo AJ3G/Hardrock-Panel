@@ -366,6 +366,18 @@ fn radio_body(
                     if chrome::chip(ui, false, text).on_hover_text(hover).clicked() {
                         f.out.pop = Some(!popped);
                     }
+                    // The end of the panel's log, which has each setting
+                    // sent and what the radio read back (`rigcat: set …`).
+                    if chrome::chip(ui, false, "COPY LOG")
+                        .on_hover_text(
+                            "Copy the end of the panel's log: each setting sent to the radio \
+                             and what it read back, for a bug report",
+                        )
+                        .clicked()
+                        && let Some(t) = crate::logfile::tail()
+                    {
+                        ui.ctx().copy_text(t);
+                    }
                 });
             });
             if !s.connected {

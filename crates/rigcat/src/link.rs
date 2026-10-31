@@ -602,14 +602,37 @@ fn run<P: Read + Write>(
                         }
                         // Read it back: the radio doesn't acknowledge a set, so
                         // the panel shows what the read says it took.
+                        // Each set and what the radio says it took go in the
+                        // log, so a setting the radio ignores can be seen
+                        // there (AJ3G's NR on E1, 31 Oct 2026). A read-back
+                        // that differs is asked once more after a moment,
+                        // in case the radio was still applying it.
                         if let Some(rb) = read_back(rig.proto.as_ref(), &f) {
-                            let res = rig.query(&rb);
-                            let strays = std::mem::take(&mut rig.strays);
-                            set(status, |s| {
-                                for r in strays.iter().chain(res.as_ref().ok()) {
-                                    rig.proto.apply(s, r);
+                            let sent = String::from_utf8_lossy(&f.bytes).to_string();
+                            let mut took = String::new();
+                            for attempt in 0..2 {
+                                if attempt == 1 {
+                                    std::thread::sleep(Duration::from_millis(250));
                                 }
-                            });
+                                let res = rig.query(&rb);
+                                let strays = std::mem::take(&mut rig.strays);
+                                set(status, |s| {
+                                    for r in strays.iter().chain(res.as_ref().ok()) {
+                                        rig.proto.apply(s, r);
+                                    }
+                                });
+                                took = match &res {
+                                    Ok(r) => format!("{}{};", r.key, r.body),
+                                    Err(e) => format!("{e:?}"),
+                                };
+                                // Only the noise controls wait and ask again:
+                                // a dial or volume set mustn't hold the link.
+                                let slow = matches!(sent.get(..2), Some("NR" | "NC" | "NB" | "NK"));
+                                if took == sent || !slow {
+                                    break;
+                                }
+                            }
+                            info!("rigcat: set {sent} read back {took}");
                         }
                     }
                 }
