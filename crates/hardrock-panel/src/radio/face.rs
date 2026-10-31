@@ -1026,7 +1026,10 @@ pub(crate) fn knobs(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, height: f
                 "AGC or manual gain (CAT GC); the AGC speed and gain level have no known \
                         CAT encoding, so set them on the radio"
             }
-            E1::Nr => "noise reduction, off or its level (CAT NR, NC)",
+            E1::Nr => {
+                "the DUO's noise reduction, off or its level (CAT NR, NC). It works on the \
+                 DUO's own audio, heard only at SPAN 192k; wider, use NR on SCOPE"
+            }
             E1::Nb => "the noise blanker, off or its level (CAT NB, NK)",
         };
         format!(

@@ -127,7 +127,9 @@ says more.
   back. A hold starts digit by digit: turn to change the lit digit, use E1 or
   E2 to move along, and click or hold to go back.
 - **E1.** Turning changes VOL, SQL, AGC (AGC or manual gain), NR or NB, the
-  one named under it; a click picks the next. VOL is one volume with
+  one named under it; a click picks the next. NR and NB here are the DUO's
+  own, on the DUO's audio: heard at SPAN 192k, not above it (use SCOPE's NR
+  there). VOL is one volume with
   RADIO's VOLUME and SCOPE's Sound slider: move any of them, or the radio's
   own knob, and the others follow, so it turns whichever audio you hear (the
   radio's at 192 kHz SPAN, the panel's receiver wider). That is only while
