@@ -1304,7 +1304,27 @@ impl Rx {
             self.tune(hz, now.transmitting);
         }
         if let Some(c) = out.recentre {
-            self.recentre(c, now);
+            // A band change on the radio (its band key or knob) moves the
+            // stream's centre first and the receiver after it, a frame or
+            // more later. A scope recentre seen in between is asked for the
+            // receiver still on the old band, and VFO A went back there: 30 m
+            // to 10 m and 80 m to 10 m went to 10 m and back (AJ3G, 7 Nov
+            // 2026; ELAD log "recentre to 10.140000 MHz" after the dial moved).
+            // So only while the stream's centre is the one the receiver
+            // knows; the receiver follows the dial and the scope asks again
+            // if it still needs to.
+            let behind = self
+                .pipeline
+                .as_ref()
+                .is_some_and(|p| centre_moved_under(p.lock().center_hz, self.centre));
+            if behind {
+                tracing::info!(
+                    "scope recentre to {} held: the dial moved and the receiver has not followed yet",
+                    mhz(c)
+                );
+            } else {
+                self.recentre(c, now);
+            }
         }
         if let Some(rate) = out.sample_rate
             && rate != s.rate
@@ -1439,6 +1459,12 @@ impl SplitState {
         self.last = Some((want.clone(), Instant::now()));
         want
     }
+}
+
+/// The stream's centre `stream_hz` is not yet the receiver's `known_hz`:
+/// the dial moved on the radio and the receiver has not followed it.
+fn centre_moved_under(stream_hz: f64, known_hz: f64) -> bool {
+    stream_hz > 0.0 && (stream_hz - known_hz).abs() >= 1.0
 }
 
 /// A frequency for the ELAD log, MHz to the hertz.
@@ -1668,6 +1694,16 @@ mod tests {
     /// The dial read back while the radio transmits (VFO B in split, or
     /// nonsense) does not move the receiver; a real move of the dial is
     /// taken once the over is done and the read-back has settled.
+    #[test]
+    fn a_scope_recentre_waits_while_the_dial_has_moved_under_the_receiver() {
+        // 80 m to 10 m on the radio: the stream is on 10 m, the receiver
+        // still knows 80 m. A recentre to the old receiver is held.
+        assert!(centre_moved_under(28_074_000.0, 3_573_000.0));
+        // Caught up, or nothing streaming yet: recentre as asked.
+        assert!(!centre_moved_under(28_074_000.0, 28_074_000.0));
+        assert!(!centre_moved_under(0.0, 3_573_000.0));
+    }
+
     #[test]
     fn the_receiver_is_not_moved_by_the_dial_during_an_over() {
         let scope = Scope::new(None, crate::scope::ScopeSettings::default());
