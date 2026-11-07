@@ -97,7 +97,11 @@ amplifier's.
 **The radio window.** **RADIO** along the top opens the radio's own face: its
 LCD, with the dial, the annunciators (LP, ATT, ANT, IN, CAT, SPLIT, RIT, the
 VFO, XVTR, RX and TX), the S-meter (forward power while transmitting) and the
-power setting, RIT offset and level or SWR. Click the top half of a digit to
+power setting, RIT offset and level or SWR. The S-meter reads the station
+you listen to: the DUO's own meter when the panel's receiver is on VFO A at
+SPAN 192k, and the panel's receiver's level (calibrated with the DUO's own
+figures) when it listens anywhere else, at a wider SPAN or in split, since
+the DUO's own receiver then sits on VFO A, the middle of the span. Click the top half of a digit to
 step it up and the bottom half to step it down, or scroll over it; carries
 roll into the next digit, and the dial stays inside the radio's 9 kHz to
 54 MHz. With the pointer on the dial the arrow keys pick and step a digit, and

@@ -245,6 +245,9 @@ pub(crate) struct TuneArgs<'a> {
     /// The panel's Sound, 0 to 1, when it plays on a speaker other than the
     /// DUO's (the DUO's own is muted then): RADIO's E1 VOL turns this.
     pub panel_vol: Option<f32>,
+    /// The panel's receiver's level, dBm, when it is not where the DUO's own
+    /// receiver (VFO A) listens: RADIO's S-meter reads this then.
+    pub rx_dbm: Option<f32>,
 }
 
 /// What the operator did on the TUNE strip.

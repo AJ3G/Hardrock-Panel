@@ -581,6 +581,21 @@ impl Rx {
         self.pipeline.as_ref().map(Pipeline::snapshot).unwrap_or_default()
     }
 
+    /// The level RADIO's S-meter should read, dBm, when the DUO's own meter
+    /// is not where you listen: the DUO's SM is its receiver's, on VFO A,
+    /// which is the I/Q centre at a wide SPAN and in split. In CW at
+    /// 14.025 MHz with VFO A left on 14.074 it read 14.074 (AJ3G, 7 Nov
+    /// 2026: "the S-Meter does not correspond to stations I know I am
+    /// hearing at 10 over S9"). `None` when the DUO's own meter is right:
+    /// nothing running, or the receiver on VFO A at the DUO's own 192 kHz.
+    pub(crate) fn meter_dbm(&self, r: &RigStatus) -> Option<f32> {
+        let p = self.pipeline.as_ref()?;
+        let wide = p.lock().sample_rate > f64::from(elad_iq::STANDALONE_RATE_HZ);
+        let off_a = r.freq_hz.is_none_or(|a| (a as f64 - self.rx_hz).abs() >= 1.0);
+        let level = p.snapshot().level_dbm;
+        (self.running != IqChoice::Elad || wide || off_a).then_some(level).filter(|l| l.is_finite())
+    }
+
     /// The I/Q centre, the radio's own Hz.
     pub(crate) fn centre(&self) -> f64 {
         self.centre

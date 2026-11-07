@@ -148,6 +148,8 @@ pub(crate) struct Face<'a> {
     pub xvtr: i64,
     /// The panel's Sound when it plays on an outside speaker (E1 VOL).
     pub panel_vol: Option<f32>,
+    /// The panel receiver's level, dBm, when it listens off VFO A.
+    pub rx_dbm: Option<f32>,
     pub st: &'a mut RadioUi,
     pub out: &'a mut RadioOut,
 }
@@ -345,6 +347,7 @@ fn radio_body(
         carrier_blocked: tune.carrier_blocked.clone(),
         xvtr: prefs.xvtr_hz,
         panel_vol: tune.panel_vol,
+        rx_dbm: tune.rx_dbm,
         st: rui,
         out,
     };

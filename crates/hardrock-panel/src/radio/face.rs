@@ -326,7 +326,7 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
             None => ("PWR", 0, "— W".into()),
         }
     } else {
-        match logic::s_dbm(f.p, f.s) {
+        match f.rx_dbm.or_else(|| logic::s_dbm(f.p, f.s)) {
             Some(d) => ("S", logic::s_segments(d, nseg), logic::s_units(d)),
             None => ("S", 0, "—".into()),
         }
@@ -368,7 +368,7 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
     let right = if tx {
         f.s.swr_ratio().map_or("SWR —".into(), |s| format!("SWR {s:.2}"))
     } else {
-        logic::s_dbm(f.p, f.s).map_or(String::new(), |d| format!("{d:.0} dBm"))
+        f.rx_dbm.or_else(|| logic::s_dbm(f.p, f.s)).map_or(String::new(), |d| format!("{d:.0} dBm"))
     };
     p.text(pos2(inner.right(), y + z(9.0)), egui::Align2::RIGHT_CENTER, right, mono, ink);
     height

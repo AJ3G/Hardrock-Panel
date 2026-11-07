@@ -314,6 +314,7 @@ impl App {
             drive: &mut self.saved.drive,
             tone_error: self.tone_error.clone(),
             panel_vol: (!self.rx.sound_via_radio(&self.saved.rx)).then_some(self.saved.rx.volume),
+            rx_dbm: self.rx.meter_dbm(r),
         }
     }
 
