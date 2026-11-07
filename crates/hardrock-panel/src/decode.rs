@@ -725,6 +725,13 @@ impl Decode {
             }
             self.key_held.retain(|h| now - h.heard_utc < crate::scope::skim::key_fade_s(h.mode));
             for p in &st.spots {
+                // RBN (AJ3G, 7 Nov 2026): CW stations calling CQ, when the
+                // SPOTS box's RBN is ticked (`spots::rbn`).
+                if p.mode == decoders::keyskim::KeyMode::Cw
+                    && let Some(c) = &p.call
+                {
+                    self.spots.cw_skim(c, &p.text, p.hz + at.xvtr_hz, p.snr_db, p.wpm, p.heard_utc);
+                }
                 self.skim_log.key(
                     p.id,
                     skimlog::Line {

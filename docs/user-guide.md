@@ -713,6 +713,19 @@ For the WSJT modes:
   and grid are set. The box says what was last sent and when ("PSK Reporter:
   12 spots sent 01:10 UTC"), or what went wrong. Clearing a tick sends
   nothing more, not even what was waiting.
+  **RBN** gives the CW skimmer's stations to the Reverse Beacon Network the
+  way CW Skimmer does: the panel opens a telnet port on this computer only
+  (port 7300, CW Skimmer's), and **RBN Aggregator**, the RBN's own program,
+  reads it and passes the spots on under your callsign. Install Aggregator
+  from reversebeacon.net, close CW Skimmer if it is running (it uses the
+  same port), and point Aggregator's skimmer connection at 127.0.0.1, port
+  7300. SKIM CW/PSK/RTTY must be on. Only stations calling CQ or TEST are
+  spotted, and only once their call has been read twice in what they sent,
+  so a busted call stays off the network; each call goes once a band in ten
+  minutes, never your own. The box says whether Aggregator is connected and
+  how many CW spots have gone ("RBN: port 7300, Aggregator connected, 12 CW
+  spots, last 21:50 UTC"). Nothing leaves the computer unless Aggregator is
+  running.
 
 ## The globe
 

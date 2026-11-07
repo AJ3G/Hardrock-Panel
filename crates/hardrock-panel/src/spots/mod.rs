@@ -1,6 +1,7 @@
 //! SPOTS: telling the world what this station hears. FT8 and FT4 go to PSK
 //! Reporter in batches ([`pskreporter`]), WSPR to WSPRnet after each slot
-//! ([`wsprnet`]).
+//! ([`wsprnet`]). The CW skimmer's stations go to the Reverse Beacon Network
+//! through RBN Aggregator, which reads them from a telnet port here ([`rbn`]).
 //!
 //! Both are off until ticked, and can only be ticked once SETTINGS → Station
 //! has a callsign and a grid. Nothing is sent, or kept to send, while a tick
@@ -11,6 +12,7 @@
 //! box can move to another window.
 
 pub(crate) mod pskreporter;
+pub(crate) mod rbn;
 pub(crate) mod wsprnet;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -30,6 +32,8 @@ pub(crate) fn program() -> String {
 pub(crate) struct SpotSettings {
     pub psk_reporter: bool,
     pub wsprnet: bool,
+    /// The CW skimmer's stations on the telnet port for RBN Aggregator.
+    pub rbn: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +71,12 @@ pub(crate) struct Spots {
     psk_queued: usize,
     /// Why an uploader could not start.
     error: Option<String>,
+    /// The telnet port for RBN Aggregator, and who it spots as.
+    rbn: Option<(Me, rbn::Server)>,
+    rbn_pick: rbn::Picker,
+    /// Spots sent to RBN this run, and the UTC of the last.
+    rbn_sent: (usize, Option<f64>),
+    rbn_error: Option<String>,
 }
 
 impl Default for Spots {
@@ -80,6 +90,10 @@ impl Default for Spots {
             last: [None, None],
             psk_queued: 0,
             error: None,
+            rbn: None,
+            rbn_pick: rbn::Picker::default(),
+            rbn_sent: (0, None),
+            rbn_error: None,
         }
     }
 }
@@ -130,6 +144,22 @@ impl Spots {
             });
             self.last[1] = None;
         }
+        let want_rbn = me.filter(|_| s.rbn);
+        if self.rbn.as_ref().map(|(m, _)| m) != want_rbn {
+            self.rbn = None;
+            self.rbn_error = None;
+            self.rbn = want_rbn.and_then(|m| match rbn::Server::spawn(&m.call, rbn::PORT) {
+                Ok(srv) => Some((m.clone(), srv)),
+                Err(e) => {
+                    self.rbn_error = Some(format!(
+                        "RBN: port {} is taken ({e}); is CW Skimmer running?",
+                        rbn::PORT
+                    ));
+                    None
+                }
+            });
+            self.rbn_sent = (0, None);
+        }
         let now = decoders::slot::utc_now();
         for st in self.status_rx.try_iter() {
             let i = match st.service {
@@ -170,6 +200,24 @@ impl Spots {
         }
     }
 
+    /// A CW signal the skimmer reads: spotted to RBN when it should be
+    /// ([`rbn::Picker`]) and RBN is ticked.
+    pub(crate) fn cw_skim(
+        &mut self,
+        call: &str,
+        text: &str,
+        rf_hz: f64,
+        snr: f32,
+        wpm: u16,
+        utc: f64,
+    ) {
+        let Some((me, srv)) = &self.rbn else { return };
+        if let Some(spot) = self.rbn_pick.offer(&me.call, call, text, rf_hz, snr, wpm, utc) {
+            srv.send(&rbn::line(&me.call, &spot));
+            self.rbn_sent = (self.rbn_sent.0 + 1, Some(utc));
+        }
+    }
+
     pub(crate) fn psk_on(&self) -> bool {
         self.psk.is_some()
     }
@@ -202,6 +250,16 @@ pub(crate) fn spots_box(ui: &mut egui::Ui, s: &mut SpotSettings, spots: &Spots, 
                         .on_hover_text(
                             "Send each WSPR slot's spots to wsprnet.org as it is decoded",
                         )
+                        .on_disabled_hover_text(why);
+                    chrome::checkbox(ui, &mut s.rbn, "RBN")
+                        .on_hover_text(format!(
+                            "The CW skimmer's stations for the Reverse Beacon Network, as CW \
+                             Skimmer gives them: a telnet port on this computer (port {}) that \
+                             RBN Aggregator reads and passes on. Only stations calling CQ or \
+                             TEST, their call read twice, once a band in ten minutes. Needs \
+                             SKIM CW/PSK/RTTY on, and RBN Aggregator running",
+                            rbn::PORT
+                        ))
                         .on_disabled_hover_text(why);
                 });
                 if !ready {
@@ -244,6 +302,29 @@ pub(crate) fn spots_box(ui: &mut egui::Ui, s: &mut SpotSettings, spots: &Spots, 
                 );
             }
             line(ui, "WSPRnet", spots.wspr_on(), &spots.last[1], "nothing sent yet".into());
+            if let Some((_, srv)) = &spots.rbn {
+                let n = srv.connected();
+                let who = match n {
+                    0 => "waiting for RBN Aggregator".to_string(),
+                    1 => "Aggregator connected".to_string(),
+                    n => format!("{n} connected"),
+                };
+                let sent = match spots.rbn_sent {
+                    (0, _) | (_, None) => "no CW spots yet".to_string(),
+                    (k, Some(t)) => {
+                        format!("{k} CW spots, last {} UTC", &crate::decode::hms(t)[..5])
+                    }
+                };
+                let col = if n == 0 { theme::TEXT() } else { theme::CYAN() };
+                ui.label(
+                    RichText::new(format!("RBN: port {}, {who}, {sent}", srv.port))
+                        .size(11.5)
+                        .color(col),
+                );
+            }
+            if let Some(e) = &spots.rbn_error {
+                ui.label(RichText::new(e).size(11.5).color(theme::YELLOW()));
+            }
             if let Some(e) = &spots.error {
                 ui.label(RichText::new(e).size(11.5).color(theme::YELLOW()));
             }
