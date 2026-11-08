@@ -1733,11 +1733,19 @@ fn status_bars(sc: &Scope, ui: &egui::Ui, a: Rect, b: Rect, cx: &Ctx, snap: &sdr
     } else if !snap.alive {
         "IQ stream stopped".to_string()
     } else {
+        // FFT % is the CPU spectrum thread's share of a core. With the
+        // spectrum on the GPU that thread is idle, and the figure it left
+        // read as the GPU's, frozen (AJ3G, 8 Nov 2026): say where the FFT
+        // runs instead, and how many frames a second it gives.
+        let fft = if sc.gpu_fft() {
+            format!("FFT on the GPU, {} frames/s", sc.frame_times.len())
+        } else {
+            format!("FFT {:.0} % (CPU)", snap.spectrum_load * 100.0)
+        };
         format!(
-            "IQ stream OK · {} spectrum drops · DSP {:.0} % · FFT {:.0} %{}",
+            "IQ stream OK · {} spectrum drops · DSP {:.0} % (CPU) · {fft}{}",
             snap.spectrum_drops,
             snap.load * 100.0,
-            snap.spectrum_load * 100.0,
             sc.gpu.map_or(String::new(), |g| format!(" · GPU {}", g.adapter)),
         )
     };

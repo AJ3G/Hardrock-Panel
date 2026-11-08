@@ -685,7 +685,17 @@ fn run_spectrum(
         }
         let block = match blocks.recv_timeout(Duration::from_millis(50)) {
             Ok(b) => b,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                // No blocks (the spectrum is on the GPU, or the stream has
+                // stopped): the thread is idle, not still at its last load,
+                // which the scope showed frozen (AJ3G, 8 Nov 2026).
+                if load != 0.0 && window_start.elapsed() >= Duration::from_secs(1) {
+                    load = 0.0;
+                    (busy, window_samples, window_start) = (Duration::ZERO, 0, Instant::now());
+                    publish(&shared, |s| s.spectrum_load = 0.0);
+                }
+                continue;
+            }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
         };
         if block.resets < resets {

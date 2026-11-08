@@ -380,6 +380,13 @@ the 3D FFT), the band plan and the waterfall from the radio's I/Q, with the
 panel's own receiver in it. **POP OUT** puts it in a window of its own; **DOCK**
 brings it back over the panel.
 
+**The line under the scope** says how it is keeping up: *DSP %* is the share
+of one CPU core the panel's receiver (filtering and demodulation) takes, and
+moves with SPAN, not with the FFT's resolution. *FFT %* is the CPU spectrum's
+share of a core; with the spectrum on the graphics card it reads *FFT on the
+GPU* and the frames a second it draws instead, since the CPU then does no
+FFT. Windows' Task Manager shows the graphics card's own load.
+
 **Where the I/Q comes from** is chosen under SETTINGS, *Scope and receiver*,
 with APPLY:
 
