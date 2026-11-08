@@ -716,7 +716,7 @@ For the WSJT modes:
   uses. CW is read by timing alone, so a fast or ragged fist, or a weak
   signal, reads less well than PSK31 or RTTY, and a word's first letter can
   come out wrong.
-- **SPOTS.** **PSK Reporter** sends the FT8 and FT4 stations heard to
+- **SPOTS** (in every mode). **PSK Reporter** sends the FT8 and FT4 stations heard to
   pskreporter.info, a batch every five minutes or so; **WSPRnet** sends each
   WSPR slot's spots to wsprnet.org as it is decoded (or that you listened and
   heard nothing), and the WSPR the skimmer hears on other dials. Both are off until ticked, and greyed until your callsign

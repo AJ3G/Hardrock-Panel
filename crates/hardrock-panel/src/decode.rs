@@ -1882,8 +1882,12 @@ fn body(
         let light =
             slotclock::light(decoders::slot::utc_now(), mode.period_s(), started, 1.0, last);
         slotclock::row(ui, decoders::slot::utc_now(), mode.period_s(), light);
-        spots::spots_box(ui, &mut s.spots, &d.spots, me(st).as_ref());
     }
+    // In every mode: RBN takes the CW skimmer's stations and WSPRnet the
+    // skimmed WSPR whatever DECODE is on, and with the box shown only for
+    // the WSJT modes its ticks could not be found from CW (AJ3G, 8 Nov
+    // 2026: "There is no checkbox").
+    spots::spots_box(ui, &mut s.spots, &d.spots, me(st).as_ref());
 
     // Where it listens, and what it has dropped.
     let src = match s.kind.family() {
