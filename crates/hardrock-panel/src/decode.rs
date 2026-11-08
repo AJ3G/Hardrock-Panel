@@ -799,6 +799,39 @@ impl Decode {
         for w in &self.wide {
             let wsjt = Some(w.mode());
             for r in w.results() {
+                // Skimmed WSPR goes to WSPRnet as DECODE's own does, a slot
+                // for each dial it was heard on, when the SPOTS box's WSPRnet
+                // is ticked (AJ3G, 8 Nov 2026: "every two minutes or so if
+                // there was a decode it should be sent"). Only slots with
+                // stations in them: a dial skimmed is not one listened to.
+                if w.mode() == WsjtMode::Wspr && !r.slot.decodes.is_empty() {
+                    let cal = decoders::FreqCal { ppm: at.ppm };
+                    let spots = r
+                        .slot
+                        .decodes
+                        .iter()
+                        .filter_map(|d| {
+                            let w = d.wspr.as_ref()?;
+                            Some(wsprnet::Spot {
+                                call: w.callsign.clone(),
+                                grid: w.grid.clone(),
+                                snr_db: d.snr_db.round() as i32,
+                                dt_s: d.dt_s,
+                                drift_hz: w.drift_hz.round() as i32,
+                                freq_hz: cal.rf_of_audio(r.dial_hz, d.audio_hz as f64, false)
+                                    + at.xvtr_hz,
+                                power_dbm: w.power_dbm,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    if !spots.is_empty() {
+                        self.spots.wspr_slot(wsprnet::Slot {
+                            utc: r.slot.slot_utc,
+                            dial_hz: cal.rf_of_audio(r.dial_hz, 0.0, false) + at.xvtr_hz,
+                            spots,
+                        });
+                    }
+                }
                 for d in &r.slot.decodes {
                     let cal = decoders::FreqCal { ppm: at.ppm };
                     // WSPR's message is "CALL GRID dBm", which reads as no

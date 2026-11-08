@@ -664,8 +664,9 @@ For the WSJT modes:
   beside them: its dial in the span (14.0956 on 20 m) is decoded every two
   minutes and its stations labelled ("K1ABC WSPR"), fading over two slots
   as FT8's do. With DECODE itself on WSPR, its own dial is DECODE's and
-  only the others are skimmed. Skimmed WSPR goes to SKIM LOG, not to
-  WSPRnet: only DECODE's own WSPR is sent there. For CW, PSK31 and RTTY,
+  only the others are skimmed. Skimmed WSPR goes to SKIM LOG, and to
+  WSPRnet too when SPOTS' WSPRnet is ticked: each two-minute slot with
+  stations in it, on the dial they were heard on. For CW, PSK31 and RTTY,
   turn on SKIM CW/PSK/RTTY as well.
 - **Labels name the mode** for FT8 and FT4 as for the keyboard modes
   ("W9ML FT4"). Clicking an FT8 or FT4 label goes to its dial as that mode's
@@ -718,7 +719,7 @@ For the WSJT modes:
 - **SPOTS.** **PSK Reporter** sends the FT8 and FT4 stations heard to
   pskreporter.info, a batch every five minutes or so; **WSPRnet** sends each
   WSPR slot's spots to wsprnet.org as it is decoded (or that you listened and
-  heard nothing). Both are off until ticked, and greyed until your callsign
+  heard nothing), and the WSPR the skimmer hears on other dials. Both are off until ticked, and greyed until your callsign
   and grid are set. The box says what was last sent and when ("PSK Reporter:
   12 spots sent 01:10 UTC"), or what went wrong. Clearing a tick sends
   nothing more, not even what was waiting.
