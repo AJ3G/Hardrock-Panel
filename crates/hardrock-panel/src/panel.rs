@@ -746,8 +746,29 @@ pub(crate) fn fit_scaled<R>(
     let h = out.content_size.y;
     if h > 1.0 && settle > 0 {
         ui.data_mut(|d| d.insert_temp(nat_id, h / s));
+    } else if h > 1.0 && refit(avail, base_w, h, s, range) {
+        // The contents grew or shrank with the window's size the same: a
+        // note or a menu row came and went. Measured while it was there,
+        // the face stayed shrunk after it had gone (AJ3G, 8 Nov 2026:
+        // "the image shrinks and does not come back to normal size"). Fit
+        // again, the same few frames a resize gets.
+        ui.data_mut(|d| {
+            d.insert_temp(nat_id, h / s);
+            d.insert_temp(fit_id, Fit { avail, s, settle: FIT_SETTLE });
+        });
+        ui.ctx().request_repaint();
     }
     out.inner
+}
+
+/// Whether contents `h` tall at scale `s` no longer fit `avail` as they were
+/// fitted: taller than the room (a scroll bar), or well short of it while
+/// the height, not the width, holds the scale down. The band between keeps
+/// a settled fit from chasing its own measurement (AJ3G, 18 Oct: the shake).
+fn refit(avail: Vec2, base_w: f32, h: f32, s: f32, (lo, hi): (f32, f32)) -> bool {
+    let by_width = (avail.x / base_w).clamp(lo, hi);
+    // At the smallest scale it scrolls: nothing to refit.
+    (h > avail.y + 1.0 && s > lo + 0.01) || (h < avail.y * 0.9 && s < by_width - 0.01)
 }
 
 /// The scale at which contents `base_w` wide and `natural` tall at scale 1
@@ -2399,6 +2420,23 @@ mod tests {
         // Never below the smallest scale (it scrolls) or past the largest.
         assert_eq!(fit_scale(Vec2::new(200.0, 200.0), 720.0, 600.0, r), MIN_SCALE);
         assert_eq!(fit_scale(Vec2::new(9000.0, 9000.0), 720.0, 600.0, r), MAX_SCALE);
+    }
+
+    #[test]
+    fn a_fit_held_small_by_contents_that_have_gone_fits_again() {
+        let r = (MIN_SCALE, MAX_SCALE);
+        let room = Vec2::new(1440.0, 1000.0);
+        // Fitted at 1.4 by height while a menu row was there; it has gone and
+        // the contents are 700 tall: well short, and the width allows 2.0.
+        assert!(refit(room, 720.0, 700.0, 1.4, r));
+        // Taller than the room: a scroll bar.
+        assert!(refit(room, 720.0, 1010.0, 1.6, r));
+        // Settled, filling the room: left alone.
+        assert!(!refit(room, 720.0, 975.0, 1.6, r));
+        // Held by the width: short is right, left alone.
+        assert!(!refit(room, 720.0, 600.0, 2.0, r));
+        // At the smallest scale, too tall scrolls: left alone.
+        assert!(!refit(room, 720.0, 1400.0, MIN_SCALE, r));
     }
 
     #[test]
