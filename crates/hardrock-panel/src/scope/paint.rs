@@ -1337,7 +1337,10 @@ fn pointer_on(
             i.modifiers.shift,
         )
     });
-    let here = hover.filter(|p| rect.contains(*p));
+    // Only where the scope itself is under the pointer: a window over it
+    // (RADIO's Tune slider, say) keeps its clicks and drags (AJ3G, 8 Nov
+    // 2026: dragging the Tune slider moved the scope back and forth).
+    let here = hover.filter(|p| rect.contains(*p) && resp.contains_pointer());
     // The skimmer's label, the offset bar's ×, or the bar itself under the
     // pointer: they come before anything under them.
     let label_at = |q: Pos2| sc.skim_boxes.iter().find(|(r, _)| r.contains(q)).map(|&(_, i)| i);
