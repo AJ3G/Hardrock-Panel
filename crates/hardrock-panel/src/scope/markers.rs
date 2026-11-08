@@ -20,6 +20,17 @@ pub trait Bins {
     fn level_at(&self, hz: f64) -> Option<f32>;
     /// The spectrum's resolution, Hz.
     fn bin_width(&self) -> f64;
+    /// The strongest of the columns drawn within `[lo, hi]`: what the eye
+    /// picks as the highest signal on the trace.
+    fn drawn_peak_in(&self, lo: f64, hi: f64) -> Option<Peak> {
+        self.peak_in(lo, hi)
+    }
+    /// The width of a drawn column, Hz.
+    fn drawn_width(&self) -> f64 {
+        self.bin_width()
+    }
+    /// The noise floor, dBm a bin.
+    fn noise_dbm(&self) -> f32;
 }
 
 impl Bins for SpectrumFrame {
@@ -31,6 +42,9 @@ impl Bins for SpectrumFrame {
     }
     fn bin_width(&self) -> f64 {
         SpectrumFrame::bin_width(self)
+    }
+    fn noise_dbm(&self) -> f32 {
+        self.noise_dbm
     }
 }
 
@@ -75,7 +89,19 @@ impl Bins for Exact<'_> {
     fn bin_width(&self) -> f64 {
         self.bin_hz
     }
+    fn drawn_peak_in(&self, lo: f64, hi: f64) -> Option<Peak> {
+        self.frame.peak_in(lo, hi)
+    }
+    fn drawn_width(&self) -> f64 {
+        self.frame.bin_width()
+    }
+    fn noise_dbm(&self) -> f32 {
+        self.frame.noise_dbm
+    }
 }
+
+/// A tracking marker follows a peak only this far over the noise, dB.
+const TRACK_OVER_NOISE_DB: f32 = 6.0;
 
 /// One marker.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -130,8 +156,16 @@ impl Markers {
 
     /// Put the active marker on the strongest signal in `[lo, hi]` and have it
     /// follow it.
+    ///
+    /// The strongest is found on the trace as it is drawn, then read to the
+    /// hertz around that column. Read on the GPU's raw spectrum across the
+    /// whole view it could land on a moment's spike rather than the signal
+    /// standing highest on the screen (AJ3G, 8 Nov 2026: "Marker does not
+    /// snap to highest signal shown in scope").
     pub fn snap_to_peak(&mut self, frame: &impl Bins, lo: f64, hi: f64) {
-        if let Some(p) = frame.peak_in(lo, hi) {
+        if let Some(col) = frame.drawn_peak_in(lo, hi) {
+            let w = frame.drawn_width() * 1.5;
+            let p = frame.peak_in(col.hz - w, col.hz + w).unwrap_or(col);
             let i = self.active.min(1);
             self.m[i] = Some(Marker { hz: p.hz, track: true });
         }
@@ -141,8 +175,11 @@ impl Markers {
     /// side.
     pub fn track(&mut self, frame: &impl Bins, window: f64) {
         for m in self.m.iter_mut().flatten() {
+            // Only to a signal: with it gone (a CW key up, a fade) the
+            // strongest thing near is the noise, and the marker wandered off.
             if m.track
                 && let Some(p) = frame.peak_in(m.hz - window, m.hz + window)
+                && p.dbm >= frame.noise_dbm() + TRACK_OVER_NOISE_DB
             {
                 m.hz = p.hz;
             }
@@ -261,6 +298,12 @@ mod tests {
         let g = frame_with_peak(82.7);
         m.track(&g, 5.0);
         assert!((m.m[0].unwrap().hz - 1082.7).abs() < 0.05);
+        // The signal goes (key up): the marker stays where it was.
+        let mut quiet = frame_with_peak(82.7);
+        quiet.db.iter_mut().for_each(|d| *d = -120.0);
+        quiet.db[90] = -117.0;
+        m.track(&quiet, 10.0);
+        assert!((m.m[0].unwrap().hz - 1082.7).abs() < 0.05);
         // Dragged, it stops tracking.
         m.move_to(0, 1050.0);
         assert!(!m.m[0].unwrap().track);
@@ -302,6 +345,37 @@ mod tests {
         m.snap_to_peak(&e, 1060.0, 1100.0);
         assert_eq!(m.read(0, &e).unwrap().hz, 1080.3);
         assert_eq!(e.bin_width(), 1.0);
+    }
+
+    #[test]
+    fn marker_to_peak_takes_the_highest_signal_drawn() {
+        // The drawn trace (10 Hz columns) has its highest signal at column 15
+        // (1150 Hz); the GPU's raw peak across the view is a spike at 1080 Hz.
+        let cols = SpectrumFrame {
+            center_hz: 1100.0,
+            span_hz: 200.0,
+            db: (0..20)
+                .map(|i| match i {
+                    15 => -40.0,
+                    8 => -60.0,
+                    _ => -120.0,
+                })
+                .collect(),
+            peak: None,
+            seq: 1,
+            enbw: 0.2,
+            noise_dbm: -120.0,
+        };
+        let spike = Peak { bin: 80, hz: 1080.0, dbm: -35.0 };
+        let sig = Peak { bin: 151, hz: 1151.2, dbm: -39.0 };
+        let peaks = [
+            ExactPeak { lo: 1000.0, hi: 1200.0, peak: spike },
+            ExactPeak { lo: 1135.0, hi: 1165.0, peak: sig },
+        ];
+        let e = Exact { frame: &cols, peaks: &peaks, bin_hz: 1.0 };
+        let mut m = Markers::default();
+        m.snap_to_peak(&e, 1000.0, 1200.0);
+        assert_eq!(m.m[0].unwrap().hz, 1151.2);
     }
 
     #[test]
