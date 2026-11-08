@@ -287,6 +287,8 @@ pub struct Scope {
     peak_cols: Vec<f32>,
     /// Recent frame times, for the frame-rate readout.
     frame_times: VecDeque<f64>,
+    /// This program's share of the graphics card, as Task Manager reads it.
+    gpu_load: crate::gpuload::GpuLoad,
     xvtr_text: String,
     scf: scf::Scf,
     /// The GPU spectrum, when the GPU can run one.
@@ -392,6 +394,7 @@ impl Scope {
             cols: Vec::new(),
             peak_cols: Vec::new(),
             frame_times: VecDeque::new(),
+            gpu_load: crate::gpuload::GpuLoad::spawn(),
             xvtr_text,
             scf: scf::Scf::new(render_state),
             gpu_run,

@@ -1742,11 +1742,17 @@ fn status_bars(sc: &Scope, ui: &egui::Ui, a: Rect, b: Rect, cx: &Ctx, snap: &sdr
         } else {
             format!("FFT {:.0} % (CPU)", snap.spectrum_load * 100.0)
         };
+        // The graphics card's load from this program, all of it (FFT,
+        // waterfall, drawing), as Task Manager's GPU column reads it.
+        let gpu = match (sc.gpu, sc.gpu_load.percent()) {
+            (Some(g), Some(p)) => format!(" · GPU {p:.0} % ({})", g.adapter),
+            (Some(g), None) => format!(" · GPU {}", g.adapter),
+            (None, _) => String::new(),
+        };
         format!(
-            "IQ stream OK · {} spectrum drops · DSP {:.0} % (CPU) · {fft}{}",
+            "IQ stream OK · {} spectrum drops · DSP {:.0} % (CPU) · {fft}{gpu}",
             snap.spectrum_drops,
             snap.load * 100.0,
-            sc.gpu.map_or(String::new(), |g| format!(" · GPU {}", g.adapter)),
         )
     };
     let ok = theme::scope().good;

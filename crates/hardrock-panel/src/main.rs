@@ -44,6 +44,7 @@ mod decode;
 mod decodelog;
 mod globe;
 mod gpu_gate;
+mod gpuload;
 mod logfile;
 mod outside;
 mod panel;

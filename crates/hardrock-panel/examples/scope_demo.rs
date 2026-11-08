@@ -27,6 +27,8 @@
 mod chrome;
 #[path = "../src/gpu_gate.rs"]
 mod gpu_gate;
+#[path = "../src/gpuload.rs"]
+mod gpuload;
 #[path = "../src/layout.rs"]
 mod layout;
 // The SCF view says where the log is and copies it.
