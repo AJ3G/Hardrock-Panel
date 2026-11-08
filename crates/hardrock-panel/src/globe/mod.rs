@@ -123,6 +123,8 @@ pub(crate) struct Globe {
     placed: bool,
     /// The station picked: call, band, source.
     sel: Option<(String, Option<&'static str>, Source)>,
+    /// A station picked from DECODE, still to be turned to.
+    sel_from_decode: bool,
     fields: Vec<BandField>,
     /// Bumped each time the field is built again.
     fields_id: u64,
@@ -162,6 +164,7 @@ impl Default for Globe {
             zoom: 1.0,
             placed: false,
             sel: None,
+            sel_from_decode: false,
             fields: Vec::new(),
             fields_id: 0,
             built: None,
@@ -210,6 +213,36 @@ impl Globe {
             self.decode_band = r.band();
         }
         self.history.add(r);
+    }
+
+    /// A line picked in DECODE (AJ3G, 8 Nov 2026: "when I select a station
+    /// that link should be highlighted in Globe"): pick that station here,
+    /// its latest reception on the band it was heard on (else on any band),
+    /// so its path to the station is drawn bold, and turn to the path when
+    /// GLOBE is next drawn. False when the station isn't on the map (no grid
+    /// known for it); then nothing is picked, so no other path reads as it.
+    pub(crate) fn select_call(&mut self, call: &str, rf_hz: Option<f64>) -> bool {
+        let band = rf_hz.and_then(|hz| bandplan::band_at(hz).map(|b| b.name));
+        let latest = self.history.latest();
+        let mine = |r: &&Reception| {
+            r.call.eq_ignore_ascii_case(call) && matches!(r.src, Source::Decode | Source::Skim)
+        };
+        let r = latest
+            .iter()
+            .filter(mine)
+            .find(|r| band.is_none() || r.band() == band)
+            .or_else(|| latest.iter().find(mine));
+        match r {
+            Some(r) => {
+                self.sel = Some((r.call.clone(), r.band(), r.src));
+                self.sel_from_decode = true;
+                true
+            }
+            None => {
+                self.sel = None;
+                false
+            }
+        }
     }
 
     /// ONE BAND follows the receiver onto a new band, so the map shows the
@@ -489,6 +522,18 @@ fn body(
     top_bar(ui, popped, st, now, out);
     toolbar(ui, g, s);
     ui.add_space(6.0);
+    if std::mem::take(&mut g.sel_from_decode)
+        && let Some(r) = g.history.latest().into_iter().find(|r| is_sel(g, r))
+    {
+        // DECODE's pick: its band on the map, and the whole path in view.
+        if !s.all_bands
+            && let Some(b) = r.band()
+        {
+            s.band = b.to_string();
+        }
+        let mid = st.pos().map_or(vec_ll(r.pos), |q| sphere::slerp(vec_ll(q), vec_ll(r.pos), 0.5));
+        g.fly_to(sphere::ll_of(mid), ui.input(|i| i.time));
+    }
     let shown = g.shown(s);
     // Everything is sized to the room left, less the gaps between, so the
     // window never measures more than it was given and grows frame by frame.
@@ -1990,6 +2035,34 @@ fn footer(ui: &mut egui::Ui, g: &Globe) {
 mod tests {
     use super::*;
     use crate::station::grid_to_latlon;
+
+    #[test]
+    fn a_decode_pick_picks_that_station_on_its_band() {
+        let at = |call: &str, hz: f64, utc: f64| Reception {
+            call: call.into(),
+            grid: "PM95".into(),
+            pos: grid_to_latlon("PM95").unwrap(),
+            rf_hz: hz,
+            mode: "FT8".into(),
+            snr: Some(-16.0),
+            utc,
+            src: Source::Decode,
+            row: None,
+            from: None,
+        };
+        let mut g = Globe::default();
+        g.add(at("JA1ABC", 21_075_400.0, 0.0));
+        g.add(at("JA1ABC", 14_075_400.0, 10.0));
+        assert!(g.select_call("ja1abc", Some(21_075_000.0)));
+        assert_eq!(g.sel, Some(("JA1ABC".into(), Some("15"), Source::Decode)));
+        assert!(g.sel_from_decode);
+        // Another band than any it was heard on: its latest.
+        assert!(g.select_call("JA1ABC", Some(7_074_000.0)));
+        assert_eq!(g.sel.as_ref().unwrap().1, Some("20"));
+        // Not on the map: nothing picked.
+        assert!(!g.select_call("K1XYZ", Some(14_074_000.0)));
+        assert_eq!(g.sel, None);
+    }
 
     #[test]
     fn tune_goes_to_the_modes_dial_on_the_stations_band() {

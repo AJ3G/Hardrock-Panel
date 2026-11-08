@@ -1430,6 +1430,10 @@ impl eframe::App for App {
         for r in self.decode.globe_feed.drain(..) {
             self.globe.add(r);
         }
+        // A line picked in DECODE: that station and its path on GLOBE.
+        if let Some((call, hz)) = self.decode.globe_pick.take() {
+            self.globe.select_call(&call, hz);
+        }
         if self.show_globe {
             self.globe_window(ctx, rig.as_ref(), transmitting, xvtr);
         } else {

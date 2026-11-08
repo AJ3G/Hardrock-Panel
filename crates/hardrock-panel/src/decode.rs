@@ -429,6 +429,9 @@ pub(crate) struct Decode {
     /// receiver's decodes, SKIM WIDE's and the keyboard skimmer's, each
     /// with its grid or one heard from it before.
     pub(crate) globe_feed: Vec<crate::globe::field::Reception>,
+    /// A line picked alone, for GLOBE to show that station and its path
+    /// (AJ3G, 8 Nov 2026): its call and where it was heard, Hz.
+    pub(crate) globe_pick: Option<(String, Option<f64>)>,
 }
 
 /// A station for GLOBE, if its grid is known.
@@ -763,6 +766,20 @@ impl Decode {
             self.selected.insert(id);
             self.anchor = Some(id);
             self.scroll_to = Some(id);
+            self.note_pick();
+        }
+    }
+
+    /// When one line is picked and it has a call, hand it to GLOBE.
+    fn note_pick(&mut self) {
+        if self.selected.len() != 1 {
+            return;
+        }
+        let id = *self.selected.iter().next().expect("one");
+        if let Some(r) = self.rows.iter().find(|r| r.id == id)
+            && let Some(c) = &r.call
+        {
+            self.globe_pick = Some((c.clone(), r.rf_hz));
         }
     }
 
@@ -2059,6 +2076,7 @@ fn rows(ui: &mut egui::Ui, d: &mut Decode, fam: Family, st: &StationSettings) {
     if let Some((id, m)) = click {
         let order: Vec<u64> = d.rows.iter().map(|r| r.id).collect();
         pick(&mut d.selected, &mut d.anchor, &order, id, m.command, m.shift);
+        d.note_pick();
     }
 }
 

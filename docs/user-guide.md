@@ -752,7 +752,10 @@ For the WSJT modes:
 and grid under SETTINGS → Station first). Drag to turn it, and scroll or
 pinch to zoom; **HOME** brings your station back to the middle, **DX** centres
 the station picked and **PATH** the middle of its path, each with a smooth
-turn. Clicking a line in HEARD turns the map to show that path. **SPIN** turns
+turn. Clicking a line in HEARD turns the map to show that path. Picking a
+single line in DECODE does the same for that station: GLOBE picks it, draws
+its path to your station bold, goes to its band and turns to the path. A
+station with no grid known isn't on the map, so nothing is picked. **SPIN** turns
 the globe slowly east until you click it again. **GLOBE** and **FLAT** switch
 between the globe and a flat map. **POP OUT** puts it in a window of its own.
 
