@@ -210,7 +210,12 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
     ui.horizontal_wrapped(|ui| {
         caption(ui, "Scale");
         for sv in Scale::ALL {
-            if chip(ui, sc.settings.scale == sv, sv.label()).clicked() {
+            let help = match sv {
+                Scale::Dbm => "Levels on the scale and readouts in dBm",
+                Scale::SUnits => "Levels in S-units (S9 = −73 dBm, 6 dB a unit)",
+                Scale::Both => "dBm on the left of the scale, S-units on the right",
+            };
+            if chip(ui, sc.settings.scale == sv, sv.label()).on_hover_text(help).clicked() {
                 sc.settings.scale = sv;
             }
         }
@@ -220,7 +225,16 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
     ui.horizontal_wrapped(|ui| {
         caption(ui, "Scope");
         for t in TopView::ALL {
-            if chip(ui, sc.settings.top == t, t.label()).clicked() {
+            let help = match t {
+                TopView::Spectrum => "The spectrum trace over the waterfall",
+                TopView::Surface => "The 3D FFT: the spectrum's recent history as a surface",
+                TopView::Both => "The spectrum trace and the 3D FFT together",
+                TopView::Scf => {
+                    "Spectral correlation: finds signals by their keying and symbol rate, \
+                     even under the noise"
+                }
+            };
+            if chip(ui, sc.settings.top == t, t.label()).on_hover_text(help).clicked() {
                 sc.settings.top = t;
                 if t != TopView::Spectrum && sc.settings.split < 0.55 {
                     sc.settings.set_split(0.55);
@@ -229,10 +243,16 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
         }
         caption(ui, "· 3D");
         ui.add_enabled_ui(sc.settings.top.has_surface(), |ui| {
-            if chip(ui, sc.settings.solid_3d, "Solid").clicked() {
+            if chip(ui, sc.settings.solid_3d, "Solid")
+                .on_hover_text("Draw the 3D FFT as a filled surface")
+                .clicked()
+            {
                 sc.settings.solid_3d = true;
             }
-            if chip(ui, !sc.settings.solid_3d, "Lines").clicked() {
+            if chip(ui, !sc.settings.solid_3d, "Lines")
+                .on_hover_text("Draw the 3D FFT as a line for each row")
+                .clicked()
+            {
                 sc.settings.solid_3d = false;
             }
             let can_light = sc.settings.solid_3d && sc.gpu.is_some_and(|g| g.compute);
@@ -261,7 +281,11 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
         if chip(ui, false, "+").on_hover_text("Zoom in").clicked() {
             sc.want_view = Some(view::zoom_at(cx.span, v, mid, 2.0));
         }
-        if ui.add_enabled(zoomed, egui::Button::new("Whole span")).clicked() {
+        if ui
+            .add_enabled(zoomed, egui::Button::new("Whole span"))
+            .on_hover_text("Zoom right out to the whole I/Q span")
+            .clicked()
+        {
             sc.want_view = None;
         }
         note(
@@ -299,7 +323,8 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
 
     ui.horizontal_wrapped(|ui| {
         caption(ui, "Band plan · IARU Region 2");
-        chrome::checkbox(ui, &mut sc.settings.band_plan, "Show");
+        chrome::checkbox(ui, &mut sc.settings.band_plan, "Show")
+            .on_hover_text("The IARU Region 2 band plan as a coloured strip under the spectrum");
         for u in Use::ALL {
             let [r, g, b] = u.rgb();
             let (sw, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
@@ -312,7 +337,12 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
         caption(ui, "Step");
         for st in STEPS_HZ {
             let t = if st >= 1000 { format!("{} kHz", st / 1000) } else { format!("{st} Hz") };
-            if chip(ui, sc.settings.step_hz == st, &t).clicked() {
+            if chip(ui, sc.settings.step_hz == st, &t)
+                .on_hover_text(format!(
+                    "Tuning step {t}: a click on the scope snaps to it, the wheel moves by it"
+                ))
+                .clicked()
+            {
                 sc.settings.step_hz = st;
             }
         }
@@ -322,7 +352,8 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
     ui.horizontal_wrapped(|ui| {
         caption(ui, "Waterfall");
         for p in Palette::ALL {
-            let r = palette_chip(ui, p, sc.settings.palette == p);
+            let r = palette_chip(ui, p, sc.settings.palette == p)
+                .on_hover_text(format!("The waterfall's colours: {}", p.label()));
             if r.clicked() {
                 sc.settings.palette = p;
             }
@@ -331,15 +362,27 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
     ui.horizontal_wrapped(|ui| {
         caption(ui, "Speed");
         for sp in WaterfallSpeed::ALL {
-            if chip(ui, sc.settings.wf_speed == sp, sp.label()).clicked() {
+            let help = match sp.frames_per_row() {
+                1 if sp.px_per_row() > 1.0 => {
+                    "A row every frame, drawn two pixels tall: the fastest the waterfall runs"
+                        .to_string()
+                }
+                1 => "A new waterfall row every spectrum frame".to_string(),
+                n => {
+                    format!("A new waterfall row every {n} spectrum frames: more history on screen")
+                }
+            };
+            if chip(ui, sc.settings.wf_speed == sp, sp.label()).on_hover_text(help).clicked() {
                 sc.settings.wf_speed = sp;
             }
         }
-        chrome::checkbox(ui, &mut sc.settings.wf_smooth, "Smooth");
+        chrome::checkbox(ui, &mut sc.settings.wf_smooth, "Smooth")
+            .on_hover_text("Blend each waterfall row with the last, for less speckle");
         chrome::checkbox(ui, &mut sc.settings.wf_auto, "Auto level").on_hover_text(
             "The waterfall's levels follow the noise floor, apart from the spectrum's",
         );
-        chrome::checkbox(ui, &mut sc.settings.wf_time, "UTC ticks");
+        chrome::checkbox(ui, &mut sc.settings.wf_time, "UTC ticks")
+            .on_hover_text("Time marks in UTC down the waterfall's left edge");
         chrome::checkbox(ui, &mut sc.settings.slot_lines, "Slot lines").on_hover_text(
             "While DECODE runs a slotted mode (FT8, FT4, WSPR…): a green line at each \
              slot's start, a red one where its transmissions end, and a faint yellow \
@@ -349,14 +392,23 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
             egui::Slider::new(&mut sc.settings.wf_contrast, 0.25..=4.0)
                 .logarithmic(true)
                 .text("contrast"),
-        );
-        ui.add(egui::Slider::new(&mut sc.settings.wf_brightness, -0.5..=0.5).text("brightness"));
+        )
+        .on_hover_text("How sharply the waterfall's colours change with level");
+        ui.add(egui::Slider::new(&mut sc.settings.wf_brightness, -0.5..=0.5).text("brightness"))
+            .on_hover_text("Lift or lower the whole waterfall's colours");
     });
 
     ui.horizontal_wrapped(|ui| {
         caption(ui, "FFT");
         for n in FFT_SIZES {
-            if chip(ui, sc.settings.fft_size == n, &fft_label(n)).clicked() {
+            if chip(ui, sc.settings.fft_size == n, &fft_label(n))
+                .on_hover_text(format!(
+                    "FFT of {n} points: {:.1} Hz bins at this span. Larger resolves close \
+                     signals and lowers the noise floor, takes longer to fill and more GPU or CPU",
+                    cx.span.width / n as f64
+                ))
+                .clicked()
+            {
                 sc.settings.fft_size = n;
             }
         }
@@ -389,27 +441,47 @@ pub(super) fn rows(sc: &mut Scope, ui: &mut egui::Ui, cx: &Ctx, out: &mut ScopeO
     ui.horizontal_wrapped(|ui| {
         caption(ui, "Window");
         for w in FftWindow::ALL {
-            if chip(ui, sc.settings.window == w, w.label()).clicked() {
+            let help = match w {
+                FftWindow::Hann => "Hann window: narrow peaks, moderate skirts",
+                FftWindow::BlackmanHarris => {
+                    "Blackman-Harris window: deep skirts, so weak signals beside strong ones show"
+                }
+                FftWindow::Rectangular => "No window: the narrowest peaks, but wide skirts",
+                FftWindow::FlatTop => "Flat-top window: true levels for measuring, wide peaks",
+            };
+            if chip(ui, sc.settings.window == w, w.label()).on_hover_text(help).clicked() {
                 sc.settings.window = w;
             }
         }
         caption(ui, "· Overlap");
         for o in FftOverlap::ALL {
-            if chip(ui, sc.settings.overlap == o, o.label()).clicked() {
+            let help = match o {
+                FftOverlap::Off => "Each FFT from fresh samples: the least work",
+                FftOverlap::Half => "Each FFT shares half its samples with the last: smoother",
+                FftOverlap::ThreeQuarters => {
+                    "Three quarters shared: the smoothest and quickest to react, the most work"
+                }
+            };
+            if chip(ui, sc.settings.overlap == o, o.label()).on_hover_text(help).clicked() {
                 sc.settings.overlap = o;
             }
         }
         caption(ui, "· fps");
         for f in FPS_CHOICES {
-            if chip(ui, sc.settings.fps == f, &format!("{f:.0}")).clicked() {
+            if chip(ui, sc.settings.fps == f, &format!("{f:.0}"))
+                .on_hover_text(format!("Draw the spectrum {f:.0} times a second"))
+                .clicked()
+            {
                 sc.settings.fps = f;
             }
         }
         chrome::checkbox(ui, &mut sc.settings.zoom_fft, "Zoom FFT").on_hover_text(
             "Re-resolve a zoomed view with its own FFT instead of stretching the span's bins",
         );
-        chrome::checkbox(ui, &mut sc.settings.noise_line, "Noise floor");
-        ui.add(egui::Slider::new(&mut sc.settings.persist_secs, 0.2..=10.0).text("s persistence"));
+        chrome::checkbox(ui, &mut sc.settings.noise_line, "Noise floor")
+            .on_hover_text("A line across the spectrum at the measured noise floor");
+        ui.add(egui::Slider::new(&mut sc.settings.persist_secs, 0.2..=10.0).text("s persistence"))
+            .on_hover_text("How long PERSIST's phosphor trace takes to fade");
     });
 
     ui.horizontal_wrapped(|ui| {
@@ -538,19 +610,23 @@ fn level_sliders(sc: &mut Scope, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         caption(ui, "Floor");
         let mut f = sc.settings.floor_dbm;
-        let r = ui.add(
-            egui::Slider::new(&mut f, LEVEL_MIN..=LEVEL_MAX - MIN_RANGE_DB)
-                .custom_formatter(move |v, _| fmt(v)),
-        );
+        let r = ui
+            .add(
+                egui::Slider::new(&mut f, LEVEL_MIN..=LEVEL_MAX - MIN_RANGE_DB)
+                    .custom_formatter(move |v, _| fmt(v)),
+            )
+            .on_hover_text("The bottom of the scale and the waterfall's darkest colour");
         if r.changed() {
             sc.settings.set_floor(f);
         }
         caption(ui, "Ceil");
         let mut c = sc.settings.ceil_dbm;
-        let r = ui.add(
-            egui::Slider::new(&mut c, LEVEL_MIN + MIN_RANGE_DB..=LEVEL_MAX)
-                .custom_formatter(move |v, _| fmt(v)),
-        );
+        let r = ui
+            .add(
+                egui::Slider::new(&mut c, LEVEL_MIN + MIN_RANGE_DB..=LEVEL_MAX)
+                    .custom_formatter(move |v, _| fmt(v)),
+            )
+            .on_hover_text("The top of the scale and the waterfall's brightest colour");
         if r.changed() {
             sc.settings.set_ceil(c);
         }
@@ -564,6 +640,7 @@ fn level_sliders(sc: &mut Scope, ui: &mut egui::Ui) {
                 )
                 .max_decimals(0),
             )
+            .on_hover_text("The spectrum's height, pixels; the waterfall takes the rest")
             .changed()
         {
             sc.settings.set_height(h);
