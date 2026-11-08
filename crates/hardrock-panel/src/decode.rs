@@ -801,7 +801,14 @@ impl Decode {
             for r in w.results() {
                 for d in &r.slot.decodes {
                     let cal = decoders::FreqCal { ppm: at.ppm };
-                    let call = station::sender_of(&d.message).0;
+                    // WSPR's message is "CALL GRID dBm", which reads as no
+                    // sender; its decode carries them.
+                    let (call, grid) = match &d.wspr {
+                        Some(w) => {
+                            (Some(w.callsign.clone()), (!w.grid.is_empty()).then(|| w.grid.clone()))
+                        }
+                        None => station::sender_of(&d.message),
+                    };
                     self.skim_log.add(skimlog::Line {
                         utc: d.slot_utc as f64,
                         mode: w.mode().label(),
@@ -814,7 +821,6 @@ impl Decode {
                         live: false,
                     });
                     let Some(call) = call else { continue };
-                    let grid = station::sender_of(&d.message).1;
                     if let Some(g) = &grid {
                         self.heard.note(&call, g, d.slot_utc as f64);
                     }
@@ -1375,19 +1381,23 @@ fn wide_dials(
     // In FT8 or FT4 with SKIM WIDE, the dials besides the receiver's. In
     // any other mode with SKIM on, every FT8 and FT4 dial in the span, the
     // receiver's too, so their labels stay (AJ3G: "Even if I click on PSK,
-    // you should still continue to demod and report other modes").
-    let (modes, skip) = match kind {
-        Kind::Ft8 if s.skim_wide => ([Kind::Ft8, Kind::Ft4], Some(dial_hz)),
-        Kind::Ft4 if s.skim_wide => ([Kind::Ft4, Kind::Ft8], Some(dial_hz)),
+    // you should still continue to demod and report other modes"). WSPR is
+    // skimmed the same way, beside FT8 and FT4 (AJ3G, 8 Nov 2026: "Can it be
+    // made so WSPR Spots are also SKIMMED?"): its dial in the span, but not
+    // the receiver's while DECODE itself runs WSPR there.
+    let modes: &[Kind] = match kind {
+        Kind::Ft8 if s.skim_wide => &[Kind::Ft8, Kind::Ft4, Kind::Wspr],
+        Kind::Ft4 if s.skim_wide => &[Kind::Ft4, Kind::Ft8, Kind::Wspr],
         Kind::Ft8 | Kind::Ft4 => return Vec::new(),
-        _ => ([Kind::Ft8, Kind::Ft4], None),
+        _ => &[Kind::Ft8, Kind::Ft4, Kind::Wspr],
     };
     if !s.skim || rate <= 0.0 {
         return Vec::new();
     }
     modes
-        .into_iter()
-        .filter_map(|k| {
+        .iter()
+        .filter_map(|&k| {
+            let skip = (k == kind).then_some(dial_hz);
             let all: Vec<f64> = k.digi()?.dials.iter().map(|&d| d as f64 - xvtr_hz).collect();
             let dials = decoders::skim::dials_in_span(&all, centre, rate, skip);
             (!dials.is_empty()).then_some((k.wsjt()?, dials))
@@ -2349,6 +2359,7 @@ mod tests {
             vec![
                 (WsjtMode::Ft8, vec![18_100_000.0]),
                 (WsjtMode::Ft4, vec![14_080_000.0, 18_104_000.0]),
+                (WsjtMode::Wspr, vec![14_095_600.0, 18_104_600.0]),
             ]
         );
         let w = wide_dials(Kind::Ft4, &s, 14_080_000.0, 0.0, 16e6, 6_144_000.0);
@@ -2357,7 +2368,10 @@ mod tests {
         assert!(w[1].1.contains(&14_074_000.0));
         // 192 kHz on 20 m (AJ3G's DUO): FT8 hears FT4's 14.080 beside it.
         let w = wide_dials(Kind::Ft8, &s, 14_074_000.0, 0.0, 14.1e6, 192_000.0);
-        assert_eq!(w, vec![(WsjtMode::Ft4, vec![14_080_000.0])]);
+        assert_eq!(
+            w,
+            vec![(WsjtMode::Ft4, vec![14_080_000.0]), (WsjtMode::Wspr, vec![14_095_600.0])]
+        );
         // Behind a converter the dials are where the radio hears them.
         let w = wide_dials(Kind::Ft8, &s, 28_000_000.0, 116e6, 28.1e6, 192_000.0);
         assert_eq!(w[0], (WsjtMode::Ft8, vec![28_174_000.0]));
@@ -2365,6 +2379,16 @@ mod tests {
         // skimmed on every dial in the span, SKIM WIDE or not.
         let psk = DecodeSettings { skim_wide: false, ..s.clone() };
         let w = wide_dials(Kind::Psk31, &psk, 14_070_000.0, 0.0, 14.07e6, 192_000.0);
+        assert_eq!(
+            w,
+            vec![
+                (WsjtMode::Ft8, vec![14_074_000.0]),
+                (WsjtMode::Ft4, vec![14_080_000.0]),
+                (WsjtMode::Wspr, vec![14_095_600.0]),
+            ]
+        );
+        // DECODE on WSPR: the other WSPR dials, not its own, and FT8 and FT4.
+        let w = wide_dials(Kind::Wspr, &psk, 14_095_600.0, 0.0, 14.07e6, 192_000.0);
         assert_eq!(
             w,
             vec![(WsjtMode::Ft8, vec![14_074_000.0]), (WsjtMode::Ft4, vec![14_080_000.0])]

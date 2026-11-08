@@ -660,17 +660,22 @@ For the WSJT modes:
   instance 18.100 MHz. Those stations are labelled on the scope too
   (clicking one tunes there and switches DECODE to its mode, not while
   transmitting) but are not added to this list, ALL.TXT or the spots. The
-  line above the list says which dials are skimmed. For CW, PSK31 and RTTY,
+  line above the list says which dials are skimmed. **WSPR** is skimmed
+  beside them: its dial in the span (14.0956 on 20 m) is decoded every two
+  minutes and its stations labelled ("K1ABC WSPR"), fading over two slots
+  as FT8's do. With DECODE itself on WSPR, its own dial is DECODE's and
+  only the others are skimmed. Skimmed WSPR goes to SKIM LOG, not to
+  WSPRnet: only DECODE's own WSPR is sent there. For CW, PSK31 and RTTY,
   turn on SKIM CW/PSK/RTTY as well.
 - **Labels name the mode** for FT8 and FT4 as for the keyboard modes
   ("W9ML FT4"). Clicking an FT8 or FT4 label goes to its dial as that mode's
   DATA key does: USB, the passband and the radio's filter, DECODE in that
   mode and its note line saying so.
 - **In another mode** (DECODE on PSK31, RTTY, JT9 and so on) with SKIM on,
-  FT8 and FT4 go on being skimmed on every dial of theirs in the span and
-  labelled as before.
+  FT8, FT4 and WSPR go on being skimmed on every dial of theirs in the span
+  and labelled as before.
 - **SKIM LOG** opens a window listing everything heard, of every mode: the
-  receiver's own decodes (RX), SKIM WIDE's FT8 and FT4 on the other dials
+  receiver's own decodes (RX), SKIM WIDE's FT8, FT4 and WSPR on the other dials
   (WIDE), and SKIM CW/PSK/RTTY's stations (SKIM), each with its UTC, mode,
   RF, SNR and message. Across the top is a key for every mode the panel
   decodes (FT8 to MSK144, JTTY, CW, RTTY, PSK31, NAVTEX, OLIVIA, THOR, SSTV,
