@@ -746,6 +746,75 @@ For the WSJT modes:
   spots, last 21:50 UTC"). Nothing leaves the computer unless Aggregator is
   running.
 
+## Transmitting FT8 and WSPR: the TX window
+
+**TX** on the top bar opens it. Set your callsign and grid under SETTINGS →
+Station first; DECODE runs while TX is open (the window offers DECODE FT8 if
+it is on another mode). Use a dummy load for your first overs.
+
+- **ENABLE TX** is off every time the panel starts. Nothing goes out without
+  it, and an over the panel stops for a safety reason turns it off and says
+  why. **HALT TX** unkeys at once; **STOP QSO** sends nothing more in the
+  exchange.
+- The green line under the slot bar says the over would key through the TUNE
+  path (band, drive), or in yellow why it wouldn't: TX IN (menu 32) on USB
+  audio, USB or LSB, the amplifier ready and on band, drive within 8 W in
+  line. The checks keep running while you transmit, as for TUNE.
+- **LEVEL** is each mode's drive, a share of the radio's power setting, as
+  the Tune slider is.
+- The slot bar is cyan while you listen and magenta while you transmit, with
+  a mark where the over ends. **DT** is your clock against the stations you
+  hear; past 0.5 s it turns amber, and Windows' time wants syncing.
+
+**FT8.** Double-click a row (or **REPLY**) to answer that station, in the slot
+opposite theirs; **CALL CQ** to call in your TX even/1st slot. With **Auto Seq**
+the panel sends the right reply to what it hears, through to the log, and you
+can always send a line again: the round button beside a line sends it next,
+the **TxN** button now (mid-over, the rest of that over becomes it), as in
+WSJT-X. **Generate Std Msgs** rebuilds the six lines; Tx5's arrow picks one of
+your saved free-text lines. **+** on a row queues the station; REPLY during a
+QSO queues it first. Click a queued call to drop it.
+
+- A QSO is logged once both calls and reports have gone over and one side has
+  confirmed: their RR73, RRR or 73 after your R+report, or your RR73 going out
+  when you called CQ. **LOG THIS** logs the contact in hand by hand. With
+  SETTINGS → Logbook's "Log a finished QSO without asking" off, the window
+  asks first.
+- **The decode list**: country, continent, heading and distance (dimmer when
+  only the country is known), and badges from your log: **DXCC**, **BAND**,
+  **GRID**, **NEW**, **DUPE** (dupes fade). A station calling you has a blue
+  band, ▶ and bold text, at the top of its turn; a CQ you can answer is green
+  (a directed CQ only when it includes you); your own overs are magenta.
+- **TX audio and the scope's bar.** While TX is open the red offset bar on
+  SCOPE is where you transmit. **AUTO** picks the clearest gap in your own
+  slots before each over and shades the busy parts faintly; **MANUAL** follows
+  the bar and a row you click; **HOLD** moves only when you drag the bar or
+  type the figure. Dragging the bar on AUTO switches it to MANUAL. The bar
+  can't move while you transmit.
+- The **TX watchdog** stops a run after 6 minutes with no reply and no touch,
+  and a station is given up after 10 unanswered calls.
+
+**WSPR.** **TRANSMIT** sends a beacon in 10, 20, 33 or 50 % of the 2 minute
+slots, picked from your call. **POWER** is the figure in the message: it must
+be what you really radiate. **ROAM** picks a new offset between 1 400 and
+1 600 Hz each time. Only a plain call and a 4-character grid can be sent. A
+beacon keys for 110.6 s with the amplifier in line; none starts while the
+amplifier's temperature is in its warning range, and one going out stops if it
+gets there. Who heard you is on GLOBE (WSPR HEARD ME).
+
+## The log
+
+**LOG** on the top bar opens the logbook, kept as `hardrock-panel-log.adi`
+beside the panel's settings, which any logger can read. QSOs from the TX
+window go in by themselves; **+ NEW ENTRY** adds one by hand. **IMPORT** reads
+ADIF from WSJT-X, Log4OM and others, skipping ones already there; **ADIF**
+exports the selection or the whole log. **FILL MISSING** fills empty fields
+from the country file, then HamQTH (or QRZ.com once you subscribe and tick it
+under SETTINGS → Logbook). **eQSL ↑** and **LoTW ↑** upload only when you press
+them; LoTW needs ARRL's TQSL installed with your certificate. **QSL ✔**
+downloads confirmations. The logins are kept in the panel's settings file as
+plain text.
+
 ## The globe
 
 **GLOBE** opens a map of the world centred on your station (set your callsign
@@ -795,6 +864,15 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
   (a path counts for HEARD ≥ when one of its hops is over your area), but
   not into the station list or the map's dots. It only reads; the panel
   never sends PSK Reporter anything from it.
+- **WSPR HEARD ME** (off to start) asks wspr.live every five minutes who
+  heard your WSPR beacon in the last hour (WSPRnet if wspr.live doesn't
+  answer); only your callsign is sent. Stations that heard you are a hollow
+  magenta ring with a dashed magenta path and → in HEARD, naming where the
+  report came from; stations you heard are a filled dot, a solid path and ←.
+  A station can be both.
+- **The FT8 strobe.** While the TX window works a station, GLOBE picks it and
+  a pulse runs along its path: magenta out from you while you transmit, green
+  back to you otherwise.
 - **FORECAST.** Each band from 160 to 10 m, hour by hour for the next 24
   hours at your grid, dark for closed and blue to white for likely open. It
   is a rough model, not VOACAP: the MUF rises with the Sun and the solar
@@ -872,6 +950,10 @@ panel won't switch the antenna, band or tuner:
   transmission ends.
 - An outside program can't key the radio unless TUNE could be keyed at the
   radio's full power setting.
+- The TX window keys only through the same checks as TUNE, at its own
+  level, for no longer than its message, and the radio's link unkeys a data
+  message after 116 s whatever happens. A WSPR beacon doesn't start while the
+  amplifier is warm.
 
 Each of these is marked *SAFETY INTERLOCK* in the code and explained in
 [safety-interlocks.md](safety-interlocks.md).

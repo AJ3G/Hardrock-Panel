@@ -845,4 +845,23 @@ The transmit plan's items 2 and 3 (AJ3G, 10 Nov 2026).
 - **Logins** (HamQTH, QRZ.com, eQSL, LoTW website) are in SETTINGS → Logbook and kept in the panel's settings file as plain text, as nothing else in the panel holds a secret yet. They are never logged: `Credentials`' debug print hides the password and every network error is scrubbed of it before it is shown or logged.
 - **The window** groups the QSOs by UTC day, newest first, with + NEW ENTRY (the radio's frequency and mode, NOW), EDIT (or double-click), DEL (pressed twice), a WORKED BEFORE badge in the form and WB on a row worked before, FIND, and an L/E column for LoTW and eQSL (· not sent, ↑ sent, ✔ confirmed). It docks or pops out like GLOBE.
 - **Tested** with fixed replies only, never the network: `logbook::tests`, `logbook::lookup::tests`, `logbook::upload::tests`, `logbook::net::tests`, `dxcc::tests`.
-- **Not done here:** logging from the TX window, the confirm card ("ask first"), WORKED BEFORE badges on DECODE rows and the WSJT-X UDP "QSO logged" message are for the TX build, which calls `Logbook::add`, `Logbook::worked` and `logbook::adif::record`.
+- **Wired by the TX build (decision 70):** logging from the TX window, the confirm card ("ask first") and the WSJT-X UDP "QSO logged" message. WORKED BEFORE badges show in the TX window's decode list; DECODE's own rows have none yet.
+
+## 70. TX: FT8 and WSPR from the panel, the QSO sequencer and its decode list (10 Nov 2026)
+
+**Why.** AJ3G's transmit plan (items 1, 3 and 5, approved 10 Nov 2026: "Ok execute on this build"), after he added an EFHW and can test on the air. The plan is notes/tx-plan.md in the project; the mockup, tx-mockup.png.
+
+**What.**
+- **A TX window** on the top bar between DECODE and LOG, docked or popped out. ENABLE TX is off at every start; HALT TX unkeys and turns it off; STOP QSO sends nothing more in the exchange.
+- **The audio** is rendered at the sound output's own rate from mfsk-core's encoders (`tx/wave.rs`): FT8 as WSJT-X's `gen_ft8wave` (GFSK, BT 2, a raised-cosine ramp), WSPR's 162 four-tone symbols. It plays from silence up to 0.5 s (FT8) or 1 s (WSPR) into the slot (`audio::Player`), so a late start cuts the front off as WSJT-X's does.
+- **Keying** is TUNE's path with `Keying::Data` (interlocks #6, #7, #8 and #12). Each mode has its own level, a share of menu 34 as the Tune slider is.
+- **The sequencer** (`tx/qso.rs`) is SDRoxide's `qso.rs` ported without Fox/Hound or contest exchanges. The log point is AJ3G's: answering a CQ, their RR73, RRR or 73 after our R+report; calling CQ, our RR73 going out. Logged once; their repeats get the final message again.
+- **Macros as WSJT-X:** Tx1 to Tx6 with Next (the radio button) and Now (the TxN button, or a double-click; Now while an over is going out changes the rest of that over), Generate Std Msgs, Skip Tx1, RRR, Auto Seq, Call 1st, TX even/1st, a Report box, Tx5's saved free-text lines. With Auto Seq off the picked line goes each slot.
+- **The queue:** + on a decode; REPLY mid-QSO queues at the front; ALSO CALLING names can be queued; the next starts when the QSO is logged or given up, in the slot opposite where it was last heard; stale (10 min) and dupes are skipped with a note.
+- **TX freq AUTO / MANUAL / HOLD** (`tx/freq.rs`): the bar on SCOPE is the TX audio while the TX window is open. AUTO keeps the over where it is while that is clear, else moves it to the middle of the widest gap of at least 60 Hz in 200 to 2 900 Hz among the signals decoded in our own period over the last two minutes, only between overs and not mid-exchange; the busy parts are shaded faintly on the scope. Dragging the bar on AUTO switches to MANUAL. The audio sent allows for VFO B in split, so the signal lands on the bar.
+- **The decode list:** country, continent and heading/distance from cty.dat or the grid (dimmer when from the country's centre), log badges DXCC, BAND, GRID, NEW, DUPE (dupes fade), calling-you rows in the accent band with ▶, bold and pinned to the top of their turn, CQs open to us in green (a directed CQ only when it includes us), our own overs in the transmit colour. Sort by time, SNR, distance or country; CQ only, New only (never hiding a station calling us), CLEAR; a band change clears it.
+- **GLOBE's strobe** follows the QSO under way: out while keyed, back otherwise (decision 68).
+- **The log:** a QSO logged goes into LOG at once (or after LOG IT, with SETTINGS → Logbook's "Log a finished QSO without asking" off) and to WSJT-X UDP listeners as an ADIF record.
+
+**Not done yet:** occupancy from the scope's own spectrum for AUTO (decodes only for now), a sound for "calling you", REPLY on DECODE's own rows, WSPR's own decodes in the TX list (they are on GLOBE).
+
