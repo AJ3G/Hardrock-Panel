@@ -335,6 +335,11 @@ pub struct Scope {
     /// remove button as drawn.
     offset: Option<OffsetBar>,
     offset_drag: bool,
+    /// The bar was moved by hand since TX last looked ([`Scope::take_bar_moved`]).
+    offset_moved: bool,
+    /// Where TX AUTO found the band busy in its own period: radio Hz spans,
+    /// shaded faintly behind the bar.
+    tx_busy: Vec<(f64, f64)>,
     offset_close: Option<egui::Rect>,
     /// The label the offset bar is on this frame, in `skim_shown`.
     skim_on_bar: Option<usize>,
@@ -422,6 +427,8 @@ impl Scope {
             skim_press: None,
             offset: None,
             offset_drag: false,
+            offset_moved: false,
+            tx_busy: Vec::new(),
             offset_close: None,
             skim_on_bar: None,
             slices: Vec::new(),
@@ -518,6 +525,29 @@ impl Scope {
             data,
             (centre_hz - half, centre_hz + half),
         )
+    }
+
+    /// The offset bar's frequency, the radio's own Hz, if it is up.
+    pub fn bar_hz(&self) -> Option<f64> {
+        self.offset.map(|b| b.hz)
+    }
+
+    /// Put the offset bar at `hz` (the radio's own Hz), for TX's AUTO
+    /// frequency; left alone while the operator is dragging it.
+    pub fn set_bar_hz(&mut self, hz: f64) {
+        if !self.offset_drag {
+            self.offset = Some(OffsetBar { hz });
+        }
+    }
+
+    /// The bar was dragged or dropped by hand since this was last asked.
+    pub fn take_bar_moved(&mut self) -> bool {
+        std::mem::take(&mut self.offset_moved)
+    }
+
+    /// The busy parts TX AUTO is steering around, radio Hz.
+    pub fn set_tx_busy(&mut self, spans: Vec<(f64, f64)>) {
+        self.tx_busy = spans;
     }
 
     /// Set the transverter LO from elsewhere (the radio window's offset), Hz.

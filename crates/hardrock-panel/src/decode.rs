@@ -432,6 +432,24 @@ pub(crate) struct Decode {
     /// A line picked alone, for GLOBE to show that station and its path
     /// (AJ3G, 8 Nov 2026): its call and where it was heard, Hz.
     pub(crate) globe_pick: Option<(String, Option<f64>)>,
+    /// Each FT8 slot's decodes, for TX's sequencer and decode list: taken
+    /// (drained) by TX each frame, and capped when nothing takes them.
+    pub(crate) tx_feed: Vec<TxHeard>,
+}
+
+/// One FT8 decode as TX reads it.
+#[derive(Debug, Clone)]
+pub(crate) struct TxHeard {
+    pub slot_utc: i64,
+    pub snr_db: f32,
+    pub dt: f32,
+    pub audio_hz: f32,
+    pub text: String,
+    /// The receiver's dial it was heard on, the radio's own Hz.
+    pub dial_hz: f64,
+    /// Its true RF, Hz.
+    pub rf_hz: f64,
+    pub row: u64,
 }
 
 /// A station for GLOBE, if its grid is known.
@@ -906,6 +924,11 @@ impl Decode {
     /// The decoder's slots for the scope's slot lines (decision 51): the
     /// mode's period and the first slot it takes whole, while a mode with
     /// slots runs; `None` otherwise (keyboard modes, pictures, links).
+    /// The mode the decoder is running, if it is.
+    pub(crate) fn running_kind(&self) -> Option<Kind> {
+        self.worker.as_ref().map(|(k, _)| *k)
+    }
+
     pub(crate) fn slots(&self) -> Option<crate::scope::DecodeSlots> {
         let (kind, _) = self.worker.as_ref()?;
         slots_of(*kind, self.started_utc?)
@@ -1309,6 +1332,21 @@ impl Decode {
                     crate::globe::field::Source::Decode,
                     Some(self.next_id + 1),
                 ));
+            }
+            if mode == WsjtMode::Ft8 && !slot.live {
+                if self.tx_feed.len() >= 2_000 {
+                    self.tx_feed.drain(..1_000);
+                }
+                self.tx_feed.push(TxHeard {
+                    slot_utc: d.slot_utc,
+                    snr_db: d.snr_db,
+                    dt: d.dt_s,
+                    audio_hz: d.audio_hz,
+                    text: d.message.clone(),
+                    dial_hz: at.dial_hz,
+                    rf_hz: rf,
+                    row: self.next_id + 1,
+                });
             }
             push_row(&mut self.rows, &mut self.next_id, row);
             if let Some(u) = wsjtx {

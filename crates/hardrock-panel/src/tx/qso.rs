@@ -346,6 +346,11 @@ impl Qso {
         self.tx_since_progress = 0;
     }
 
+    /// ENABLE TX pressed: the operator is here, so the watchdog starts over.
+    pub(crate) fn reset_watchdog(&mut self) {
+        self.operator_acted();
+    }
+
     fn operator_acted(&mut self) {
         self.progress();
         self.watchdog = false;

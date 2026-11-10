@@ -42,7 +42,6 @@ mod theme;
 mod audio;
 mod decode;
 mod decodelog;
-mod dxcc;
 mod globe;
 mod gpu_gate;
 mod gpuload;
@@ -121,6 +120,9 @@ struct Saved {
     station: station::StationSettings,
     /// GLOBE's layers, view and sources (decision 65).
     globe: globe::GlobeSettings,
+    /// The TX window (AJ3G, 10 Nov 2026), and whether it was open.
+    tx: tx::TxSettings,
+    show_tx: bool,
 }
 
 impl Default for Saved {
@@ -143,6 +145,8 @@ impl Default for Saved {
             outside: outside::OutsideSettings::default(),
             station: station::StationSettings::default(),
             globe: globe::GlobeSettings::default(),
+            tx: tx::TxSettings::default(),
+            show_tx: false,
         }
     }
 }
@@ -197,6 +201,8 @@ struct App {
     show_globe: bool,
     globe: globe::Globe,
     decode: decode::Decode,
+    /// TRANSMIT: FT8 and WSPR, the QSO sequencer and its decode list.
+    tx: tx::Tx,
     outside: outside::Outside,
     /// The I/Q source as being chosen, applied with APPLY.
     draft_source: rx::IqChoice,
@@ -261,6 +267,7 @@ impl App {
             show_globe: false,
             globe: globe::Globe::default(),
             decode: decode::Decode::default(),
+            tx: tx::Tx::default(),
             outside,
             draft_source: saved.rx.source,
             draft_outside: saved.outside.clone(),
@@ -387,6 +394,20 @@ impl App {
             }
             return;
         }
+        if t.keying == Keying::Data {
+            // A TX window over: the TUNE interlocks at that mode's level,
+            // and the window's own (its audio, WSPR's temperature, #12).
+            let level = self.tx.over_mode().map_or(1.0, |m| self.saved.tx.level(m));
+            let watts = tune::planned_watts(r, Keying::Data, level);
+            let why = tune::tune_must_stop(amp, r, self.saved.swr_warn, watts, false)
+                .map(Some)
+                .or_else(|| self.tx.keep(amp, decoders::slot::utc_now()));
+            match why {
+                Some(why) => link.tune_stop(why),
+                None => link.tune_alive(),
+            }
+            return;
+        }
         if t.keying == Keying::Audio {
             self.tone.set_gain(self.tone_gain(r));
         }
@@ -424,6 +445,105 @@ impl App {
             tracing::info!("transmit: {now} (at {:.1} s)", since.as_secs_f32());
         }
         self.tx_sources.0 = now;
+    }
+
+    /// TRANSMIT, once a frame: the sequencer and the over on the air, the
+    /// scope's bar, GLOBE's strobe, the log, and the window when open.
+    fn run_tx(&mut self, ctx: &egui::Context, amp: &AmpStatus, rig: Option<&RigStatus>) {
+        let now = decoders::slot::utc_now();
+        let feed = std::mem::take(&mut self.decode.tx_feed);
+        let rx_dial = self.rx.active().then(|| (self.rx.rx_hz, self.rx.mode.is_lower()));
+        let bar_off = match (self.scope.bar_hz(), rx_dial) {
+            (Some(b), Some((d, lower))) => Some(if lower { d - b } else { b - d }),
+            _ => None,
+        };
+        let bar_moved = self.scope.take_bar_moved();
+        let device = self.tone_device();
+        let decoding_ft8 = self.decode.running_kind() == Some(decode::Kind::Ft8);
+        let station = self.saved.station.clone();
+        let env = tx::Env {
+            now,
+            link: self.rig.as_deref(),
+            rig,
+            amp,
+            device,
+            outside: &mut self.outside,
+            rx_dial,
+            bar_off,
+            bar_moved,
+            station: &station,
+            decoding_ft8,
+        };
+        let badges = |_call: &str, _grid: Option<&str>| tx::Badges::default();
+        let out = self.tx.frame(&mut self.saved.tx, env, feed, &self.decode.heard, &badges);
+        if let (Some(off), Some((d, lower))) = (out.set_bar_off, rx_dial) {
+            self.scope.set_bar_hz(if lower { d - off } else { d + off });
+        }
+        let busy = match rx_dial {
+            Some((d, lower)) => out
+                .busy
+                .iter()
+                .map(|&(a, b)| {
+                    let (a, b) = (a as f64, b as f64);
+                    if lower { (d - b, d - a) } else { (d + a, d + b) }
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        self.scope.set_tx_busy(busy);
+        self.globe.set_qso(out.strobe.map(|(c, g, keyed)| {
+            (c, g, if keyed { globe::StrobeDir::Tx } else { globe::StrobeDir::Rx })
+        }));
+        while let Some((l, dial)) = self.tx.take_logged() {
+            tracing::info!(
+                "log: {} {} sent {:?} rcvd {:?} on {:.0} Hz",
+                l.call,
+                l.grid.as_deref().unwrap_or(""),
+                l.rst_sent,
+                l.rst_rcvd,
+                dial
+            );
+        }
+        if !self.saved.show_tx {
+            return;
+        }
+        let mode = self.saved.tx.mode;
+        let watts = rig.and_then(|r| tune::planned_watts(r, Keying::Data, self.saved.tx.level(mode)));
+        let blocked = rig.filter(|r| r.connected).map_or(Some("The radio isn't connected.".into()), |r| {
+            tune::tone_blocked(r, self.tone_device().as_deref())
+                .or_else(|| tune::key_blocked(amp, r, watts))
+                .or_else(|| (mode == tx::TxMode::Wspr).then(|| tx::too_hot(amp)).flatten())
+        });
+        let band = rig.and_then(|r| r.freq_hz).and_then(band_of).map(|b| b.label());
+        let mut open = true;
+        let o = tx::window(
+            ctx,
+            &mut open,
+            &mut self.tx,
+            &mut self.saved.tx,
+            tx::window::Ctx {
+                now,
+                link: self.rig.as_deref(),
+                station: &station,
+                decoding: self.decode.running_kind().map(|k| k.label()),
+                blocked,
+                watts,
+                band,
+            },
+        );
+        if let Some(p) = o.pop {
+            self.saved.tx.popped = p;
+        }
+        if let Some(id) = o.pick_row {
+            self.decode.pick_row(id);
+        }
+        if let Some(m) = o.decode_mode {
+            self.saved.decode.kind = match m {
+                tx::TxMode::Ft8 => decode::Kind::Ft8,
+                tx::TxMode::Wspr => decode::Kind::Wspr,
+            };
+        }
+        self.saved.show_tx = open;
     }
 
     /// Act on the TUNE strip.
@@ -637,8 +757,8 @@ impl App {
             xvtr_hz: xvtr as f64,
             ppm: self.scope.settings().ppm,
         };
-        // The decoder runs while its window is open.
-        self.saved.decode.running = self.show_decode;
+        // The decoder runs while its window, or TX's, is open.
+        self.saved.decode.running = self.show_decode || self.saved.show_tx;
         self.decode.set_view(self.scope.view_hz());
         self.decode.frame(
             &self.saved.decode,
@@ -1156,6 +1276,12 @@ impl eframe::App for App {
                     {
                         self.show_decode = !self.show_decode;
                     }
+                    if chrome::chip(ui, self.saved.show_tx, "TX")
+                        .on_hover_text("Transmit FT8 and WSPR: the QSO sequencer and its decode list")
+                        .clicked()
+                    {
+                        self.saved.show_tx = !self.saved.show_tx;
+                    }
                     if chrome::chip(ui, self.show_globe, "GLOBE")
                         .on_hover_text(
                             "Your station, the stations heard, the grey line, propagation and \
@@ -1438,6 +1564,7 @@ impl eframe::App for App {
         if let Some((call, hz)) = self.decode.globe_pick.take() {
             self.globe.select_call(&call, hz);
         }
+        self.run_tx(ctx, &amp_raw, rig.as_ref());
         if self.show_globe {
             self.globe_window(ctx, rig.as_ref(), transmitting, xvtr);
         } else {

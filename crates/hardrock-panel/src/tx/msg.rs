@@ -97,6 +97,39 @@ pub(crate) fn parse(
     d
 }
 
+/// Whether a CQ is open to us: a plain CQ, an activity (POTA, TEST), our
+/// continent, DX when we are on another continent from them, or a prefix
+/// our call starts with. `my_cont` and `their_cont` are "NA", "EU" and the
+/// like, when known.
+pub(crate) fn cq_includes(
+    cq_to: Option<&str>,
+    my_call: &str,
+    my_cont: Option<&str>,
+    their_cont: Option<&str>,
+) -> bool {
+    let Some(to) = cq_to else { return true };
+    let to = to.to_ascii_uppercase();
+    const CONTINENTS: [&str; 7] = ["AF", "AN", "AS", "EU", "NA", "OC", "SA"];
+    if CONTINENTS.contains(&to.as_str()) {
+        return my_cont.is_none_or(|m| m == to);
+    }
+    if to == "DX" {
+        return match (my_cont, their_cont) {
+            (Some(m), Some(t)) => m != t,
+            _ => true,
+        };
+    }
+    // Activities and contests anyone may answer.
+    const OPEN: [&str; 13] = [
+        "POTA", "SOTA", "WWFF", "IOTA", "BOTA", "LOTA", "TEST", "FD", "RU", "WW", "ALL",
+        "QRP", "FT",
+    ];
+    if OPEN.contains(&to.as_str()) || to.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    my_call.to_ascii_uppercase().starts_with(&to)
+}
+
 /// Format an SNR as an FT8 report: `-13`, `+02`, `+00`.
 pub(crate) fn fmt_report(db: i16) -> String {
     let db = db.clamp(-30, 49);
@@ -158,6 +191,18 @@ mod tests {
         let d = parse("<AJ3G> JA1ABC -10", 0, -14, 0.2, 1840.0);
         assert_eq!(d.to.as_deref(), Some("AJ3G"));
         assert!(parse("TNX 73 GL", 0, 0, 0.0, 0.0).free_text);
+    }
+
+    #[test]
+    fn a_directed_cq_is_open_only_to_whom_it_names() {
+        assert!(cq_includes(None, "AJ3G", Some("NA"), Some("EU")));
+        assert!(cq_includes(Some("DX"), "AJ3G", Some("NA"), Some("EU")));
+        assert!(!cq_includes(Some("DX"), "AJ3G", Some("NA"), Some("NA")));
+        assert!(cq_includes(Some("NA"), "AJ3G", Some("NA"), Some("EU")));
+        assert!(!cq_includes(Some("EU"), "AJ3G", Some("NA"), Some("EU")));
+        assert!(cq_includes(Some("POTA"), "AJ3G", Some("NA"), Some("NA")));
+        assert!(!cq_includes(Some("JA"), "AJ3G", Some("NA"), Some("AS")));
+        assert!(cq_includes(Some("AJ"), "AJ3G", Some("NA"), Some("NA")));
     }
 
     #[test]

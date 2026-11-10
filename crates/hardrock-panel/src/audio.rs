@@ -137,6 +137,129 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
         .map_err(|e| e.to_string())
 }
 
+/// A rendered message played once (an FT8 over, a WSPR beacon): silence
+/// until its start time, then its samples at the output's own rate, then
+/// silence. [`Player::finished`] says when the last sample has gone out.
+#[derive(Default)]
+pub(crate) struct Player {
+    stream: Option<cpal::Stream>,
+    level: Arc<AtomicU32>,
+    /// Samples played so far, counted from the start of the stream.
+    pos: Arc<std::sync::atomic::AtomicUsize>,
+    /// Silence before the message, then its length, in samples.
+    lead: usize,
+    len: usize,
+}
+
+impl Player {
+    pub(crate) fn playing(&self) -> bool {
+        self.stream.is_some()
+    }
+
+    /// The last of the message has gone out.
+    pub(crate) fn finished(&self) -> bool {
+        self.stream.is_some() && self.pos.load(Ordering::Relaxed) >= self.lead + self.len
+    }
+
+    /// The message's own samples have begun.
+    pub(crate) fn sounding(&self) -> bool {
+        self.stream.is_some() && self.pos.load(Ordering::Relaxed) >= self.lead
+    }
+
+    pub(crate) fn set_gain(&self, g: f32) {
+        self.level.store(g.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Play on the output `name` at amplitude `gain`: `render` makes the
+    /// samples at the output's rate, and they start at `start_at` (silence
+    /// until then; a start already past cuts that much off the front).
+    pub(crate) fn start(
+        &mut self,
+        name: &str,
+        gain: f32,
+        start_at: std::time::SystemTime,
+        render: impl FnOnce(u32) -> Vec<f32>,
+    ) -> Result<(), String> {
+        self.stop();
+        self.set_gain(gain);
+        let host = cpal::default_host();
+        let device = host
+            .output_devices()
+            .map_err(|e| e.to_string())?
+            .find(|d| d.description().is_ok_and(|x| x.name() == name))
+            .ok_or_else(|| {
+                format!("The sound output \"{name}\" isn't there. Is the radio's USB lead in?")
+            })?;
+        let supported = device.default_output_config().map_err(|e| e.to_string())?;
+        let fmt = supported.sample_format();
+        let config = supported.config();
+        let rate = config.sample_rate;
+        let mut samples = render(rate);
+        let now = std::time::SystemTime::now();
+        let lead = match start_at.duration_since(now) {
+            Ok(d) => (d.as_secs_f64() * rate as f64) as usize,
+            Err(e) => {
+                let late = ((e.duration().as_secs_f64() * rate as f64) as usize).min(samples.len());
+                samples.drain(..late);
+                0
+            }
+        };
+        self.lead = lead;
+        self.len = samples.len();
+        self.pos.store(0, Ordering::Relaxed);
+        let buf = Arc::new(samples);
+        let (lv, pos) = (self.level.clone(), self.pos.clone());
+        let stream = match fmt {
+            SampleFormat::F32 => build_buf::<f32>(&device, config, lv, pos, buf, lead),
+            SampleFormat::I16 => build_buf::<i16>(&device, config, lv, pos, buf, lead),
+            SampleFormat::I32 => build_buf::<i32>(&device, config, lv, pos, buf, lead),
+            SampleFormat::U16 => build_buf::<u16>(&device, config, lv, pos, buf, lead),
+            other => {
+                return Err(format!("\"{name}\" wants {other:?} samples, which aren't supported"));
+            }
+        }?;
+        stream.play().map_err(|e| e.to_string())?;
+        self.stream = Some(stream);
+        Ok(())
+    }
+
+    pub(crate) fn stop(&mut self) {
+        self.set_gain(0.0);
+        self.stream = None;
+    }
+}
+
+fn build_buf<T: cpal::SizedSample + cpal::FromSample<f32>>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    level: Arc<AtomicU32>,
+    pos: Arc<std::sync::atomic::AtomicUsize>,
+    buf: Arc<Vec<f32>>,
+    lead: usize,
+) -> Result<cpal::Stream, String> {
+    let channels = config.channels.max(1) as usize;
+    device
+        .build_output_stream(
+            config,
+            move |data: &mut [T], _| {
+                let g = f32::from_bits(level.load(Ordering::Relaxed));
+                let mut p = pos.load(Ordering::Relaxed);
+                for frame in data.chunks_mut(channels) {
+                    let v = p.checked_sub(lead).and_then(|i| buf.get(i)).copied().unwrap_or(0.0);
+                    let v = (v * g).to_sample::<T>();
+                    for x in frame.iter_mut() {
+                        *x = v;
+                    }
+                    p += 1;
+                }
+                pos.store(p, Ordering::Relaxed);
+            },
+            |e| tracing::warn!("transmit audio: {e}"),
+            None,
+        )
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -753,8 +753,16 @@ fn paint_skim_waterfall(sc: &mut Scope, ui: &egui::Ui, p: &egui::Painter, rect: 
 /// on the waterfall, the offset alone along the foot. Off the view, the
 /// flag is pinned to that side with an arrow.
 fn paint_offset(sc: &mut Scope, p: &egui::Painter, rect: Rect, cx: &Ctx, spectrum: bool) {
-    let Some(bar) = sc.offset else { return };
     let v = cx.view;
+    // TX AUTO's busy parts: a faint neutral shade, not a warning colour.
+    for &(lo, hi) in &sc.tx_busy {
+        let (a, b) = (v.x_of(lo, rect.left(), rect.width()), v.x_of(hi, rect.left(), rect.width()));
+        let (a, b) = (a.min(b).max(rect.left()), a.max(b).min(rect.right()));
+        if b > a {
+            p.rect_filled(Rect::from_x_y_ranges(a..=b, rect.y_range()), 0.0, ink().gamma_multiply(0.07));
+        }
+    }
+    let Some(bar) = sc.offset else { return };
     let xx = v.x_of(bar.hz, rect.left(), rect.width());
     let inside = (rect.left()..=rect.right()).contains(&xx);
     let lit = BAR_INK;
@@ -1471,6 +1479,7 @@ fn pointer_on(
             // not while transmitting (interlock #9).
             sc.offset = Some(OffsetBar { hz: bar_hz(pos.x) });
             sc.offset_drag = true;
+            sc.offset_moved = true;
         } else if let Some(i) = marker_at(pos.x).filter(|_| {
             !matches!(
                 grab_at(pos.x, x(rx), lo_x, hi_x),
@@ -1489,6 +1498,7 @@ fn pointer_on(
     if down && let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
         if sc.offset_drag && !tx {
             sc.offset = Some(OffsetBar { hz: bar_hz(pos.x) });
+            sc.offset_moved = true;
             ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
         }
         if let Some(i) = sc.marker_drag {
