@@ -42,9 +42,11 @@ mod theme;
 mod audio;
 mod decode;
 mod decodelog;
+mod dxcc;
 mod globe;
 mod gpu_gate;
 mod gpuload;
+mod logbook;
 mod logfile;
 mod outside;
 mod panel;
@@ -119,6 +121,8 @@ struct Saved {
     station: station::StationSettings,
     /// GLOBE's layers, view and sources (decision 65).
     globe: globe::GlobeSettings,
+    /// LOG and SETTINGS → Logbook (decision 68).
+    log: logbook::LogSettings,
 }
 
 impl Default for Saved {
@@ -141,6 +145,7 @@ impl Default for Saved {
             outside: outside::OutsideSettings::default(),
             station: station::StationSettings::default(),
             globe: globe::GlobeSettings::default(),
+            log: logbook::LogSettings::default(),
         }
     }
 }
@@ -194,6 +199,10 @@ struct App {
     show_decode: bool,
     show_globe: bool,
     globe: globe::Globe,
+    /// The logbook (decision 68), and the LOG window.
+    logbook: logbook::Logbook,
+    log_ui: logbook::LogUi,
+    show_log: bool,
     decode: decode::Decode,
     outside: outside::Outside,
     /// The I/Q source as being chosen, applied with APPLY.
@@ -258,6 +267,9 @@ impl App {
             show_decode: view_args.decode,
             show_globe: false,
             globe: globe::Globe::default(),
+            logbook: logbook::Logbook::load_default(),
+            log_ui: logbook::LogUi::default(),
+            show_log: false,
             decode: decode::Decode::default(),
             outside,
             draft_source: saved.rx.source,
@@ -1010,6 +1022,10 @@ impl App {
                         });
                         ui.add_space(6.0);
                         settings::settings_station(ui, &mut self.saved.station);
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        logbook::settings_ui(ui, &mut self.saved.log);
                         ui.add_space(6.0);
                         let mut on = radio::ref_10mhz(ctx);
                         if chrome::checkbox(ui, &mut on, "10 MHz reference connected to the DUO")
@@ -1151,6 +1167,12 @@ impl eframe::App for App {
                         .clicked()
                     {
                         self.show_decode = !self.show_decode;
+                    }
+                    if chrome::chip(ui, self.show_log, "LOG")
+                        .on_hover_text("The logbook: QSOs, import and export, eQSL and LoTW")
+                        .clicked()
+                    {
+                        self.show_log = !self.show_log;
                     }
                     if chrome::chip(ui, self.show_globe, "GLOBE")
                         .on_hover_text(
@@ -1433,6 +1455,20 @@ impl eframe::App for App {
         // A line picked in DECODE: that station and its path on GLOBE.
         if let Some((call, hz)) = self.decode.globe_pick.take() {
             self.globe.select_call(&call, hz);
+        }
+        let dial =
+            self.heard_hz(rig.as_ref(), xvtr).map(|f| (f, rig.as_ref().and_then(|r| r.mode)));
+        let o = logbook::show(
+            ctx,
+            &mut self.show_log,
+            &mut self.logbook,
+            &mut self.log_ui,
+            &mut self.saved.log,
+            &self.saved.station,
+            dial,
+        );
+        if let Some(p) = o.pop {
+            self.saved.log.popped = p;
         }
         if self.show_globe {
             self.globe_window(ctx, rig.as_ref(), transmitting, xvtr);
