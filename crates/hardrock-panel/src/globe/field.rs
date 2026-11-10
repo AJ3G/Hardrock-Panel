@@ -32,6 +32,9 @@ pub(crate) enum Source {
     /// minutes, between other stations. They feed PROP, PATHS, REACH, BEST
     /// and HEARD ≥, not the station list or the map's dots.
     PskBand,
+    /// WSPR HEARD ME: the WSPR reports of AJ3G's call in the last hour, from
+    /// wspr.live (WSPRnet's database) or, when that is down, WSPRnet.
+    WsprHeard,
 }
 
 impl Source {
@@ -41,12 +44,13 @@ impl Source {
             Source::Skim => "SKIM",
             Source::PskReporter => "PSK REPORTER",
             Source::PskBand => "PSK BAND",
+            Source::WsprHeard => "WSPR",
         }
     }
 
     /// The far station heard AJ3G (rather than AJ3G hearing it).
     pub(crate) fn reverse(self) -> bool {
-        self == Source::PskReporter
+        matches!(self, Source::PskReporter | Source::WsprHeard)
     }
 }
 
@@ -291,8 +295,9 @@ const KEEP_MAX: usize = 20_000;
 
 impl History {
     pub(crate) fn add(&mut self, r: Reception) {
-        // PSK Reporter answers with the whole hour each time: one of each.
-        if r.src == Source::PskReporter
+        // PSK Reporter and the WSPR sites answer with the whole hour each
+        // time: one of each.
+        if r.src.reverse()
             && self
                 .recs
                 .iter()
@@ -331,6 +336,11 @@ impl History {
 
     pub(crate) fn len(&self) -> usize {
         self.recs.len()
+    }
+
+    /// The latest reception of `call`, from any source.
+    pub(crate) fn last_of(&self, call: &str) -> Option<&Reception> {
+        self.recs.iter().rev().find(|r| r.call.eq_ignore_ascii_case(call))
     }
 }
 

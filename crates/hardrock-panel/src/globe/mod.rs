@@ -18,6 +18,7 @@ mod ibp;
 mod picture;
 pub(crate) mod sphere;
 mod sun;
+pub(crate) mod wspr;
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -26,11 +27,63 @@ use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2, epa
 use serde::{Deserialize, Serialize};
 
 use crate::scope::{self, bandplan};
-use crate::station::{LatLon, StationSettings, bearing_deg, distance_km};
+use crate::station::{LatLon, StationSettings, bearing_deg, distance_km, grid_to_latlon};
 use crate::{chrome, theme};
 use fetch::{Ask, Fetched, Fetcher};
 use field::{BandField, History, Reception, Source};
 use sphere::{Proj, Projector, V3, View, great_circle, small_circle, vec_ll, vec_of};
+use wspr::WsprReport;
+
+/// Which way the FT8 strobe runs along the QSO's arc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StrobeDir {
+    /// AJ3G is keyed: from the station out to the DX.
+    Tx,
+    /// The DX's slot: from the DX back to the station.
+    Rx,
+}
+
+/// The FT8 QSO under way, as `Globe::set_qso` was last told.
+#[derive(Clone, Debug, PartialEq)]
+struct Strobe {
+    call: String,
+    /// From the grid the QSO gave; else where the station was last heard.
+    pos: Option<LatLon>,
+    dir: StrobeDir,
+    /// egui's clock when the pulses began this way; set when first drawn.
+    t0: Option<f64>,
+}
+
+/// One pulse along the arc a second; the head runs for `STROBE_RUN` of it,
+/// then the arc rests, so it reads as pulses rather than a stream.
+const STROBE_PERIOD_S: f64 = 1.0;
+const STROBE_RUN: f64 = 0.85;
+/// The comet's tail: how many dots, and how far apart along the arc.
+const STROBE_TAIL: usize = 10;
+const STROBE_TAIL_STEP: f64 = 0.03;
+
+/// How far along the arc from the station (0) to the DX (1) the strobe's
+/// head is, `phase` (0 to 1) of the way through its run.
+pub(crate) fn strobe_along(dir: StrobeDir, phase: f64) -> f64 {
+    let k = phase.clamp(0.0, 1.0);
+    match dir {
+        StrobeDir::Tx => k,
+        StrobeDir::Rx => 1.0 - k,
+    }
+}
+
+/// The strobe's head on the sphere: `phase` of the way through its run from
+/// `home` to `dx` (Tx) or back (Rx).
+pub(crate) fn strobe_point(home: V3, dx: V3, dir: StrobeDir, phase: f64) -> V3 {
+    sphere::slerp(home, dx, strobe_along(dir, phase))
+}
+
+/// Where in its run the strobe is at egui's clock `t`, having begun at
+/// `t0`: `None` while the arc rests between pulses.
+fn strobe_phase(t: f64, t0: f64) -> Option<f64> {
+    let k = ((t - t0).max(0.0) / STROBE_PERIOD_S).fract();
+    (k < STROBE_RUN).then(|| k / STROBE_RUN)
+}
 
 /// What GLOBE shows, kept between runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -58,6 +111,9 @@ pub(crate) struct GlobeSettings {
     /// Ask PSK Reporter for everyone's reports on GLOBE's band (31 Oct
     /// 2026, AJ3G: copies "under band conditions", as SDRoxide reads them).
     pub pskr_band: bool,
+    /// WSPR HEARD ME: ask wspr.live (else WSPRnet) who heard the station's
+    /// WSPR (off until turned on, as PSK REPORTER is).
+    pub wspr_heard: bool,
     pub proj: Proj,
     /// How long PROP's evidence takes to halve, minutes.
     pub half_life_min: f64,
@@ -84,6 +140,7 @@ impl Default for GlobeSettings {
             skim: true,
             pskr: false,
             pskr_band: true,
+            wspr_heard: false,
             proj: Proj::Globe,
             half_life_min: 45.0,
             popped: false,
@@ -98,6 +155,7 @@ impl GlobeSettings {
             Source::Skim => self.skim,
             Source::PskReporter => self.pskr,
             Source::PskBand => self.pskr_band,
+            Source::WsprHeard => self.wspr_heard,
         }
     }
 }
@@ -111,6 +169,10 @@ struct PicKey {
     prop: Option<(Option<&'static str>, u64)>,
     fetched: u64,
 }
+
+/// What the field was last built from: the sources on (DECODE, SKIM, PSK
+/// REPORTER, WSPR HEARD ME, PSK BAND) and how many PSK BAND paths.
+type BuildKey = (bool, bool, bool, bool, bool, usize);
 
 /// GLOBE as it runs.
 pub(crate) struct Globe {
@@ -128,7 +190,7 @@ pub(crate) struct Globe {
     fields: Vec<BandField>,
     /// Bumped each time the field is built again.
     fields_id: u64,
-    built: Option<(f64, usize, (bool, bool, bool, bool, usize), u64)>,
+    built: Option<(f64, usize, BuildKey, u64)>,
     floor: Option<f64>,
     tex: Option<egui::TextureHandle>,
     painting: Option<mpsc::Receiver<Vec<u8>>>,
@@ -152,6 +214,11 @@ pub(crate) struct Globe {
     followed: Option<&'static str>,
     /// The receiver's band now, marked in BAND CONDITIONS.
     rx_band: Option<&'static str>,
+    /// The FT8 strobe, while a QSO is under way.
+    strobe: Option<Strobe>,
+    /// A QSO's station with no reception to pick: turn to its path when
+    /// GLOBE is next drawn.
+    qso_fly: bool,
 }
 
 impl Default for Globe {
@@ -181,6 +248,8 @@ impl Default for Globe {
             decode_band: None,
             followed: None,
             rx_band: None,
+            strobe: None,
+            qso_fly: false,
         }
     }
 }
@@ -243,6 +312,46 @@ impl Globe {
                 false
             }
         }
+    }
+
+    /// The FT8 QSO under way: its station (picked on the map as `select_call`
+    /// does) and which way the strobe runs; None stops it. A bright pulse
+    /// runs along the station's arc about once a second, out from AJ3G's
+    /// station while keyed (Tx) and back from the DX in its slot (Rx). With
+    /// no grid and no reception of the station there is nowhere to draw it,
+    /// so there is no strobe. Cheap to call every frame: only a change does
+    /// anything.
+    // Called by the TX window's QSO machine.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn set_qso(&mut self, qso: Option<(String, Option<String>, StrobeDir)>) {
+        let Some((call, grid, dir)) = qso else {
+            self.strobe = None;
+            return;
+        };
+        let call = call.trim().to_ascii_uppercase();
+        let pos = grid.as_deref().map(str::trim).and_then(grid_to_latlon);
+        if let Some(s) = &mut self.strobe
+            && s.call == call
+        {
+            if s.dir != dir {
+                s.dir = dir;
+                s.t0 = None;
+            }
+            if pos.is_some() {
+                s.pos = pos;
+            }
+            return;
+        }
+        // A new station: pick it, and turn to its path.
+        let picked = self.select_call(&call, None);
+        self.qso_fly = !picked && pos.is_some();
+        self.strobe = Some(Strobe { call, pos, dir, t0: None });
+    }
+
+    /// Where the QSO's station is: its grid, else where it was last heard.
+    fn strobe_pos(&self) -> Option<LatLon> {
+        let s = self.strobe.as_ref()?;
+        s.pos.or_else(|| self.history.last_of(&s.call).map(|r| r.pos))
     }
 
     /// ONE BAND follows the receiver onto a new band, so the map shows the
@@ -314,6 +423,7 @@ impl Globe {
             pskr: s.pskr,
             clouds: s.clouds,
             pskr_band: edges.filter(|_| s.pskr_band),
+            wspr: s.wspr_heard,
         };
         match &self.fetcher {
             Some(f) => f.set_ask(ask),
@@ -327,6 +437,9 @@ impl Globe {
             for r in &self.got.heard_me {
                 self.history.add(r.clone());
             }
+            for w in &self.got.wspr_heard {
+                self.history.add(w.rec.clone());
+            }
         }
         self.history.prune(now);
         let Some(qth) = st.pos() else { return };
@@ -334,7 +447,7 @@ impl Globe {
             self.centre = LatLon { lat: (qth.lat - 15.0).clamp(-60.0, 60.0), lon: qth.lon + 30.0 };
             self.placed = true;
         }
-        let key = (s.decode, s.skim, s.pskr, s.pskr_band, self.got.band_paths.len());
+        let key = (s.decode, s.skim, s.pskr, s.wspr_heard, s.pskr_band, self.got.band_paths.len());
         let hl = (s.half_life_min * 60.0).max(60.0);
         let due = match self.built {
             None => true,
@@ -443,6 +556,43 @@ fn rgb(c: [u8; 3]) -> Color32 {
 }
 
 const QTH_GREEN: Color32 = Color32::from_rgb(0x41, 0xd1, 0x7a);
+/// The decode colour: the stations AJ3G heard, new (fading to slate blue).
+const DECODE_CYAN: [u8; 3] = [0x3f, 0xd0, 0xe8];
+/// The transmit colour, magenta as in the TX mockup: the stations that heard
+/// AJ3G, and the strobe while keyed.
+pub(crate) const TX_COLOUR: Color32 = Color32::from_rgb(0xe0, 0x6c, 0xf5);
+/// The strobe in the DX's slot. Yellow and red stay for warnings.
+const RX_COLOUR: Color32 = QTH_GREEN;
+/// The legend's row under the map.
+const MARKS_H: f32 = 18.0;
+
+/// How a station is marked: which way it was heard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mark {
+    /// AJ3G heard it: a filled dot, a solid path, the decode colour, ← in
+    /// HEARD.
+    Heard,
+    /// It heard AJ3G (PSK Reporter, WSPR HEARD ME): a hollow ring, a dashed
+    /// path, the transmit colour, → in HEARD.
+    HeardMe,
+}
+
+impl Mark {
+    fn of(src: Source) -> Mark {
+        if src.reverse() { Mark::HeardMe } else { Mark::Heard }
+    }
+
+    fn arrow(self) -> char {
+        match self {
+            Mark::Heard => '←',
+            Mark::HeardMe => '→',
+        }
+    }
+
+    fn dashed(self) -> bool {
+        self == Mark::HeardMe
+    }
+}
 const INK: Color32 = Color32::from_rgb(0xe9, 0xee, 0xf4);
 const INK_DIM: Color32 = Color32::from_rgb(0x9f, 0xb0, 0xc3);
 
@@ -534,6 +684,13 @@ fn body(
         let mid = st.pos().map_or(vec_ll(r.pos), |q| sphere::slerp(vec_ll(q), vec_ll(r.pos), 0.5));
         g.fly_to(sphere::ll_of(mid), ui.input(|i| i.time));
     }
+    // A QSO's station heard nowhere yet, placed by its grid: its path in view.
+    if std::mem::take(&mut g.qso_fly)
+        && let Some(dx) = g.strobe_pos()
+    {
+        let mid = st.pos().map_or(vec_ll(dx), |q| sphere::slerp(vec_ll(q), vec_ll(dx), 0.5));
+        g.fly_to(sphere::ll_of(mid), ui.input(|i| i.time));
+    }
     let shown = g.shown(s);
     // Everything is sized to the room left, less the gaps between, so the
     // window never measures more than it was given and grows frame by frame.
@@ -553,8 +710,20 @@ fn body(
             },
         );
         let map_w = (ui.available_width() - right_w - gap.x * 2.0).max(300.0);
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(map_w, h), Sense::click_and_drag());
-        map(ui, rect, &resp, g, s, st, now, &shown);
+        ui.allocate_ui_with_layout(
+            Vec2::new(map_w, h),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                let (rect, resp) = ui.allocate_exact_size(
+                    Vec2::new(map_w, h - MARKS_H - 2.0),
+                    Sense::click_and_drag(),
+                );
+                map(ui, rect, &resp, g, s, st, now, &shown);
+                let (lr, _) = ui.allocate_exact_size(Vec2::new(map_w, MARKS_H), Sense::hover());
+                marks_legend(&ui.painter_at(lr), lr, g, s);
+            },
+        );
         ui.allocate_ui_with_layout(
             Vec2::new(right_w, h),
             egui::Layout::top_down(egui::Align::Min),
@@ -711,6 +880,12 @@ fn toolbar(ui: &mut egui::Ui, g: &mut Globe, s: &mut GlobeSettings) {
                 "Asks PSK Reporter every 5 minutes who heard your callsign in the last hour",
             ),
             (
+                &mut s.wspr_heard,
+                "WSPR HEARD ME",
+                "Asks wspr.live (WSPRnet's database; WSPRnet itself if that is down) every \
+                 5 minutes who heard your WSPR in the last hour. Only your callsign is sent",
+            ),
+            (
                 &mut s.pskr_band,
                 "PSK BAND",
                 "Asks PSK Reporter every 15 minutes for everyone's reports on the band GLOBE \
@@ -833,7 +1008,7 @@ fn heard_list(
             let on_map = s.source_on(r.src) && (s.all_bands || r.band() == Some(band_static(&s.band)));
             let km = qth.map(|q| distance_km(q, r.pos)).unwrap_or(0.0);
             let snr = r.snr.map(|v| format!("{:+.0}", v)).unwrap_or_else(|| "—".into());
-            let call = if r.src.reverse() { format!("→{}", r.call) } else { r.call.clone() };
+            let call = format!("{}{}", Mark::of(r.src).arrow(), r.call);
             let line = format!(
                 "{:<10}{:>4} {:<5}{:>4}{:>7}{:>4}",
                 truncate(&call, 10),
@@ -844,7 +1019,7 @@ fn heard_list(
                 age_text(now, r.utc)
             );
             let text = RichText::new(line).monospace().size(11.0).color(if on_map { theme::TEXT_STRONG() } else { theme::TEXT() });
-            let tip = if r.src.reverse() { format!("{} heard you ({})", r.call, r.src.label()) } else { format!("Heard by {}", r.src.label()) };
+            let tip = heard_words(g, r, st);
             if ui.add(egui::Button::selectable(is_sel(g, r), text)).on_hover_text(tip).clicked() {
                 g.sel = Some((r.call.clone(), r.band(), r.src));
                 // The map turns to show the whole path.
@@ -857,6 +1032,46 @@ fn heard_list(
             }
         }
     });
+}
+
+/// The WSPR report behind a WSPR HEARD ME reception, for what WSPR adds.
+fn wspr_of<'a>(g: &'a Globe, r: &Reception) -> Option<&'a WsprReport> {
+    if r.src != Source::WsprHeard {
+        return None;
+    }
+    g.got
+        .wspr_heard
+        .iter()
+        .find(|w| w.rec.call == r.call && w.rec.utc == r.utc && w.rec.rf_hz == r.rf_hz)
+}
+
+/// Who heard whom, in words: for a station that heard AJ3G, its report and
+/// the site that reported it.
+fn heard_words(g: &Globe, r: &Reception, st: &StationSettings) -> String {
+    if !r.src.reverse() {
+        return format!("You heard {} ({})", r.call, r.src.label());
+    }
+    let mut t = format!("{} heard you ({})", r.call, r.src.label());
+    if let Some(v) = r.snr {
+        t += &format!(" · {v:+.0} dB");
+    }
+    match wspr_of(g, r) {
+        Some(w) => {
+            if let Some(d) = w.drift_hz {
+                t += &format!(" · drift {d:+.0} Hz");
+            }
+            if let Some(km) = w.km.filter(|k| *k > 0.0) {
+                t += &format!(" · {:.0} {}", st.dist_unit.of_km(km), st.dist_unit.label());
+            }
+            if let Some(p) = w.power_dbm {
+                t += &format!(" · {p:.0} dBm");
+            }
+            t += &format!(" · {}", w.site);
+        }
+        None if r.src == Source::PskReporter => t += " · PSK Reporter",
+        None => {}
+    }
+    t
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -1148,12 +1363,17 @@ fn map(
                 let lift = |i: usize| 1.0 + h * (std::f64::consts::PI * i as f64 / 48.0).sin();
                 let age = ((now - r.utc) / 60.0).max(0.0);
                 let fade = (1.0 - 0.7 * (age / 45.0).min(1.0)) as f32;
+                let mark = Mark::of(r.src);
                 let c = if s.all_bands {
+                    // Each band in its colour (WSPR's results often mix bands).
                     r.band().map(picture::band_colour).unwrap_or([0xc9, 0xd3, 0xde])
+                } else if mark == Mark::HeardMe {
+                    let t = TX_COLOUR;
+                    [t.r(), t.g(), t.b()]
                 } else {
                     // New paths cyan, dimming to slate blue over 40 minutes.
                     let t = (age / 40.0).min(1.0);
-                    let (new, old) = ([0x3f, 0xd0, 0xe8], [0x3a, 0x5f, 0x9a]);
+                    let (new, old) = (DECODE_CYAN, [0x3a, 0x5f, 0x9a]);
                     [0, 1, 2].map(|k| (new[k] as f64 + (old[k] as f64 - new[k] as f64) * t) as u8)
                 };
                 let stroke = Stroke::new(
@@ -1162,7 +1382,7 @@ fn map(
                 );
                 for run in p.runs(&pts, Some(&lift)) {
                     let v: Vec<Pos2> = run.iter().map(|&(x, y)| pos(x, y)).collect();
-                    if r.src.reverse() {
+                    if mark.dashed() {
                         painter.add(egui::Shape::dashed_line(&v, stroke, 4.0, 4.0));
                     } else {
                         painter.add(egui::Shape::line(v, stroke));
@@ -1196,15 +1416,36 @@ fn map(
                 let age = ((now - r.utc) / 60.0).max(0.0);
                 let selected = is_sel(g, r);
                 let c = r.band().map(picture::band_colour).unwrap_or([0xc9, 0xd3, 0xde]);
-                if selected {
+                let a = (255.0 * (1.0 - 0.55 * (age / 45.0).min(1.0))) as u8;
+                if Mark::of(r.src) == Mark::HeardMe {
+                    // A hollow ring, a size up from the dot, so a station
+                    // that is both shows both.
+                    let rad = if selected { 8.0 } else { 6.0 };
+                    painter.circle_stroke(
+                        at,
+                        rad,
+                        Stroke::new(3.2, Color32::from_rgba_unmultiplied(5, 6, 7, 170)),
+                    );
+                    let ring = if selected {
+                        INK
+                    } else {
+                        Color32::from_rgba_unmultiplied(
+                            TX_COLOUR.r(),
+                            TX_COLOUR.g(),
+                            TX_COLOUR.b(),
+                            a,
+                        )
+                    };
+                    painter.circle_stroke(at, rad, Stroke::new(1.6, ring));
+                } else if selected {
                     painter.circle_filled(at, 6.0, Color32::from_rgb(0x0b, 0x0c, 0x0d));
                     painter.circle_stroke(at, 6.0, Stroke::new(2.0, INK));
                 } else {
-                    let a = (255.0 * (1.0 - 0.55 * (age / 45.0).min(1.0))) as u8;
                     let col = if s.all_bands {
                         Color32::from_rgba_unmultiplied(c[0], c[1], c[2], a)
                     } else {
-                        Color32::from_rgba_unmultiplied(0x3f, 0xd0, 0xe8, a)
+                        let d = DECODE_CYAN;
+                        Color32::from_rgba_unmultiplied(d[0], d[1], d[2], a)
                     };
                     painter.circle_filled(at, if age < 5.0 { 4.0 } else { 3.0 }, col);
                     painter.circle_stroke(
@@ -1232,6 +1473,75 @@ fn map(
             if let Some((_, r)) = best {
                 g.sel = Some((r.call.clone(), r.band(), r.src));
             }
+        }
+        // The FT8 strobe: the QSO's arc, and a pulse running along it. Only
+        // while it runs is the next frame asked for, so the map's cadence
+        // and its picture's (PAINT_EVERY_S) are as they were otherwise.
+        if let Some(dx) = g.strobe_pos()
+            && let Some(sb) = g.strobe.as_mut()
+        {
+            let t = ui.input(|i| i.time);
+            let t0 = *sb.t0.get_or_insert(t);
+            let (dir, call) = (sb.dir, sb.call.clone());
+            let col = match dir {
+                StrobeDir::Tx => TX_COLOUR,
+                StrobeDir::Rx => RX_COLOUR,
+            };
+            let dv = vec_ll(dx);
+            let h = arc_lift(distance_km(q, dx));
+            let n = 64;
+            let pts = great_circle(qv, dv, n);
+            let lift = |i: usize| 1.0 + h * (std::f64::consts::PI * i as f64 / n as f64).sin();
+            for run in p.runs(&pts, Some(&lift)) {
+                painter.add(egui::Shape::line(
+                    run.iter().map(|&(x, y)| pos(x, y)).collect(),
+                    Stroke::new(1.4, col.gamma_multiply(0.45)),
+                ));
+            }
+            // The DX's end, when no station mark is there for it.
+            if !s.stations || !shown.iter().any(|r| r.call.eq_ignore_ascii_case(&call)) {
+                let sp = p.project(dv);
+                if sp.seen() {
+                    let at = pos(sp.x, sp.y);
+                    painter.circle_stroke(at, 5.0, Stroke::new(2.0, col));
+                    painter.text(
+                        at + Vec2::new(8.0, -9.0),
+                        egui::Align2::LEFT_CENTER,
+                        &call,
+                        egui::FontId::monospace(12.0),
+                        INK,
+                    );
+                }
+            }
+            if let Some(ph) = strobe_phase(t, t0) {
+                // The tail first, the head over it.
+                for j in (0..STROBE_TAIL).rev() {
+                    let k = ph - j as f64 * STROBE_TAIL_STEP;
+                    if k < 0.0 {
+                        continue;
+                    }
+                    let f = strobe_along(dir, k);
+                    let v = strobe_point(qv, dv, dir, k);
+                    let sp = p.project_lifted(v, 1.0 + h * (std::f64::consts::PI * f).sin());
+                    if !sp.seen() {
+                        continue;
+                    }
+                    let at = pos(sp.x, sp.y);
+                    if j == 0 {
+                        painter.circle_filled(at, 9.0, col.gamma_multiply(0.25));
+                        painter.circle_filled(at, 5.0, col);
+                        painter.circle_filled(at, 2.4, Color32::WHITE);
+                    } else {
+                        let fade = 1.0 - j as f32 / STROBE_TAIL as f32;
+                        painter.circle_filled(
+                            at,
+                            1.0 + 3.0 * fade,
+                            col.gamma_multiply(0.85 * fade),
+                        );
+                    }
+                }
+            }
+            crate::repaint::animate(ui.ctx());
         }
         let qp = p.project(qv);
         if qp.seen() {
@@ -1292,6 +1602,53 @@ fn map(
         }
     });
     legend(&painter, rect, g, s);
+}
+
+/// The legend under the map: which mark is which, and the strobe's two
+/// ways while a QSO is under way.
+fn marks_legend(painter: &egui::Painter, rect: Rect, g: &Globe, s: &GlobeSettings) {
+    let font = egui::FontId::monospace(10.0);
+    let y = rect.center().y;
+    let mut x = rect.left() + 4.0;
+    let word = |painter: &egui::Painter, x: &mut f32, t: &str, c: Color32| {
+        let r = painter.text(Pos2::new(*x, y), egui::Align2::LEFT_CENTER, t, font.clone(), c);
+        *x = r.right() + 14.0;
+    };
+    let cyan = rgb(DECODE_CYAN);
+    // You heard them: a filled dot and a solid path.
+    painter.line_segment([Pos2::new(x, y), Pos2::new(x + 18.0, y)], Stroke::new(1.4, cyan));
+    painter.circle_filled(Pos2::new(x + 18.0, y), 3.5, cyan);
+    x += 26.0;
+    word(painter, &mut x, "← you heard them", INK_DIM);
+    // They heard you: a hollow ring and a dashed path.
+    painter.add(egui::Shape::dashed_line(
+        &[Pos2::new(x, y), Pos2::new(x + 16.0, y)],
+        Stroke::new(1.4, TX_COLOUR),
+        4.0,
+        3.0,
+    ));
+    painter.circle_stroke(Pos2::new(x + 21.0, y), 4.5, Stroke::new(1.6, TX_COLOUR));
+    x += 30.0;
+    word(painter, &mut x, "→ they heard you (PSK Reporter, WSPR)", INK_DIM);
+    if s.all_bands {
+        word(painter, &mut x, "paths in their band's colour", INK_DIM);
+    }
+    if let Some(sb) = &g.strobe
+        && g.strobe_pos().is_some()
+    {
+        for (dir, col, text) in [
+            (StrobeDir::Tx, TX_COLOUR, format!("TX: you → {}", sb.call)),
+            (StrobeDir::Rx, RX_COLOUR, format!("RX: {} → you", sb.call)),
+        ] {
+            let on = sb.dir == dir;
+            let c = if on { col } else { col.gamma_multiply(0.4) };
+            painter.line_segment([Pos2::new(x, y), Pos2::new(x + 18.0, y)], Stroke::new(2.0, c));
+            let head = if dir == StrobeDir::Tx { x + 18.0 } else { x };
+            painter.circle_filled(Pos2::new(head, y), 3.5, c);
+            x += 26.0;
+            word(painter, &mut x, &text, if on { INK } else { INK_DIM });
+        }
+    }
 }
 
 fn legend(painter: &egui::Painter, rect: Rect, g: &Globe, s: &GlobeSettings) {
@@ -1452,6 +1809,17 @@ fn side(ui: &mut egui::Ui, g: &mut Globe, st: &StationSettings, now: f64, out: &
                     (brg + 180.0).round() % 360.0
                 )),
             );
+            if let Some(w) = wspr_of(g, r) {
+                let mut rep = Vec::new();
+                if let Some(d) = w.drift_hz {
+                    rep.push(format!("drift {d:+.0} Hz"));
+                }
+                if let Some(pw) = w.power_dbm {
+                    rep.push(format!("{pw:.0} dBm"));
+                }
+                rep.push(format!("via {}", w.site));
+                row(ui, "WSPR REPORT", val(rep.join(" · ")));
+            }
             let hops = (km / 3000.0).ceil().max(1.0);
             row(ui, "HOPS", val(format!("{hops:.0} × F2, about {:.0} km each", km / hops)));
             row(ui, "SUN AT DX", val(sun_word(sun::elevation(r.pos, now))));
@@ -2083,6 +2451,116 @@ mod tests {
         assert_eq!(p.digi.name, "FT8");
         // CW has no data dial.
         assert!(tune_pick(&Reception { mode: "CW".into(), ..r }).is_none());
+    }
+
+    fn heard(call: &str, grid: &str, hz: f64, src: Source) -> Reception {
+        Reception {
+            call: call.into(),
+            grid: grid.into(),
+            pos: grid_to_latlon(grid).unwrap(),
+            rf_hz: hz,
+            mode: "WSPR".into(),
+            snr: Some(-22.0),
+            utc: decoders::slot::utc_now(),
+            src,
+            row: None,
+            from: None,
+        }
+    }
+
+    #[test]
+    fn the_strobe_runs_out_on_tx_and_back_on_rx() {
+        let home = vec_ll(grid_to_latlon("FN20").unwrap());
+        let dx = vec_ll(grid_to_latlon("PM95").unwrap());
+        let near = |v: V3, to: V3| sphere::angle(v, to) < 1e-9;
+        // Tx starts at home and ends at the DX; Rx the other way.
+        assert!(near(strobe_point(home, dx, StrobeDir::Tx, 0.0), home));
+        assert!(near(strobe_point(home, dx, StrobeDir::Tx, 1.0), dx));
+        assert!(near(strobe_point(home, dx, StrobeDir::Rx, 0.0), dx));
+        assert!(near(strobe_point(home, dx, StrobeDir::Rx, 1.0), home));
+        // A quarter of the way through, a quarter of the way along from
+        // where it started.
+        let whole = sphere::angle(home, dx);
+        let tx = strobe_point(home, dx, StrobeDir::Tx, 0.25);
+        assert!((sphere::angle(home, tx) - 0.25 * whole).abs() < 1e-9);
+        let rx = strobe_point(home, dx, StrobeDir::Rx, 0.25);
+        assert!((sphere::angle(dx, rx) - 0.25 * whole).abs() < 1e-9);
+        // It stays on the great circle between them.
+        assert!((sphere::angle(home, rx) + sphere::angle(rx, dx) - whole).abs() < 1e-9);
+        // About one pass a second, resting between passes.
+        assert_eq!(strobe_phase(10.0, 10.0), Some(0.0));
+        assert!((strobe_phase(10.425, 10.0).unwrap() - 0.5).abs() < 1e-9);
+        assert_eq!(strobe_phase(10.9, 10.0), None);
+        assert!((strobe_phase(11.425, 10.0).unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_qso_picks_its_station_and_none_stops_the_strobe() {
+        let mut g = Globe::default();
+        let mut r = heard("JA1ABC", "PM95", 14_075_400.0, Source::Decode);
+        r.mode = "FT8".into();
+        g.add(r);
+        g.set_qso(Some(("ja1abc".into(), Some("PM95".into()), StrobeDir::Tx)));
+        assert_eq!(g.sel, Some(("JA1ABC".into(), Some("20"), Source::Decode)));
+        assert!(g.sel_from_decode && !g.qso_fly);
+        assert_eq!(g.strobe.as_ref().unwrap().dir, StrobeDir::Tx);
+        assert!(g.strobe_pos().is_some());
+        // Their slot: the same station, the strobe turned round from its start.
+        g.strobe.as_mut().unwrap().t0 = Some(5.0);
+        g.sel_from_decode = false;
+        g.set_qso(Some(("JA1ABC".into(), Some("PM95".into()), StrobeDir::Rx)));
+        let sb = g.strobe.as_ref().unwrap();
+        assert_eq!((sb.dir, sb.t0), (StrobeDir::Rx, None));
+        assert!(!g.sel_from_decode, "the same station is not picked again");
+        g.set_qso(None);
+        assert!(g.strobe.is_none() && g.strobe_pos().is_none());
+        // A station never heard, with its grid: placed by the grid, and the
+        // map turns to it.
+        g.set_qso(Some(("VK3TDX".into(), Some("QF22".into()), StrobeDir::Tx)));
+        assert!(g.qso_fly);
+        assert!(g.strobe_pos().is_some());
+        // With no grid and never heard: nowhere to draw it, so no strobe.
+        g.set_qso(Some(("ZS6ABC".into(), None, StrobeDir::Tx)));
+        assert!(g.strobe_pos().is_none());
+        // Its grid in an earlier call is kept; a station heard later is found.
+        g.set_qso(Some(("ZS6ABC".into(), Some("KG33".into()), StrobeDir::Rx)));
+        assert!(g.strobe_pos().is_some());
+    }
+
+    #[test]
+    fn heard_and_heard_me_are_marked_differently_and_a_station_can_be_both() {
+        assert_eq!(Mark::of(Source::Decode), Mark::Heard);
+        assert_eq!(Mark::of(Source::Skim), Mark::Heard);
+        assert_eq!(Mark::of(Source::PskReporter), Mark::HeardMe);
+        assert_eq!(Mark::of(Source::WsprHeard), Mark::HeardMe);
+        assert_eq!((Mark::Heard.arrow(), Mark::Heard.dashed()), ('←', false));
+        assert_eq!((Mark::HeardMe.arrow(), Mark::HeardMe.dashed()), ('→', true));
+
+        let mut g = Globe::default();
+        let s = GlobeSettings { wspr_heard: true, ..GlobeSettings::default() };
+        g.add(heard("G4XYZ", "IO91", 14_097_100.0, Source::Decode));
+        let me = heard("G4XYZ", "IO91", 14_097_071.0, Source::WsprHeard);
+        g.got.wspr_heard.push(WsprReport {
+            rec: me.clone(),
+            drift_hz: Some(-1.0),
+            power_dbm: Some(37.0),
+            km: Some(5900.0),
+            site: "wspr.live",
+        });
+        g.add(me.clone());
+        let shown = g.shown(&s);
+        assert_eq!(shown.len(), 2, "both marks");
+        assert!(shown.iter().any(|r| Mark::of(r.src) == Mark::Heard));
+        assert!(shown.iter().any(|r| Mark::of(r.src) == Mark::HeardMe));
+        // WSPR HEARD ME off: only the station heard.
+        assert_eq!(g.shown(&GlobeSettings::default()).len(), 1);
+        // HEARD names the reporting site, with WSPR's report.
+        let st = StationSettings::default();
+        let w = heard_words(&g, &me, &st);
+        assert!(w.starts_with("G4XYZ heard you (WSPR) · -22 dB · drift -1 Hz"), "{w}");
+        assert!(w.contains("37 dBm") && w.ends_with("wspr.live"), "{w}");
+        let mine = heard_words(&g, shown.iter().find(|r| r.src == Source::Decode).unwrap(), &st);
+        assert_eq!(mine, "You heard G4XYZ (DECODE)");
     }
 
     #[test]
