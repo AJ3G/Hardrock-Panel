@@ -73,9 +73,12 @@ pub(crate) fn window(
             .frame(chrome::window_frame())
             .resizable(true)
             .collapsible(false)
-            .default_pos([40.0, 90.0])
-            .default_size([1120.0, 700.0])
+            .default_pos([40.0, 60.0])
+            .default_size([1120.0, 660.0])
             .min_size([640.0, 360.0])
+            // Within the screen, below the top bar: its room would otherwise
+            // grow with what it holds.
+            .max_height((ctx.content_rect().height() - 80.0).max(360.0))
             .show(ctx, |ui| {
                 chrome::window_body_bg(ui);
                 body(ui, false, tx, s, &c, &mut out);
@@ -98,6 +101,9 @@ fn tx_ink() -> Color32 {
 }
 
 fn body(ui: &mut egui::Ui, popped: bool, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, out: &mut WindowOut) {
+    if tx.lines.iter().all(|l| l.is_empty()) {
+        tx.generate(s);
+    }
     // The top row.
     ui.horizontal_wrapped(|ui| {
         caption(ui, "MODE");
@@ -147,41 +153,6 @@ fn body(ui: &mut egui::Ui, popped: bool, tx: &mut Tx, s: &mut TxSettings, c: &Ct
     });
     ui.add_space(4.0);
     slot_bar(ui, tx, s, c);
-    // DECODE must run the mode for the sequencer (FT8) to hear anything.
-    let want = match s.mode {
-        TxMode::Ft8 => "FT8",
-        TxMode::Wspr => "WSPR",
-    };
-    if c.decoding != Some(want) {
-        ui.horizontal(|ui| {
-            let now = c.decoding.map_or("not running".to_string(), |k| format!("on {k}"));
-            ui.label(RichText::new(format!("DECODE is {now}.")).size(11.5).color(theme::TEXT()));
-            if chrome::chip(ui, false, &format!("DECODE {want}")).clicked() {
-                out.decode_mode = Some(s.mode);
-            }
-        });
-    }
-    if let Some(n) = &tx.note {
-        ui.label(RichText::new(n).size(11.5).color(theme::YELLOW()));
-    }
-    ui.add_space(4.0);
-    let foot = 24.0;
-    let h = (ui.available_height() - foot).max(200.0);
-    let w = ui.available_width();
-    let left_w = (w * 0.56).max(320.0).min(w - 300.0);
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui(vec2(left_w, h), |ui| {
-            ui.set_min_size(vec2(left_w, h));
-            ui.vertical(|ui| decode_list(ui, tx, s, c, out));
-        });
-        ui.separator();
-        ui.allocate_ui(vec2(ui.available_width(), h), |ui| {
-            egui::ScrollArea::vertical().id_salt("tx-right").show(ui, |ui| match s.mode {
-                TxMode::Ft8 => qso_panel(ui, tx, s, c),
-                TxMode::Wspr => wspr_panel(ui, tx, s, c),
-            });
-        });
-    });
     // The interlocks, as they stand.
     let (text, col) = match &c.blocked {
         Some(why) => (format!("Would not key: {why}"), theme::YELLOW()),
@@ -196,6 +167,46 @@ fn body(ui: &mut egui::Ui, popped: bool, tx: &mut Tx, s: &mut TxSettings, c: &Ct
         ),
     };
     ui.label(RichText::new(text).size(11.0).color(col));
+    // DECODE must run the mode for the sequencer (FT8) to hear anything.
+    let want = match s.mode {
+        TxMode::Ft8 => "FT8",
+        TxMode::Wspr => "WSPR",
+    };
+    if c.decoding != Some(want) {
+        ui.horizontal(|ui| {
+            let now = c.decoding.map_or("not running".to_string(), |k| format!("on {k}"));
+            ui.label(RichText::new(format!("DECODE is {now}.")).size(11.5).color(theme::TEXT()));
+            if chrome::chip(ui, false, format!("DECODE {want}")).clicked() {
+                out.decode_mode = Some(s.mode);
+            }
+        });
+    }
+    if let Some(n) = &tx.note {
+        ui.label(RichText::new(n).size(11.5).color(theme::YELLOW()));
+    }
+    ui.add_space(4.0);
+    let foot = 4.0;
+    let h = (ui.available_height() - foot).max(200.0);
+    let w = ui.available_width();
+    let left_w = (w * 0.56).max(320.0).min(w - 300.0);
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui(vec2(left_w, h), |ui| {
+            ui.set_min_size(vec2(left_w, h));
+            ui.vertical(|ui| decode_list(ui, tx, s, c, out));
+        });
+        ui.separator();
+        ui.allocate_ui(vec2(ui.available_width(), h), |ui| {
+            ui.vertical(|ui| {
+                egui::ScrollArea::vertical().id_salt("tx-right").auto_shrink([false, false]).show(
+                    ui,
+                    |ui| match s.mode {
+                        TxMode::Ft8 => qso_panel(ui, tx, s, c),
+                        TxMode::Wspr => wspr_panel(ui, tx, s, c),
+                    },
+                );
+            });
+        });
+    });
 }
 
 /// The slot bar: cyan while listening, the transmit colour while keyed,
@@ -247,7 +258,7 @@ fn slot_bar(ui: &mut egui::Ui, tx: &Tx, s: &TxSettings, c: &Ctx<'_>) {
                 }
             },
         };
-        let ink = if keyed { theme::INK_ON_CYAN() } else { theme::TEXT_STRONG() };
+        let ink = theme::TEXT_STRONG();
         p.text(rect.left_center() + vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, what, egui::FontId::monospace(11.0), ink);
         p.text(
             rect.right_center() - vec2(6.0, 0.0),
@@ -431,8 +442,11 @@ fn row_ui(ui: &mut egui::Ui, r: &ListRow, picked: bool, dx: Option<&str>, me: &s
     }
     put(format!("{:4.0}", r.d.audio_hz), ink, 42.0);
     let msg_w = (w * 0.40).clamp(150.0, 260.0);
-    let text = if r.to_me { r.d.message.clone() } else { r.d.message.clone() };
-    put(text, if r.ours { tx_ink() } else { ink }, msg_w);
+    if r.to_me {
+        // Bold, as the monospace face has no bold: drawn twice, a hair apart.
+        p.text(egui::pos2(x.get() + 0.7, y), egui::Align2::LEFT_CENTER, &r.d.message, font.clone(), ink);
+    }
+    put(r.d.message.clone(), if r.ours { tx_ink() } else { ink }, msg_w);
     let wide = w > 520.0;
     if let Some(cty) = &r.country {
         let name: String = if wide { cty.chars().take(16).collect() } else { cty.chars().take(6).collect() };
@@ -509,6 +523,9 @@ fn hover(ui: &mut egui::Ui, r: &ListRow) {
     }
     if let Some(g) = &r.d.grid {
         ui.label(format!("Grid {g}"));
+    }
+    if r.rf_hz > 0.0 {
+        ui.label(format!("Heard on {:.3} kHz ({:.0} Hz audio)", r.rf_hz / 1e3, r.d.audio_hz));
     }
     if let Some((b, km, guess)) = r.path {
         let lp = (b + 180.0) % 360.0;

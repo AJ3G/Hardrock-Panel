@@ -42,9 +42,11 @@ mod theme;
 mod audio;
 mod decode;
 mod decodelog;
+mod dxcc;
 mod globe;
 mod gpu_gate;
 mod gpuload;
+mod logbook;
 mod logfile;
 mod outside;
 mod panel;
@@ -123,6 +125,8 @@ struct Saved {
     /// The TX window (AJ3G, 10 Nov 2026), and whether it was open.
     tx: tx::TxSettings,
     show_tx: bool,
+    /// LOG and SETTINGS → Logbook (decision 69).
+    log: logbook::LogSettings,
 }
 
 impl Default for Saved {
@@ -147,6 +151,7 @@ impl Default for Saved {
             globe: globe::GlobeSettings::default(),
             tx: tx::TxSettings::default(),
             show_tx: false,
+            log: logbook::LogSettings::default(),
         }
     }
 }
@@ -200,6 +205,10 @@ struct App {
     show_decode: bool,
     show_globe: bool,
     globe: globe::Globe,
+    /// The logbook (decision 69), and the LOG window.
+    logbook: logbook::Logbook,
+    log_ui: logbook::LogUi,
+    show_log: bool,
     decode: decode::Decode,
     /// TRANSMIT: FT8 and WSPR, the QSO sequencer and its decode list.
     tx: tx::Tx,
@@ -266,6 +275,9 @@ impl App {
             show_decode: view_args.decode,
             show_globe: false,
             globe: globe::Globe::default(),
+            logbook: logbook::Logbook::load_default(),
+            log_ui: logbook::LogUi::default(),
+            show_log: false,
             decode: decode::Decode::default(),
             tx: tx::Tx::default(),
             outside,
@@ -449,8 +461,11 @@ impl App {
 
     /// TRANSMIT, once a frame: the sequencer and the over on the air, the
     /// scope's bar, GLOBE's strobe, the log, and the window when open.
-    fn run_tx(&mut self, ctx: &egui::Context, amp: &AmpStatus, rig: Option<&RigStatus>) {
+    fn run_tx(&mut self, ctx: &egui::Context, amp: &AmpStatus, rig: Option<&RigStatus>, xvtr: i64) {
         let now = decoders::slot::utc_now();
+        // The band as worked: the true RF of where the panel listens.
+        let heard = self.heard_hz(rig, xvtr);
+        let band = heard.map_or("", |f| logbook::adif_band(f as f64));
         let feed = std::mem::take(&mut self.decode.tx_feed);
         let rx_dial = self.rx.active().then(|| (self.rx.rx_hz, self.rx.mode.is_lower()));
         let bar_off = match (self.scope.bar_hz(), rx_dial) {
@@ -458,6 +473,8 @@ impl App {
             _ => None,
         };
         let bar_moved = self.scope.take_bar_moved();
+        // SETTINGS → Logbook's "log automatically", or ask first.
+        self.saved.tx.prompt_log = !self.saved.log.auto_log;
         let device = self.tone_device();
         let decoding_ft8 = self.decode.running_kind() == Some(decode::Kind::Ft8);
         let station = self.saved.station.clone();
@@ -474,9 +491,25 @@ impl App {
             station: &station,
             decoding_ft8,
         };
-        let badges = |_call: &str, _grid: Option<&str>| tx::Badges::default();
-        let out = self.tx.frame(&mut self.saved.tx, env, feed, &self.decode.heard, &badges);
-        if let (Some(off), Some((d, lower))) = (out.set_bar_off, rx_dial) {
+        let log = &self.logbook;
+        let badges = |call: &str, grid: Option<&str>| {
+            let w = log.worked(call, band, "FT8", grid);
+            tx::Badges {
+                dupe: w.dupe,
+                new_call: w.new_call,
+                new_band: w.new_band,
+                new_dxcc: w.new_dxcc,
+                new_grid: w.new_grid,
+            }
+        };
+        let mut out = self.tx.frame(&mut self.saved.tx, env, feed, &self.decode.heard, &badges);
+        // The bar and the busy shading are TX's only while its window is
+        // open: elsewhere the bar is the operator's measuring cursor.
+        let tx_shown = self.saved.show_tx;
+        if !tx_shown {
+            out.busy.clear();
+        }
+        if let (Some(off), Some((d, lower)), true) = (out.set_bar_off, rx_dial, tx_shown) {
             self.scope.set_bar_hz(if lower { d - off } else { d + off });
         }
         let busy = match rx_dial {
@@ -494,15 +527,36 @@ impl App {
         self.globe.set_qso(out.strobe.map(|(c, g, keyed)| {
             (c, g, if keyed { globe::StrobeDir::Tx } else { globe::StrobeDir::Rx })
         }));
-        while let Some((l, dial)) = self.tx.take_logged() {
-            tracing::info!(
-                "log: {} {} sent {:?} rcvd {:?} on {:.0} Hz",
-                l.call,
-                l.grid.as_deref().unwrap_or(""),
-                l.rst_sent,
-                l.rst_rcvd,
-                dial
-            );
+        // A finished contact: into the log at once (the demarcation point
+        // is the sequencer's, `tx::qso`), and to WSJT-X's listeners.
+        while let Some((l, _)) = self.tx.take_logged() {
+            let rpt = |r: Option<i16>| r.map(tx::msg::fmt_report).unwrap_or_default();
+            let rf = heard.map_or(0.0, |f| f as f64) + self.saved.tx.audio_hz as f64;
+            let rec = logbook::QsoRecord {
+                call: l.call.clone(),
+                grid: l.grid.clone().unwrap_or_default(),
+                rst_sent: rpt(l.rst_sent),
+                rst_rcvd: rpt(l.rst_rcvd),
+                freq_hz: rf,
+                mode: "FT8".into(),
+                band: logbook::adif_band(rf).into(),
+                start_utc: l.start_utc,
+                end_utc: l.end_utc,
+                my_call: station.call().unwrap_or_default(),
+                my_grid: station.grid().unwrap_or_default(),
+                tx_pwr_w: rig.and_then(|r| {
+                    tune::planned_watts(r, Keying::Data, self.saved.tx.ft8_level)
+                }),
+                ..Default::default()
+            };
+            let adif = logbook::adif::record(&rec);
+            let id = self.logbook.add(rec);
+            tracing::info!("log: {} logged from TX (#{id})", l.call);
+            let entity = dxcc::lookup(&l.call).map(|e| e.name);
+            self.tx.qso.note_worked(&l.call, entity.as_deref());
+            if let Some(u) = self.outside.wsjtx.as_ref() {
+                u.logged_adif(&adif);
+            }
         }
         if !self.saved.show_tx {
             return;
@@ -1134,6 +1188,10 @@ impl App {
                         });
                         ui.add_space(6.0);
                         settings::settings_station(ui, &mut self.saved.station);
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        logbook::settings_ui(ui, &mut self.saved.log);
                         ui.add_space(6.0);
                         let mut on = radio::ref_10mhz(ctx);
                         if chrome::checkbox(ui, &mut on, "10 MHz reference connected to the DUO")
@@ -1281,6 +1339,12 @@ impl eframe::App for App {
                         .clicked()
                     {
                         self.saved.show_tx = !self.saved.show_tx;
+                    }
+                    if chrome::chip(ui, self.show_log, "LOG")
+                        .on_hover_text("The logbook: QSOs, import and export, eQSL and LoTW")
+                        .clicked()
+                    {
+                        self.show_log = !self.show_log;
                     }
                     if chrome::chip(ui, self.show_globe, "GLOBE")
                         .on_hover_text(
@@ -1564,7 +1628,21 @@ impl eframe::App for App {
         if let Some((call, hz)) = self.decode.globe_pick.take() {
             self.globe.select_call(&call, hz);
         }
-        self.run_tx(ctx, &amp_raw, rig.as_ref());
+        let dial =
+            self.heard_hz(rig.as_ref(), xvtr).map(|f| (f, rig.as_ref().and_then(|r| r.mode)));
+        let o = logbook::show(
+            ctx,
+            &mut self.show_log,
+            &mut self.logbook,
+            &mut self.log_ui,
+            &mut self.saved.log,
+            &self.saved.station,
+            dial,
+        );
+        if let Some(p) = o.pop {
+            self.saved.log.popped = p;
+        }
+        self.run_tx(ctx, &amp_raw, rig.as_ref(), xvtr);
         if self.show_globe {
             self.globe_window(ctx, rig.as_ref(), transmitting, xvtr);
         } else {

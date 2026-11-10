@@ -445,8 +445,6 @@ pub(crate) struct TxHeard {
     pub dt: f32,
     pub audio_hz: f32,
     pub text: String,
-    /// The receiver's dial it was heard on, the radio's own Hz.
-    pub dial_hz: f64,
     /// Its true RF, Hz.
     pub rf_hz: f64,
     pub row: u64,
@@ -1343,7 +1341,6 @@ impl Decode {
                     dt: d.dt_s,
                     audio_hz: d.audio_hz,
                     text: d.message.clone(),
-                    dial_hz: at.dial_hz,
                     rf_hz: rf,
                     row: self.next_id + 1,
                 });

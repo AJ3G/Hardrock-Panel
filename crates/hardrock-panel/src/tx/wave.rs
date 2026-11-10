@@ -42,18 +42,11 @@ impl Message {
     }
 
     /// How long it is on the air, s.
+    #[cfg(test)]
     pub(crate) fn len_s(&self) -> f64 {
         match self {
             Message::Ft8 { .. } => FT8_LEN_S,
             Message::Wspr { .. } => WSPR_LEN_S,
-        }
-    }
-
-    /// The highest audio it reaches, Hz: the top tone and a little over.
-    pub(crate) fn top_hz(&self) -> f32 {
-        match self {
-            Message::Ft8 { audio_hz, .. } => audio_hz + 7.0 * 6.25 + 6.25,
-            Message::Wspr { audio_hz, .. } => audio_hz + 6.0,
         }
     }
 

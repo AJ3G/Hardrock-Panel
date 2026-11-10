@@ -167,6 +167,7 @@ pub(crate) fn pack(text: &str) -> Option<[u8; 77]> {
 
 /// What `text` will read as on the air, once packed: free text is cut to
 /// 13 characters, a hashed call is shown in brackets.
+#[cfg(test)]
 pub(crate) fn on_air(text: &str) -> Option<String> {
     pack(text).and_then(|b| wsjt77::unpack77(&b))
 }

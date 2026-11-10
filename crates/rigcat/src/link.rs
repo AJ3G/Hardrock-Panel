@@ -36,9 +36,6 @@ const OPEN_PINGS: u32 = 3;
 /// before the link unkeys by itself (interlock #6). The panel says so every
 /// frame, and [`RigLink::tune_alive`] passes one on every [`ALIVE_EVERY`].
 const TUNE_ALIVE: Duration = Duration::from_secs(1);
-/// The longest TUNE the link will key, whatever it is asked for (a data
-/// message's own limit is [`Keying::max_keyed`]).
-pub const TUNE_MAX: Duration = Duration::from_secs(60);
 /// How often [`RigLink::tune_alive`] passes a keep-alive on: well inside
 /// [`TUNE_ALIVE`].
 const ALIVE_EVERY: Duration = Duration::from_millis(200);
@@ -112,7 +109,7 @@ impl RigLink {
         self.send(Msg::SetPower(code));
     }
 
-    /// Key TUNE for at most `max` (and never more than [`TUNE_MAX`]). The
+    /// Key TUNE for at most `max` (and never more than [`Keying::max_keyed`] allows). The
     /// caller must call [`RigLink::tune_alive`] at least once a second while
     /// it wants it, and checks interlock #6 before calling this. With
     /// [`Keying::Audio`] the caller's tone must already be playing; the link

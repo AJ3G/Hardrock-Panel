@@ -399,10 +399,6 @@ impl Qso {
         self.operator_acted();
     }
 
-    /// The message queued by hand, if any.
-    pub(crate) fn manual(&self) -> Option<&str> {
-        self.manual.as_deref()
-    }
 
     /// Record a message as it went out.
     pub(crate) fn record_tx(&mut self, text: &str, now_utc: i64) {

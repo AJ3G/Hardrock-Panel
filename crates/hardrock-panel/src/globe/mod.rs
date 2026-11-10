@@ -322,7 +322,6 @@ impl Globe {
     /// so there is no strobe. Cheap to call every frame: only a change does
     /// anything.
     // Called by the TX window's QSO machine.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn set_qso(&mut self, qso: Option<(String, Option<String>, StrobeDir)>) {
         let Some((call, grid, dir)) = qso else {
             self.strobe = None;

@@ -161,11 +161,6 @@ impl Player {
         self.stream.is_some() && self.pos.load(Ordering::Relaxed) >= self.lead + self.len
     }
 
-    /// The message's own samples have begun.
-    pub(crate) fn sounding(&self) -> bool {
-        self.stream.is_some() && self.pos.load(Ordering::Relaxed) >= self.lead
-    }
-
     pub(crate) fn set_gain(&self, g: f32) {
         self.level.store(g.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }

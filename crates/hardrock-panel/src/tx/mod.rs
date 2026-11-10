@@ -211,8 +211,6 @@ pub(crate) struct TxOut {
     pub busy: Vec<(f32, f32)>,
     /// The QSO under way, for GLOBE: call, grid, keyed now.
     pub strobe: Option<(String, Option<String>, bool)>,
-    /// DECODE's row to pick (a row clicked here).
-    pub pick_row: Option<u64>,
 }
 
 /// Everything about the station the TX engine looks at each frame.
@@ -498,7 +496,13 @@ impl Tx {
         {
             return Some(Some(why));
         }
-        (self.player.finished() || now > o.end_utc + 2.0 * TAIL_S).then_some(None)
+        // The sound card's clock and ours: the audio may not run out well
+        // before the over's own end (a device that took it at the wrong
+        // rate would have sent something else).
+        if self.player.finished() && now < o.end_utc - 1.0 {
+            return Some(Some("the transmit audio ran out early".into()));
+        }
+        (now >= o.end_utc + TAIL_S).then_some(None)
     }
 
     /// Once a frame.
@@ -511,7 +515,11 @@ impl Tx {
         badges: &dyn Fn(&str, Option<&str>) -> Badges,
     ) -> TxOut {
         let mut out = TxOut::default();
+        let was = (self.qso.cfg.my_call.clone(), self.qso.cfg.my_grid.clone());
         self.configure(s, env.station);
+        if was != (self.qso.cfg.my_call.clone(), self.qso.cfg.my_grid.clone()) {
+            self.generate(s);
+        }
         let now = env.now;
         let me = env.station.call().unwrap_or_default();
         self.take_feed(s, &env, feed, heard, badges, &me);
@@ -522,7 +530,7 @@ impl Tx {
                 o.keyed_seen = true;
             } else if o.keyed_seen {
                 // Unkeyed: at its end, or cut short.
-                let done = self.player.finished() || now >= o.end_utc - 0.5;
+                let done = now >= o.end_utc - 0.5;
                 self.player.stop();
                 let mode = o.mode;
                 self.over = None;
@@ -530,7 +538,7 @@ impl Tx {
                     if mode == TxMode::Ft8 && self.hand.is_none() {
                         self.qso.note_tx_sent(now as i64);
                     }
-                } else {
+                } else if self.enabled {
                     self.enabled = false;
                     let why = env.rig.and_then(|r| r.tune_note.clone());
                     self.note = Some(format!(
@@ -748,7 +756,7 @@ impl Tx {
                     "WSPR Type 1 needs a plain call, a 4-character grid and one of its power levels."
                         .to_string()
                 })?;
-                let text = format!("{me} {} {}", &grid.get(..4).unwrap_or(""), s.wspr_dbm);
+                let text = format!("{me} {} {}", grid.get(..4).unwrap_or(""), s.wspr_dbm);
                 (t0, m, text, wave::WSPR_START_S, wave::WSPR_LEN_S)
             }
         };
