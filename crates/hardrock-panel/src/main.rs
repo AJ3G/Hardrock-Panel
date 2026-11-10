@@ -42,6 +42,7 @@ mod theme;
 mod audio;
 mod decode;
 mod decodelog;
+mod dxcc;
 mod globe;
 mod gpu_gate;
 mod gpuload;
@@ -62,6 +63,7 @@ mod slotclock;
 mod spots;
 mod station;
 mod tune;
+mod tx;
 
 use eframe::egui::{self, RichText};
 use eframe::egui_wgpu::RenderState;
@@ -482,7 +484,9 @@ impl App {
                     }
                 }
             }
-            None => {}
+            // The TUNE strip never keys a data message: that is the TX
+            // window's, through `tx_key`.
+            Some(Keying::Data) | None => {}
         }
         if let Some(link) = &self.rig {
             if let Some(code) = t.power {

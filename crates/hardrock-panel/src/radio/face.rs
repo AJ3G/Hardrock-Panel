@@ -349,6 +349,7 @@ pub(crate) fn lcd(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, width: f32)
         match t.keying {
             rigcat::Keying::Audio => "TX TUNE".to_string(),
             rigcat::Keying::Carrier => "RIG TUNE".to_string(),
+            rigcat::Keying::Data => "TX DATA".to_string(),
         }
     } else {
         format!("TX PWR {}", f.s.power().map_or("—", |p| p.label))

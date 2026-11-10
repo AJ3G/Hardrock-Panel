@@ -36,7 +36,8 @@ const OPEN_PINGS: u32 = 3;
 /// before the link unkeys by itself (interlock #6). The panel says so every
 /// frame, and [`RigLink::tune_alive`] passes one on every [`ALIVE_EVERY`].
 const TUNE_ALIVE: Duration = Duration::from_secs(1);
-/// The longest TUNE the link will key, whatever it is asked for.
+/// The longest TUNE the link will key, whatever it is asked for (a data
+/// message's own limit is [`Keying::max_keyed`]).
 pub const TUNE_MAX: Duration = Duration::from_secs(60);
 /// How often [`RigLink::tune_alive`] passes a keep-alive on: well inside
 /// [`TUNE_ALIVE`].
@@ -118,7 +119,7 @@ impl RigLink {
     /// reads the radio's input and mode first and keys only if they pass
     /// (interlock #7).
     pub fn tune_start(&self, max: Duration, keying: Keying) {
-        self.send(Msg::TuneStart(max.min(TUNE_MAX), keying));
+        self.send(Msg::TuneStart(max.min(keying.max_keyed()), keying));
     }
 
     /// Set the radio's transmit audio to its USB input (menu 32 on the
@@ -540,7 +541,7 @@ fn run<P: Read + Write>(
                 Ok(Msg::TuneStart(max, keying)) if tune.is_none() => {
                     let key = match keying {
                         Keying::Carrier => Ok(rig.proto.key_tune()),
-                        Keying::Audio => key_audio(&mut rig, status),
+                        Keying::Audio | Keying::Data => key_audio(&mut rig, status),
                     };
                     if let Err(why) = &key {
                         info!("rigcat: TUNE not keyed: {why}");

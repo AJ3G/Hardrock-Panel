@@ -116,6 +116,28 @@ pub enum Keying {
     Audio,
     /// The radio's own TUNE carrier (`TX2;`), at its power setting.
     Carrier,
+    /// An ordinary transmission, as [`Keying::Audio`], of a data message the
+    /// panel generated (an FT8 over or a WSPR beacon) at that mode's level.
+    /// Keyed and checked exactly as `Audio` is (interlock #7: USB audio and a
+    /// sideband, read again before keying); only its time limit differs
+    /// ([`Keying::max_keyed`]).
+    Data,
+}
+
+impl Keying {
+    /// The longest the link keys this way, whatever it is asked for.
+    ///
+    /// SAFETY INTERLOCK (docs/safety-interlocks.md, #6 and #12): a minute for
+    /// TUNE, which is a carrier for tuning; a WSPR beacon is 110.6 s on the
+    /// air, so a data message may run to 116 s. The panel stops each over
+    /// at the end of its own message well before this; the cap is the link's
+    /// own backstop if the panel cannot.
+    pub fn max_keyed(self) -> std::time::Duration {
+        match self {
+            Keying::Audio | Keying::Carrier => std::time::Duration::from_secs(60),
+            Keying::Data => std::time::Duration::from_secs(116),
+        }
+    }
 }
 
 /// A TUNE in progress.

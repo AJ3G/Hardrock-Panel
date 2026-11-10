@@ -63,7 +63,7 @@ pub(crate) fn planned_watts(rig: &RigStatus, keying: Keying, drive: f32) -> Opti
     let step = rig.power()?;
     Some(match keying {
         Keying::Carrier => step.watts,
-        Keying::Audio => step.watts * drive.clamp(0.0, 1.0),
+        Keying::Audio | Keying::Data => step.watts * drive.clamp(0.0, 1.0),
     })
 }
 
