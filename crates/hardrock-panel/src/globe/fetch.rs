@@ -12,6 +12,7 @@
 //! | api.weather.gov | Weather alerts at the station (United States only) | 15 min |
 //! | retrieve.pskreporter.info | Who heard the station's callsign in the last hour (PSK REPORTER on) | 5 min |
 //! | retrieve.pskreporter.info | Everyone's reports on GLOBE's band in the last 15 minutes (PSK BAND on) | 15 min |
+//! | db1.wspr.live, else wsprnet.org | Who heard the station's WSPR in the last hour (WSPR HEARD ME on) | 5 min |
 //!
 //! Each is parsed here by a plain function, so the tests read sample answers
 //! and the container never calls out. Nothing is ever sent but the request.
@@ -23,6 +24,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::field::{Reception, Source};
+use super::wspr::{self, WsprReport};
 use crate::station::{LatLon, grid_to_latlon};
 
 /// Space weather, as last fetched.
@@ -125,9 +127,11 @@ pub(crate) struct Fetched {
     /// minutes, as paths from each receiver to its sender (PSK BAND).
     pub band_paths: Vec<Reception>,
     pub band_for: Option<(u64, u64)>,
+    /// WSPR HEARD ME: who heard the station's WSPR, the whole last hour.
+    pub wspr_heard: Vec<WsprReport>,
     /// Bumped each time anything arrives.
     pub serial: u64,
-    /// By source name: SWPC, OVATION, KC2G, CLOUDS, WX, NWS, PSKR.
+    /// By source name: SWPC, OVATION, KC2G, CLOUDS, WX, NWS, PSKR, WSPR.
     pub status: Vec<(&'static str, Status)>,
 }
 
@@ -162,6 +166,8 @@ pub(crate) struct Ask {
     /// PSK BAND: the band's edges, Hz, to ask PSK Reporter about; `None` is
     /// off.
     pub pskr_band: Option<(u64, u64)>,
+    /// WSPR HEARD ME: ask wspr.live (else WSPRnet) who heard the call.
+    pub wspr: bool,
 }
 
 /// The fetcher's thread, while the window is open.
@@ -255,6 +261,9 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
         ("WX", 15),
         ("NWS", 15),
         ("PSKR", 5),
+        // wspr.live asks for no more than a query a minute or so; once in
+        // five minutes is two WSPR slots and a half.
+        ("WSPR", 5),
         // Everyone's reports on one band are a big answer, and PSK Reporter
         // asks for few queries: one band, every 15 minutes, the window it
         // asks for.
@@ -274,13 +283,18 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
             pskr: false,
             clouds: false,
             pskr_band: None,
+            wspr: false,
         });
         // A new grid or callsign: the station's own sources again at once.
         if last_ask.as_ref().is_some_and(|l| {
-            l.qth != a.qth || l.call != a.call || (!l.pskr && a.pskr) || (!l.clouds && a.clouds)
+            l.qth != a.qth
+                || l.call != a.call
+                || (!l.pskr && a.pskr)
+                || (!l.clouds && a.clouds)
+                || (!l.wspr && a.wspr)
         }) {
             for d in &mut due {
-                if matches!(d.name, "WX" | "NWS" | "PSKR" | "CLOUDS") {
+                if matches!(d.name, "WX" | "NWS" | "PSKR" | "CLOUDS" | "WSPR") {
                     d.next = Instant::now();
                 }
             }
@@ -347,6 +361,10 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
                     Some(c) => get_text(&ag, &pskr_url(c))
                         .map(|t| parse_pskreporter(&t))
                         .map(|r| with(&data, |f| f.heard_me = r)),
+                    None => Err("no callsign in SETTINGS → Station".into()),
+                },
+                "WSPR" if a.wspr => match &a.call {
+                    Some(c) => fetch_wspr(&ag, c).map(|r| with(&data, |f| f.wspr_heard = r)),
                     None => Err("no callsign in SETTINGS → Station".into()),
                 },
                 "PSKBAND" if a.pskr_band.is_some() => {
@@ -446,6 +464,22 @@ fn fetch_swpc(ag: &ureq::Agent, data: &Mutex<Fetched>, slow: bool) -> Result<(),
     }
     with(data, |f| f.space = space);
     if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
+}
+
+/// Who heard `call`'s WSPR in the last hour: wspr.live, or WSPRnet's own
+/// search when wspr.live fails. Only the callsign is sent.
+fn fetch_wspr(ag: &ureq::Agent, call: &str) -> Result<Vec<WsprReport>, String> {
+    let live = wspr::wspr_live_url(call).ok_or_else(|| format!("{call} isn't a callsign"))?;
+    match get_text(ag, &live).and_then(|t| wspr::parse_wspr_live(&t)) {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            tracing::info!("globe: wspr.live failed ({e}), asking WSPRnet");
+            let net = wspr::wsprnet_url(call).ok_or("not a callsign")?;
+            get_text(ag, &net)
+                .and_then(|t| wspr::parse_wsprnet(&t))
+                .map_err(|e2| format!("wspr.live: {e}; WSPRnet: {e2}"))
+        }
+    }
 }
 
 /// SWPC's times: "2026-10-22 15:00:00", "2026-10-22T15:00:00Z",
