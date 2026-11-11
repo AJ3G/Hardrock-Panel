@@ -228,13 +228,17 @@ fn body(ui: &mut egui::Ui, popped: bool, tx: &mut Tx, s: &mut TxSettings, c: &Ct
     ui.advance_cursor_after_rect(area);
 }
 
-/// A column of the window in `rect`, clipped to it.
+/// A column of the window in `rect`, clipped to it. A child that is not
+/// allocated in the window: whatever it holds, even a few points more than
+/// `rect` (a footer measured a hair short), never becomes the window's
+/// content size, which egui's resize keeps the window at least as big as —
+/// the window grew back after being made shorter (AJ3G, 11 Nov 2026). The
+/// caller claims `rect`'s room itself.
 fn column(ui: &mut egui::Ui, rect: egui::Rect, add: impl FnOnce(&mut egui::Ui)) {
     let b = egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min));
-    ui.scope_builder(b, |ui| {
-        ui.set_clip_rect(rect.intersect(ui.clip_rect()));
-        add(ui)
-    });
+    let mut child = ui.new_child(b);
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    add(&mut child);
 }
 
 /// The slot bar: cyan while listening, the transmit colour while keyed,
