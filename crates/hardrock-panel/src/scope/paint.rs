@@ -178,7 +178,7 @@ fn paint_hover_cursor(sc: &Scope, ui: &egui::Ui, spec: Rect, wf: Rect, cx: &Ctx)
     let line = Stroke::new(1.0, ink().gamma_multiply(0.6));
     p.vline(xx, spec.y_range(), line);
     p.vline(xx, wf.y_range(), line);
-    let mut text = format!("{} MHz", crate::tx::mhz_cell(cx.map.shown(hz)));
+    let mut text = format!("{} MHz", mhz_spaced(cx.map.shown(hz)));
     if !sc.held
         && let Some(f) = sc.shown()
         && let Some(pk) = hover_level(f, hz, px_hz)
@@ -201,6 +201,14 @@ fn paint_hover_cursor(sc: &Scope, ui: &egui::Ui, spec: Rect, wf: Rect, cx: &Ctx)
     p.rect_filled(r, 2.0, Color32::from_black_alpha(210));
     p.rect_stroke(r, 2.0, Stroke::new(1.0, ink().gamma_multiply(0.5)), egui::StrokeKind::Inside);
     p.galley(r.min + pad, g, ink());
+}
+
+/// A frequency to the hertz as "14.213 720" (MHz), as the TX window's lists
+/// write it.
+fn mhz_spaced(hz: f64) -> String {
+    let hz = hz.round().max(0.0) as u64;
+    let rest = hz % 1_000_000;
+    format!("{}.{:03} {:03}", hz / 1_000_000, rest / 1000, rest % 1000)
 }
 
 /// The strongest level within a drawn column either side of `hz`, so the
