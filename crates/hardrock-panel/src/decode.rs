@@ -435,6 +435,9 @@ pub(crate) struct Decode {
     /// Each FT8 slot's decodes, for TX's sequencer and decode list: taken
     /// (drained) by TX each frame, and capped when nothing takes them.
     pub(crate) tx_feed: Vec<TxHeard>,
+    /// Each WSPR slot's decodes, for the TX window's WSPR list: taken as
+    /// `tx_feed` is.
+    pub(crate) wspr_feed: Vec<WsprHeard>,
     /// When the radio was keyed, so a slot heard while we transmitted is
     /// dropped (decision 71).
     keyed: KeyedLog,
@@ -453,6 +456,21 @@ pub(crate) struct TxHeard {
     /// Its true RF, Hz.
     pub rf_hz: f64,
     pub row: u64,
+}
+
+/// One WSPR decode as TX's WSPR list reads it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WsprHeard {
+    pub slot_utc: i64,
+    pub snr_db: f32,
+    pub drift_hz: f32,
+    pub audio_hz: f32,
+    pub call: String,
+    /// Empty for a compound call (Type 2).
+    pub grid: String,
+    pub dbm: i32,
+    /// Its true RF, Hz.
+    pub rf_hz: f64,
 }
 
 /// A station for GLOBE, if its grid is known.
@@ -1355,15 +1373,30 @@ impl Decode {
                 &d.message,
             ));
             match (&d.wspr, mode) {
-                (Some(w), WsjtMode::Wspr) => wspr.push(wsprnet::Spot {
-                    call: w.callsign.clone(),
-                    grid: w.grid.clone(),
-                    snr_db: d.snr_db.round() as i32,
-                    dt_s: d.dt_s,
-                    drift_hz: w.drift_hz.round() as i32,
-                    freq_hz: rf,
-                    power_dbm: w.power_dbm,
-                }),
+                (Some(w), WsjtMode::Wspr) => {
+                    wspr.push(wsprnet::Spot {
+                        call: w.callsign.clone(),
+                        grid: w.grid.clone(),
+                        snr_db: d.snr_db.round() as i32,
+                        dt_s: d.dt_s,
+                        drift_hz: w.drift_hz.round() as i32,
+                        freq_hz: rf,
+                        power_dbm: w.power_dbm,
+                    });
+                    if self.wspr_feed.len() >= 2_000 {
+                        self.wspr_feed.drain(..1_000);
+                    }
+                    self.wspr_feed.push(WsprHeard {
+                        slot_utc: d.slot_utc,
+                        snr_db: d.snr_db,
+                        drift_hz: w.drift_hz,
+                        audio_hz: d.audio_hz,
+                        call: w.callsign.clone(),
+                        grid: w.grid.clone(),
+                        dbm: w.power_dbm,
+                        rf_hz: rf,
+                    });
+                }
                 (_, WsjtMode::Ft8 | WsjtMode::Ft4) => {
                     if let Some(c) = &call {
                         let known = self.heard.get(c).map(|h| h.grid.clone());

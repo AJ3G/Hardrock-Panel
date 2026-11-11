@@ -7,7 +7,9 @@ use eframe::egui::{self, Color32, RichText, Sense, vec2};
 use rigcat::RigLink;
 
 use super::{FreqMode, ListRow, Sort, Tx, TxMode, TxSettings, sched, wave};
-use crate::station::StationSettings;
+use crate::globe::field::Reception;
+use crate::globe::wspr::WsprReport;
+use crate::station::{self, StationSettings};
 use crate::{chrome, theme};
 
 /// What the window asks of the panel.
@@ -34,6 +36,9 @@ pub(crate) struct Ctx<'a> {
     pub band: Option<&'static str>,
     /// The radio, for the drive beside each LEVEL.
     pub rig: Option<&'a rigcat::RigStatus>,
+    /// Who heard the station, as GLOBE fetched it: PSK Reporter's reports
+    /// and WSPR HEARD ME's.
+    pub heard_me: (&'a [Reception], &'a [WsprReport]),
 }
 
 pub(crate) fn window(
@@ -302,6 +307,10 @@ fn slot_bar(ui: &mut egui::Ui, tx: &Tx, s: &TxSettings, c: &Ctx<'_>) {
 }
 
 fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, out: &mut WindowOut) {
+    if s.mode == TxMode::Wspr {
+        wspr_list(ui, tx, c);
+        return;
+    }
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("DECODES").strong().color(theme::TEXT_STRONG()));
         ui.add_space(8.0);
@@ -321,14 +330,6 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
             tx.rows.clear();
         }
     });
-    if s.mode == TxMode::Wspr {
-        ui.label(
-            RichText::new("WSPR's decodes are in DECODE and on GLOBE; who heard you is GLOBE's WSPR HEARD ME.")
-                .size(11.5)
-                .color(theme::TEXT()),
-        );
-        return;
-    }
     let turns = slot_groups(&tx.rows);
     let me_call = c.station.call().unwrap_or_default();
     let dx = tx.qso.dx_call().map(str::to_string);
@@ -416,6 +417,141 @@ fn slot_groups(rows: &std::collections::VecDeque<ListRow>) -> Vec<(i64, Vec<usiz
         by_slot.entry(r.d.slot_utc).or_default().push(i);
     }
     by_slot.into_iter().rev().collect()
+}
+
+/// A report of our beacon, from wspr.live, WSPRnet or PSK Reporter.
+#[derive(Debug, Clone, PartialEq)]
+struct HeardMe {
+    utc: f64,
+    call: String,
+    snr: Option<f32>,
+    km: Option<f64>,
+    rf_hz: f64,
+    site: &'static str,
+}
+
+/// The reports of our WSPR beacon since `since`, newest first: one per
+/// receiver per 2 min cycle, the WSPR sites' before PSK Reporter's.
+fn heard_me(
+    pskr: &[Reception],
+    wspr: &[WsprReport],
+    me: Option<station::LatLon>,
+    since: f64,
+) -> Vec<HeardMe> {
+    let km = |r: &Reception| me.map(|p| station::distance_km(p, r.pos));
+    let mut v: Vec<HeardMe> = wspr
+        .iter()
+        .map(|w| HeardMe { utc: w.rec.utc, call: w.rec.call.clone(), snr: w.rec.snr, km: w.km.or_else(|| km(&w.rec)), rf_hz: w.rec.rf_hz, site: w.site })
+        .chain(pskr.iter().filter(|r| r.mode.eq_ignore_ascii_case("WSPR")).map(|r| HeardMe {
+            utc: r.utc,
+            call: r.call.clone(),
+            snr: r.snr,
+            km: km(r),
+            rf_hz: r.rf_hz,
+            site: "PSK Reporter",
+        }))
+        .filter(|m| m.utc >= since)
+        .collect();
+    let cycle = |t: f64| sched::slot_start(t, sched::WSPR_PERIOD);
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|m| seen.insert((m.call.clone(), cycle(m.utc))));
+    v.sort_by(|a, b| b.utc.total_cmp(&a.utc));
+    v
+}
+
+/// WSPR's list (AJ3G, 11 Nov 2026): who our decoder heard, and who heard
+/// our beacon, newest 2 min cycle first. Nothing to REPLY to.
+fn wspr_list(ui: &mut egui::Ui, tx: &mut Tx, c: &Ctx<'_>) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("WSPR").strong().color(theme::TEXT_STRONG()));
+        if chrome::chip(ui, false, "CLEAR").clicked() {
+            tx.wspr_rows.clear();
+            tx.wspr_cleared = c.now;
+        }
+    });
+    let me = heard_me(c.heard_me.0, c.heard_me.1, c.station.pos(), tx.wspr_cleared);
+    let head = |ui: &mut egui::Ui, t: &str| ui.label(RichText::new(t).size(10.5).color(theme::CYAN_DIM()));
+    let cycle_head = |ui: &mut egui::Ui, t: i64, n: usize| {
+        ui.label(RichText::new(format!("{} · {n}", crate::decode::hms(t as f64))).size(10.5).color(theme::CYAN_DIM()));
+    };
+    let row_h = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
+    let half = ((ui.available_height() - 4.0 * row_h) / 2.0).max(row_h);
+
+    caption(ui, "HEARD");
+    head(ui, "UTC   SNR DRIFT CALL       GRID   DBM     KM  BRG   HZ");
+    egui::ScrollArea::vertical().id_salt("tx-wspr-heard").auto_shrink([false, false]).max_height(half).show(ui, |ui| {
+        let mut i = 0;
+        while i < tx.wspr_rows.len() {
+            let t = tx.wspr_rows[i].h.slot_utc;
+            let n = tx.wspr_rows.iter().skip(i).take_while(|r| r.h.slot_utc == t).count();
+            cycle_head(ui, t, n);
+            for r in tx.wspr_rows.iter().skip(i).take(n) {
+                ui.label(mono(wspr_heard_line(r)).color(theme::TEXT()));
+            }
+            i += n;
+        }
+        if tx.wspr_rows.is_empty() {
+            ui.label(RichText::new("Nothing heard yet: DECODE runs WSPR while this window is open.").size(11.5).color(theme::TEXT()));
+        }
+    });
+
+    caption(ui, "HEARD ME");
+    head(ui, "UTC   CALL        SNR     KM  MHZ         FROM");
+    egui::ScrollArea::vertical().id_salt("tx-wspr-me").auto_shrink([false, false]).show(ui, |ui| {
+        let cycle = |t: f64| sched::slot_start(t, sched::WSPR_PERIOD);
+        let mut i = 0;
+        while i < me.len() {
+            let t = cycle(me[i].utc);
+            let n = me.iter().skip(i).take_while(|m| cycle(m.utc) == t).count();
+            cycle_head(ui, t, n);
+            for m in me.iter().skip(i).take(n) {
+                ui.label(mono(heard_me_line(m)).color(theme::TEXT()));
+            }
+            i += n;
+        }
+        if me.is_empty() {
+            ui.label(
+                RichText::new(
+                    "No reports of your beacon yet. They come from wspr.live or WSPRnet with GLOBE's WSPR HEARD \
+                     ME on, and from PSK Reporter with its PSK REPORTER on; the sites take a few minutes.",
+                )
+                .size(11.5)
+                .color(theme::TEXT()),
+            );
+        }
+    });
+}
+
+fn wspr_heard_line(r: &super::WsprRow) -> String {
+    let h = &r.h;
+    let t = crate::decode::hms(h.slot_utc as f64).replace(':', "");
+    let (km, brg) = match r.path {
+        Some((b, km)) => (format!("{km:5.0}"), format!("{b:3.0}°")),
+        None => ("    –".into(), "  –".into()),
+    };
+    format!(
+        "{} {:+4.0} {:+5.0} {:<10} {:<6} {:>3} {km} {brg} {:4.0}",
+        t.get(..4).unwrap_or(&t),
+        h.snr_db,
+        h.drift_hz,
+        h.call,
+        if h.grid.is_empty() { "–" } else { &h.grid },
+        h.dbm,
+        h.audio_hz
+    )
+}
+
+fn heard_me_line(m: &HeardMe) -> String {
+    let t = crate::decode::hms(m.utc).replace(':', "");
+    format!(
+        "{} {:<10} {:>4} {:>6} {:<11.6} {}",
+        t.get(..4).unwrap_or(&t),
+        m.call,
+        m.snr.map_or("–".into(), |s| format!("{s:+.0}")),
+        m.km.map_or("–".into(), |k| format!("{k:.0}")),
+        m.rf_hz / 1e6,
+        m.site
+    )
 }
 
 enum Act {
@@ -931,6 +1067,58 @@ mod tests {
         let g = slot_groups(&rows);
         assert_eq!(g.iter().map(|t| t.0).collect::<Vec<_>>(), vec![45, 30, 15]);
         assert_eq!(g[1].1, vec![0, 2]);
+    }
+
+    #[test]
+    fn heard_me_keeps_one_report_per_receiver_per_cycle_newest_first() {
+        let rec = |call: &str, utc: f64, mode: &str| Reception {
+            call: call.into(),
+            grid: "IO91".into(),
+            pos: station::grid_to_latlon("IO91").unwrap(),
+            rf_hz: 14_097_071.0,
+            mode: mode.into(),
+            snr: Some(-22.0),
+            utc,
+            src: crate::globe::field::Source::PskReporter,
+            row: None,
+            from: None,
+        };
+        let w = |call: &str, utc: f64| WsprReport {
+            rec: rec(call, utc, "WSPR"),
+            drift_hz: Some(0.0),
+            power_dbm: Some(37.0),
+            km: Some(5900.0),
+            site: "wspr.live",
+        };
+        let t = 1_800_000_000.0;
+        let wspr = [w("G4XYZ", t), w("DL1ABC", t + 120.0)];
+        let pskr = [rec("G4XYZ", t + 30.0, "WSPR"), rec("K1ABC", t + 30.0, "FT8"), rec("VK2XX", t + 1.0, "WSPR")];
+        let v = heard_me(&pskr, &wspr, None, 0.0);
+        let calls: Vec<_> = v.iter().map(|m| (m.call.as_str(), m.site)).collect();
+        assert_eq!(calls, vec![("DL1ABC", "wspr.live"), ("VK2XX", "PSK Reporter"), ("G4XYZ", "wspr.live")]);
+        // CLEAR hides what came before it.
+        assert_eq!(heard_me(&pskr, &wspr, None, t + 60.0).len(), 1);
+    }
+
+    #[test]
+    fn a_wspr_line_holds_its_columns() {
+        let r = crate::tx::WsprRow {
+            h: crate::decode::WsprHeard {
+                slot_utc: 1_800_000_000 - 1_800_000_000 % 120,
+                snr_db: -18.0,
+                drift_hz: 1.0,
+                audio_hz: 1503.0,
+                call: "K1ABC".into(),
+                grid: "FN42".into(),
+                dbm: 37,
+                rf_hz: 14_097_103.0,
+            },
+            path: Some((45.0, 1234.0)),
+        };
+        let l = wspr_heard_line(&r);
+        for part in ["-18", "+1", "K1ABC", "FN42", "37", "1234", "45°", "1503"] {
+            assert!(l.contains(part), "{part} in {l}");
+        }
     }
 
     #[test]

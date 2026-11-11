@@ -467,6 +467,7 @@ impl App {
         let heard = self.heard_hz(rig, xvtr);
         let band = heard.map_or("", |f| logbook::adif_band(f as f64));
         let feed = std::mem::take(&mut self.decode.tx_feed);
+        self.tx.take_wspr(std::mem::take(&mut self.decode.wspr_feed), self.saved.station.pos());
         let rx_dial = self.rx.active().then(|| (self.rx.rx_hz, self.rx.mode.is_lower()));
         let bar_off = match (self.scope.bar_hz(), rx_dial) {
             (Some(b), Some((d, lower))) => Some(if lower { d - b } else { b - d }),
@@ -584,6 +585,7 @@ impl App {
                 watts,
                 band,
                 rig,
+                heard_me: self.globe.heard_me(),
             },
         );
         if let Some(p) = o.pop {

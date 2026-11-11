@@ -26,7 +26,7 @@ use rigcat::{Keying, RigLink, RigStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::audio;
-use crate::decode::TxHeard;
+use crate::decode::{TxHeard, WsprHeard};
 use crate::station::{self, StationSettings};
 use crate::tune;
 
@@ -189,6 +189,14 @@ pub(crate) struct ListRow {
     pub ours: bool,
 }
 
+/// A row of the TX window's WSPR list: a station our WSPR decoder heard.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WsprRow {
+    pub h: WsprHeard,
+    /// Heading, °, and distance, km, from our grid to theirs.
+    pub path: Option<(f64, f64)>,
+}
+
 /// An over on the air, or about to be.
 struct Over {
     mode: TxMode,
@@ -252,6 +260,11 @@ pub(crate) struct Tx {
     /// The slot an over last went in, so a slot is used once.
     sent_slot: Option<i64>,
     pub rows: VecDeque<ListRow>,
+    /// WSPR's list: the stations heard, newest first.
+    pub wspr_rows: VecDeque<WsprRow>,
+    /// CLEAR in WSPR: reports of our beacon from before it are not shown,
+    /// UTC s.
+    pub wspr_cleared: f64,
     /// (slot, audio Hz) of signals heard, for AUTO.
     heard: VecDeque<(i64, f32)>,
     /// Which slots each station was heard in: even or odd.
@@ -299,6 +312,8 @@ impl Default for Tx {
             over: None,
             sent_slot: None,
             rows: VecDeque::new(),
+            wspr_rows: VecDeque::new(),
+            wspr_cleared: 0.0,
             heard: VecDeque::new(),
             parity: HashMap::new(),
             tx_even: false,
@@ -674,6 +689,15 @@ impl Tx {
         out
     }
 
+    /// The WSPR decodes since last frame, into the WSPR list.
+    pub(crate) fn take_wspr(&mut self, feed: Vec<WsprHeard>, me: Option<station::LatLon>) {
+        for h in feed {
+            let path = me.zip(station::grid_to_latlon(&h.grid)).map(|(a, b)| (station::bearing_deg(a, b), station::distance_km(a, b)));
+            self.wspr_rows.push_front(WsprRow { h, path });
+        }
+        self.wspr_rows.truncate(ROWS);
+    }
+
     /// The FT8 decodes since last frame: into the sequencer and the list.
     fn take_feed(
         &mut self,
@@ -689,6 +713,7 @@ impl Tx {
             if self.list_dial.is_some_and(|d| (d - dial).abs() > 5_000.0) {
                 self.rows.clear();
                 self.heard.clear();
+                self.wspr_rows.clear();
             }
             self.list_dial = Some(dial);
         }
