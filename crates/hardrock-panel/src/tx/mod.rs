@@ -322,6 +322,13 @@ impl Tx {
         self.over.as_ref().map(|o| (o.text.as_str(), o.mode, o.audio_hz, o.end_utc))
     }
 
+    /// The last `n` samples of the over that have gone to the radio, for the
+    /// scope to draw our own signal (decision 74); `None` when nothing of
+    /// ours is sounding.
+    pub(crate) fn sounding(&self, n: usize) -> Option<audio::TxAudio> {
+        self.player.recent(n)
+    }
+
     /// The mode of the over in progress, for the interlocks.
     pub(crate) fn over_mode(&self) -> Option<TxMode> {
         self.over.as_ref().map(|o| o.mode)

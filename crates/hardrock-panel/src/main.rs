@@ -879,6 +879,11 @@ impl App {
     fn scope_window(&mut self, ctx: &egui::Context, rig: Option<&RigStatus>, transmitting: bool) {
         let mut open = true;
         let tx_why = transmitting.then(|| tx_why(rig, &self.status()));
+        // What the panel is sending, for the scope to draw over an over
+        // (decision 74): the TX window's over, else TX TUNE's tone.
+        let sending =
+            self.tx.sounding(scope::TX_WINDOW).or_else(|| self.tone.recent(scope::TX_WINDOW));
+        self.scope.set_tx_signal(rig.and_then(|r| scope::TxSignal::from_rig(r, sending)));
         let srig = scope::ScopeRig {
             rx_hz: self.rx.rx_hz,
             mode: self.rx.mode,

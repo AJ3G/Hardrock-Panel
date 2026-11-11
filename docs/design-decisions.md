@@ -463,6 +463,8 @@ The meter legend and the tiles' hover text say where each came from. Any reading
 
 **Where.** `scope/mod.rs` (`TxHold`, `hold_over_tx`, `span`), `scope/gpu_run.rs` (`resync`, `stalled`, a held epoch), `scope/shaders/spectrum.wgsl` (`finite`), `scope/paint.rs` (the top bar and status line), `rx.rs` (`watch_stream`, `DIAL_SETTLE`), `sdr/src/pipeline.rs` (`sanitise`, `ResetSpectrum`), `sdr/src/spectrum.rs`, `sdr/src/source.rs` (`TxSim`, `plausible_dial`), `examples/scope_demo.rs` (`--tx`), `tools/fake_duo.py` (`--key-at`, `--unkey-at`).
 
+**Amended 11 Nov 2026 (decision 74).** The display no longer stands still over an over. The received I/Q is still never shown while the radio transmits and for the guard after, and the restart afterwards is unchanged (the GPU resync, the CPU reset waited for, averages and peaks forgotten); but the waterfall and the trace keep moving meanwhile, showing the band at its last received level, dimmed, with our own transmitted signal drawn where it lands. The top bar reads *IQ · TX · RX DIMMED* in place of *IQ · HELD · TX*. Everything above about why the I/Q is not shown still stands.
+
 
 ## 41. A zoom follows the receiver only when it moves; a mode snap keeps the centre; the end of an over is seen within a round
 
@@ -865,3 +867,15 @@ The transmit plan's items 2 and 3 (AJ3G, 10 Nov 2026).
 
 **Not done yet:** occupancy from the scope's own spectrum for AUTO (decodes only for now), a sound for "calling you", REPLY on DECODE's own rows, WSPR's own decodes in the TX list (they are on GLOBE).
 
+## 74. The scope over a transmission: the band dimmed, our own signal in the TX colour (11 Nov 2026)
+
+**Why.** AJ3G, 11 Nov 2026: "When in TX do not lock scope instead playback my audio at the frequency I am on." Decision 40 froze the whole display for the over; with FT8 and WSPR going out from the panel (decision 70) that froze it for 13 s or 110 s at a time.
+
+**What.**
+- **Still not the DUO's I/Q.** While the radio says it is on the air, and for the 0.3 s guard after, nothing the receiver gives is shown (decision 40's reasons stand: silence, full-scale leakage, zeros, a moved centre). The span stays where it was.
+- **The band keeps scrolling, dimmed.** The waterfall lays down a row at its own pace (its speed and the frame rate) from the last spectrum received, and every such row, and the trace, is drawn under a dark veil so it is plain nothing is being heard (`Scope::scroll_held`, `txsig::held_rows_due`; at most four rows a repaint, one after a long gap). The rows are kept by their time (`txsig::TxRow`), so the veil scrolls down with them. CPU and GPU spectra alike: the rows go up as ordinary rows with their bins, and the veil is drawn over both.
+- **Our own signal, where it lands.** The panel knows what it is playing: the TX window's over (`audio::Player::recent`, the samples that have gone to the output, at their level) or TX TUNE's 1 kHz tone (`audio::Tone::recent`). Its last 8192 samples are transformed (Hann, a plain radix-2 FFT in `scope/txsig.rs`) and each audio frequency placed from the transmit dial: VFO B in split (the other VFO when receiving on B), else the receive VFO; above the dial on USB, below on LSB (`txsig::tx_dial`, `txsig::place`). The trace shows it as a line in the TX colour (GLOBE's magenta, `0xe06cf5`) with its peak a tenth below the top of the scale and labelled TX; the waterfall marks it on each keyed row where it is within 24 dB of its peak, brighter the stronger.
+- **RIG TUNE** (`TX2;`) is drawn as a carrier at the transmit dial; where the DUO puts its TUNE carrier in SSB is not confirmed without the radio. **An outside program** keying the radio, or anything else the panel did not play, shows only the dimmed band, and the trace says our signal is not known here.
+- **After the over** the live spectrum comes back exactly as decision 40 had it, and no more dimmed rows are laid. Interlock #9 is unchanged: nothing tunes while transmitting.
+
+**Where.** `scope/txsig.rs` (all the arithmetic, with its tests), `scope/mod.rs` (`set_tx_signal`, `scroll_held`, `TxHold::keyed`, the hold-and-resume test), `scope/paint.rs` (`paint_tx_trace`, `paint_tx_waterfall`), `audio.rs` (`Player::recent`, `Tone::recent`), `tx/mod.rs` (`Tx::sounding`), `main.rs` (`scope_window`: two lines that hand the scope what is sounding).

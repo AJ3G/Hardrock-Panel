@@ -528,10 +528,16 @@ Taken at once and kept; **DEFAULTS** puts them back.
 band plan and the data-mode keys are locked, VFO A and B and split are left
 alone, and the top bar says so. Zoom, markers and the display still work.
 
-The display is also **held** while the radio transmits, as SDR Console does:
-the spectrum, waterfall and 3D surface keep what they showed before the over,
-and the top bar reads *IQ · HELD · TX*. A third of a second after the radio
-says it has stopped, the scope starts again from what the receiver hears, with the
+While the radio transmits the scope does not show what the receiver gives
+(the radio's I/Q is silent or flooded by its own transmitter then). The
+waterfall and trace keep moving, showing the band as it was last received,
+dimmed, and your own signal in the TX colour (magenta) where it lands: the
+audio the panel is sending (a TX window over, or TX TUNE's tone) placed from
+the transmit dial (VFO B in split), above it on USB and below on LSB. RIG
+TUNE's carrier is drawn at the dial. When another program keys the radio
+only the dimmed band shows. The top bar reads *IQ · TX · RX DIMMED*. A third
+of a second after the radio says it has stopped, the scope starts again from
+what the receiver hears, with the
 averages and peak hold started afresh, so nothing of your own transmission
 (or of whatever the radio's I/Q did meanwhile) lingers. If the ELAD's I/Q stays
 silent for 3 seconds once you are back on receive, the panel opens it again by

@@ -45,6 +45,14 @@ pub(crate) fn radio_device(names: &[String]) -> Option<String> {
         .cloned()
 }
 
+/// The last stretch of audio sent to the radio: what the scope draws of our
+/// own transmission while the radio is keyed (decision 74).
+pub(crate) use crate::scope::txsig::TxAudio;
+
+/// The rate [`Tone::recent`] renders the tone at: its spectrum is one line
+/// whatever the output's rate.
+const TONE_VIEW_RATE: u32 = 48_000;
+
 /// A tone playing, or ready to.
 #[derive(Default)]
 pub(crate) struct Tone {
@@ -62,6 +70,17 @@ impl Tone {
 
     pub(crate) fn set_gain(&self, g: f32) {
         self.level.store(g.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// The last `n` samples of the tone as it plays, at its level: the same
+    /// sine the output callback makes, for the scope (decision 74). `None`
+    /// while it is not playing.
+    pub(crate) fn recent(&self, n: usize) -> Option<TxAudio> {
+        self.stream.as_ref()?;
+        let g = f32::from_bits(self.level.load(Ordering::Relaxed));
+        let inc = std::f32::consts::TAU * TONE_HZ / TONE_VIEW_RATE as f32;
+        let samples = (0..n).map(|i| (i as f32 * inc).cos() * g).collect();
+        Some(TxAudio { rate: TONE_VIEW_RATE, samples })
     }
 
     /// Start the tone on the output named `name`, at amplitude `gain`.
@@ -149,6 +168,9 @@ pub(crate) struct Player {
     /// Silence before the message, then its length, in samples.
     lead: usize,
     len: usize,
+    /// The message's samples and the output's rate, for [`Player::recent`].
+    buf: Option<Arc<Vec<f32>>>,
+    rate: u32,
 }
 
 impl Player {
@@ -163,6 +185,17 @@ impl Player {
 
     pub(crate) fn set_gain(&self, g: f32) {
         self.level.store(g.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// The last `n` samples of the message that have gone to the output, at
+    /// their level, for the scope (decision 74): `None` before the message
+    /// starts and once it has ended.
+    pub(crate) fn recent(&self, n: usize) -> Option<TxAudio> {
+        let buf = self.buf.as_ref().filter(|_| self.stream.is_some())?;
+        let g = f32::from_bits(self.level.load(Ordering::Relaxed));
+        let at = played(self.pos.load(Ordering::Relaxed), self.lead, buf.len())?;
+        let samples = buf[at.saturating_sub(n)..at].iter().map(|v| v * g).collect();
+        Some(TxAudio { rate: self.rate, samples })
     }
 
     /// Play on the output `name` at amplitude `gain`: `render` makes the
@@ -203,6 +236,8 @@ impl Player {
         self.len = samples.len();
         self.pos.store(0, Ordering::Relaxed);
         let buf = Arc::new(samples);
+        self.buf = Some(buf.clone());
+        self.rate = rate;
         let (lv, pos) = (self.level.clone(), self.pos.clone());
         let stream = match fmt {
             SampleFormat::F32 => build_buf::<f32>(&device, config, lv, pos, buf, lead),
@@ -221,7 +256,15 @@ impl Player {
     pub(crate) fn stop(&mut self) {
         self.set_gain(0.0);
         self.stream = None;
+        self.buf = None;
     }
+}
+
+/// How much of a message `len` samples long has played at output position
+/// `pos` after `lead` samples of silence: `None` before it starts and after
+/// it ends.
+fn played(pos: usize, lead: usize, len: usize) -> Option<usize> {
+    pos.checked_sub(lead).filter(|&at| at > 0 && at <= len)
 }
 
 fn build_buf<T: cpal::SizedSample + cpal::FromSample<f32>>(
@@ -265,6 +308,15 @@ mod tests {
         assert_eq!(gain_for(0.25, 1.0), 0.5);
         assert_eq!(gain_for(0.0, 0.24), 0.0);
         assert_eq!(gain_for(3.0, 0.24), gain_for(1.0, 0.24));
+    }
+
+    #[test]
+    fn what_has_played_is_counted_from_the_message_start() {
+        assert_eq!(played(100, 480, 1000), None);
+        assert_eq!(played(480, 480, 1000), None);
+        assert_eq!(played(500, 480, 1000), Some(20));
+        assert_eq!(played(1480, 480, 1000), Some(1000));
+        assert_eq!(played(1481, 480, 1000), None);
     }
 
     #[test]
