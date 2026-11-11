@@ -164,6 +164,82 @@ impl QsoRecord {
         self.lotw.rcvd || self.eqsl.rcvd || self.card.rcvd
     }
 
+    /// Fill this record's blank fields from `from`, the same QSO from
+    /// somewhere else (decision 107): a field already set is never changed.
+    /// Blank is an empty text, a zero frequency, a number not given, and a
+    /// QSL not marked sent (or received) with no date; an ADIF field kept
+    /// in `extra` is added when this record has none of that name. Returns
+    /// whether anything was filled.
+    pub(crate) fn fill_blanks(&mut self, from: &QsoRecord) -> bool {
+        let mut any = false;
+        let mut text = |to: &mut String, v: &String| {
+            if to.trim().is_empty() && !v.trim().is_empty() {
+                *to = v.clone();
+                any = true;
+            }
+        };
+        text(&mut self.grid, &from.grid);
+        text(&mut self.rst_sent, &from.rst_sent);
+        text(&mut self.rst_rcvd, &from.rst_rcvd);
+        text(&mut self.my_call, &from.my_call);
+        text(&mut self.my_grid, &from.my_grid);
+        text(&mut self.comment, &from.comment);
+        text(&mut self.name, &from.name);
+        text(&mut self.qth, &from.qth);
+        text(&mut self.state, &from.state);
+        text(&mut self.county, &from.county);
+        text(&mut self.country, &from.country);
+        text(&mut self.continent, &from.continent);
+        text(&mut self.qsl_via, &from.qsl_via);
+        // The mode and its submode go together: a submode only under the
+        // same mode.
+        if self.mode.is_empty() && !from.mode.is_empty() {
+            self.mode = from.mode.clone();
+            self.submode = from.submode.clone();
+            any = true;
+        } else if self.submode.is_empty() && !from.submode.is_empty() && self.mode == from.mode {
+            self.submode = from.submode.clone();
+            any = true;
+        }
+        if self.freq_hz <= 0.0 && from.freq_hz > 0.0 {
+            self.freq_hz = from.freq_hz;
+            any = true;
+        }
+        fn opt<T: Copy>(to: &mut Option<T>, v: Option<T>, any: &mut bool) {
+            if to.is_none() && v.is_some() {
+                *to = v;
+                *any = true;
+            }
+        }
+        opt(&mut self.dxcc, from.dxcc, &mut any);
+        opt(&mut self.cq_zone, from.cq_zone, &mut any);
+        opt(&mut self.itu_zone, from.itu_zone, &mut any);
+        opt(&mut self.tx_pwr_w, from.tx_pwr_w, &mut any);
+        for (to, v) in [
+            (&mut self.lotw, &from.lotw),
+            (&mut self.eqsl, &from.eqsl),
+            (&mut self.card, &from.card),
+        ] {
+            if !to.sent && to.sent_on.is_empty() && (v.sent || !v.sent_on.is_empty()) {
+                to.sent = v.sent;
+                to.sent_on = v.sent_on.clone();
+                any = true;
+            }
+            if !to.rcvd && to.rcvd_on.is_empty() && (v.rcvd || !v.rcvd_on.is_empty()) {
+                to.rcvd = v.rcvd;
+                to.rcvd_on = v.rcvd_on.clone();
+                any = true;
+            }
+        }
+        for (k, v) in &from.extra {
+            if !v.trim().is_empty() && !self.extra.iter().any(|(x, _)| x.eq_ignore_ascii_case(k)) {
+                self.extra.push((k.clone(), v.clone()));
+                any = true;
+            }
+        }
+        any
+    }
+
     /// The first four characters of the grid, upper case, if it has them.
     fn grid4(&self) -> Option<String> {
         grid4(&self.grid)
@@ -237,8 +313,11 @@ pub(crate) struct Worked {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ImportReport {
     pub added: usize,
+    /// Already in the log (or earlier in the same file), and filled in the
+    /// blank fields of the one there (decision 107).
+    pub filled: usize,
     /// The same call on the same band within [`IMPORT_DUPE_SECS`] of one in
-    /// the log (or earlier in the same file).
+    /// the log (or earlier in the same file), with nothing to add to it.
     pub dupes: usize,
     /// No call, or no date.
     pub unreadable: usize,
@@ -250,7 +329,10 @@ pub(crate) struct ImportReport {
 
 impl ImportReport {
     pub(crate) fn summary(&self) -> String {
-        let mut s = format!("{} added, {} already in the log", self.added, self.dupes);
+        let mut s = format!(
+            "{} added, {} filled in, {} already in the log",
+            self.added, self.filled, self.dupes
+        );
         if self.unreadable > 0 {
             s.push_str(&format!(", {} without a call or date skipped", self.unreadable));
         }
@@ -615,14 +697,18 @@ impl Logbook {
         self.recs.iter().filter(|r| r.call.eq_ignore_ascii_case(call)).count()
     }
 
-    /// Read an ADIF document into the log, leaving out QSOs it already has
-    /// (the same call and band within [`IMPORT_DUPE_SECS`]), and save.
+    /// Read an ADIF document into the log and save, once. A QSO the log
+    /// already has (the same call and band within [`IMPORT_DUPE_SECS`], the
+    /// nearest in time) isn't added again: its blank fields are filled from
+    /// the file's instead, never one already set (decision 107).
     pub(crate) fn import_text(&mut self, text: &str) -> ImportReport {
         let (recs, swl) = adif::parse(text);
         let mut rep = ImportReport { swl, ..ImportReport::default() };
-        let mut seen: HashMap<(String, String), Vec<i64>> = HashMap::new();
-        for r in &self.recs {
-            seen.entry((r.call.clone(), r.band.clone())).or_default().push(r.start_utc);
+        // Where each call and band's QSOs are in `recs`, those added from
+        // this file among them.
+        let mut seen: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        for (i, r) in self.recs.iter().enumerate() {
+            seen.entry((r.call.clone(), r.band.clone())).or_default().push(i);
         }
         for mut r in recs {
             r.normalise();
@@ -630,16 +716,25 @@ impl Logbook {
                 rep.unreadable += 1;
                 continue;
             }
-            let times = seen.entry((r.call.clone(), r.band.clone())).or_default();
-            if times.iter().any(|t| (t - r.start_utc).abs() <= IMPORT_DUPE_SECS) {
-                rep.dupes += 1;
+            let at = seen.entry((r.call.clone(), r.band.clone())).or_default();
+            let same = at
+                .iter()
+                .copied()
+                .filter(|&i| (self.recs[i].start_utc - r.start_utc).abs() <= IMPORT_DUPE_SECS)
+                .min_by_key(|&i| (self.recs[i].start_utc - r.start_utc).abs());
+            if let Some(i) = same {
+                if self.recs[i].fill_blanks(&r) {
+                    rep.filled += 1;
+                } else {
+                    rep.dupes += 1;
+                }
                 continue;
             }
-            times.push(r.start_utc);
+            at.push(self.recs.len());
             self.push(r);
             rep.added += 1;
         }
-        if rep.added > 0 {
+        if rep.added > 0 || rep.filled > 0 {
             self.changed();
         }
         rep

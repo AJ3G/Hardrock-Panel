@@ -22,7 +22,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use hardrock::AmpStatus;
-use rigcat::{Keying, RigLink, RigStatus};
+use rigcat::{Keying, RigLink, RigStatus, Vfo};
 use serde::{Deserialize, Serialize};
 
 use crate::audio;
@@ -365,6 +365,9 @@ pub(crate) struct Tx {
     /// HALT pressed since the station in hand was picked or ENABLE TX
     /// last turned on: the scope's worked mark is taken away (decision 104).
     halted: bool,
+    /// Split (decision 106): VFO B last asked for, and when, so the move
+    /// is asked again only if the radio hasn't read it back by then.
+    split_sent: Option<(u64, Instant)>,
 }
 
 impl Default for Tx {
@@ -401,6 +404,7 @@ impl Default for Tx {
             bar_mode: None,
             was_enabled: false,
             halted: false,
+            split_sent: None,
         }
     }
 }
@@ -838,8 +842,11 @@ impl Tx {
         {
             out.strobe = Some((c.to_string(), self.qso.dx_grid().map(str::to_string), self.on_air()));
         }
-        // Start an over?
+        // Start an over? In split, VFO B first, if it must move.
         if self.over.is_none() && self.enabled {
+            if s.mode == TxMode::Ft8 {
+                self.follow_split(s, &env);
+            }
             match self.try_start(s, env, &me) {
                 Ok(true) => self.note = None,
                 Ok(false) => {}
@@ -966,7 +973,7 @@ impl Tx {
         if me.is_empty() {
             return Err("Set your callsign under SETTINGS, Station.".into());
         }
-        let (t0, message, text, start_s, len_s) = match s.mode {
+        let (t0, message, text, start_s, len_s, on) = match s.mode {
             TxMode::Ft8 => {
                 let Some(t0) = sched::ft8_open(now, self.tx_even) else { return Ok(false) };
                 if self.sent_slot == Some(t0) {
@@ -989,12 +996,23 @@ impl Tx {
                 if !sched::slot_decoded(t0, env.slot_decoded) && into < sched::DECODE_WAIT_S {
                     return Ok(false);
                 }
-                let Some(off) = self.tx_audio(s, &env) else {
-                    return Err(self.audio_error(s, &env));
+                let (off, on) = match self.tx_audio(s, &env) {
+                    Some(AudioPlan::Go { audio, split_dial }) => (audio, split_dial),
+                    // The move is asked for (`follow_split`); the over goes
+                    // once the radio reads it back, later in this slot or
+                    // in the next.
+                    Some(AudioPlan::MoveB { dial, .. }) => {
+                        return Err(format!(
+                            "Moving VFO B to {} for split; the over goes once the radio reads it \
+                             back.",
+                            rf_text(dial as f64)
+                        ));
+                    }
+                    None => return Err(self.audio_error(s, &env)),
                 };
                 let m = wave::Message::ft8(&text, off)
                     .ok_or_else(|| format!("\"{text}\" can't be sent as FT8."))?;
-                (t0, m, text, sched::ft8_start_s(into), wave::FT8_LEN_S)
+                (t0, m, text, sched::ft8_start_s(into), wave::FT8_LEN_S, on)
             }
             TxMode::Wspr => {
                 let Some(t0) = sched::wspr_open(now) else { return Ok(false) };
@@ -1014,7 +1032,7 @@ impl Tx {
                         .to_string()
                 })?;
                 let text = format!("{me} {} {}", grid.get(..4).unwrap_or(""), s.wspr_dbm);
-                (t0, m, text, wave::WSPR_START_S, wave::WSPR_LEN_S)
+                (t0, m, text, wave::WSPR_START_S, wave::WSPR_LEN_S, None)
             }
         };
         // This slot is spent, whatever happens below.
@@ -1051,14 +1069,22 @@ impl Tx {
         let end = start + len_s;
         let keyed_for = Duration::from_secs_f64((end + TAIL_S - now).max(1.0) + 1.0);
         env.outside.panel_tune_starting();
-        link.tune_start(keyed_for, Keying::Data);
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #7): in split, keyed
+        // only if the radio reads back the transmit dial the audio was
+        // worked out for, straight before (decision 106).
+        match on {
+            Some(dial) => link.tune_start_on(keyed_for, Keying::Data, dial),
+            None => link.tune_start(keyed_for, Keying::Data),
+        }
         let audio_hz = match &message {
             wave::Message::Ft8 { audio_hz, .. } | wave::Message::Wspr { audio_hz, .. } => *audio_hz,
         };
         if s.mode == TxMode::Ft8 {
             self.qso.record_tx(&text, t0);
+            // The AF column is from the receive dial, as the decodes': in
+            // split the tone itself is from VFO B.
             self.rows.push_front(ListRow {
-                d: msg::parse(&text, t0, 0, 0.0, audio_hz),
+                d: msg::parse(&text, t0, 0, 0.0, s.audio_hz),
                 row: 0,
                 rf_hz: 0.0,
                 country: None,
@@ -1087,14 +1113,40 @@ impl Tx {
 
     /// The FT8 tone 0 to send at, Hz from the radio's transmit dial, for
     /// the signal to land `audio_hz` above the receiver's dial (the bar):
-    /// the radio may transmit from VFO B in split.
-    fn tx_audio(&self, s: &TxSettings, env: &Env<'_>) -> Option<f32> {
+    /// the radio transmits from VFO B in split, which may have to move
+    /// first (decision 106).
+    fn tx_audio(&self, s: &TxSettings, env: &Env<'_>) -> Option<AudioPlan> {
         let r = env.rig?;
-        let (rx, lower) = env.rx_dial.or_else(|| r.freq_hz.map(|f| (f as f64, r.mode == Some("LSB"))))?;
-        let tx = if r.split == Some(true) { r.freq_b_hz? } else { r.freq_hz? } as f64;
-        let off = s.audio_hz as f64;
-        let a = if lower { tx - rx + off } else { rx + off - tx };
-        (100.0..=2950.0).contains(&a).then_some(a.round() as f32)
+        let rx = env.rx_dial.or_else(|| r.freq_hz.map(|f| (f as f64, r.mode == Some("LSB"))))?;
+        audio_plan(r, rx, s.audio_hz as f64)
+    }
+
+    /// Split (decision 106): when the over can't go from VFO B where it is,
+    /// ask the radio to move it, read back by the link, and say so in the
+    /// log. Not while transmitting (the link refuses it then too, #5); asked
+    /// again only after [`SPLIT_RETRY`] if the read-back doesn't show it.
+    fn follow_split(&mut self, s: &TxSettings, env: &Env<'_>) {
+        let (Some(link), Some(r)) = (env.link, env.rig.filter(|r| r.connected)) else { return };
+        if r.transmitting() {
+            return;
+        }
+        let Some(AudioPlan::MoveB { dial, audio }) = self.tx_audio(s, env) else {
+            self.split_sent = None;
+            return;
+        };
+        if self.split_sent.is_some_and(|(d, t)| d == dial && t.elapsed() < SPLIT_RETRY) {
+            return;
+        }
+        let Some(f) = r.model.protocol().set_freq(Vfo::B, dial) else { return };
+        let from = r.freq_b_hz.map_or_else(|| "not read".to_string(), |b| rf_text(b as f64));
+        tracing::info!(
+            "transmit: split: VFO B moved from {from} to {}, so the {:.0} Hz offset goes out as a \
+             {audio:.0} Hz tone from VFO B (the signal lands where the bar is)",
+            rf_text(dial as f64),
+            s.audio_hz,
+        );
+        link.set(vec![f]);
+        self.split_sent = Some((dial, Instant::now()));
     }
 
     /// WSPR and the scope's bar (decision 88): a drag sets the beacon's
@@ -1127,6 +1179,11 @@ impl Tx {
         match env.rig {
             None => "The radio isn't connected.".into(),
             Some(r) if r.freq_hz.is_none() => "The radio's dial hasn't been read yet.".into(),
+            Some(r) if r.split == Some(true) && r.vfo == Some(1) => {
+                "The radio is in split receiving on VFO B, so it transmits from VFO A, which the \
+                 panel doesn't move: receive on VFO A (or turn split off)."
+                    .into()
+            }
             Some(_) => format!(
                 "The radio's transmit dial is too far from the receiver for {:.0} Hz: turn TX \
                  follows RX on, or move the bar.",
@@ -1134,6 +1191,72 @@ impl Tx {
             ),
         }
     }
+}
+
+/// The audio the radio sends from its transmit dial, Hz, as before split
+/// moved VFO B: an over whose tone would fall outside it isn't sent from
+/// that dial.
+const AUDIO_OK: std::ops::RangeInclusive<f64> = 100.0..=2950.0;
+
+/// Split (decision 106): where the tone goes once VFO B is moved for it,
+/// Hz, as WSJT-X's Rig split keeps it in the middle of the radio's audio.
+pub(crate) const SPLIT_AUDIO_HZ: f64 = 1500.0;
+/// VFO B moves in steps of this, Hz, as WSJT-X's does: the tone lands within
+/// 250 Hz of [`SPLIT_AUDIO_HZ`], and small moves of the offset leave VFO B
+/// where it is.
+pub(crate) const SPLIT_STEP_HZ: f64 = 500.0;
+/// How long a VFO B move is waited for before it is asked again.
+const SPLIT_RETRY: Duration = Duration::from_millis(1500);
+
+/// How the FT8 over goes, from the radio as read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum AudioPlan {
+    /// Send this tone, Hz from the transmit dial; in split, keyed only on
+    /// `split_dial` (VFO B as read when the tone was worked out).
+    Go { audio: f32, split_dial: Option<u64> },
+    /// In split, VFO B goes to `dial` first; the tone will then be `audio`.
+    MoveB { dial: u64, audio: f32 },
+}
+
+/// The tone for a signal `off` Hz from the receive dial `rx` (radio Hz, and
+/// lower sideband or not), sent from the transmit dial `tx`.
+fn audio_from(rx: (f64, bool), tx: f64, off: f64) -> f64 {
+    let (rx, lower) = rx;
+    if lower { tx - rx + off } else { rx + off - tx }
+}
+
+/// WSJT-X's Rig split (decision 106): VFO B for a signal `off` Hz from the
+/// receive dial `rx`, the receive dial plus the offset less 1500 Hz in steps
+/// of [`SPLIT_STEP_HZ`] (minus on LSB, where the audio rises as the signal
+/// goes down), and the tone it then takes, 1500 Hz give or take the rest.
+pub(crate) fn split_dial(rx: (f64, bool), off: f64) -> (u64, f32) {
+    let shift = ((off - SPLIT_AUDIO_HZ) / SPLIT_STEP_HZ).round() * SPLIT_STEP_HZ;
+    let dial = crate::scope::txsig::place(rx.0, rx.1, shift).round().max(0.0);
+    (dial as u64, audio_from(rx, dial, off).round() as f32)
+}
+
+/// How an FT8 over `off` Hz from the receive dial `rx` goes on the radio
+/// `r`. Out of split, from VFO A as before, or not at all if the tone would
+/// leave [`AUDIO_OK`]. In split, receiving on A, from VFO B: where it is
+/// while the tone stays in [`AUDIO_OK`] (TX follows RX, or the operator, put
+/// it there), else moved by [`split_dial`]. Split receiving on B transmits
+/// from A, which the panel doesn't move: as before.
+pub(crate) fn audio_plan(r: &RigStatus, rx: (f64, bool), off: f64) -> Option<AudioPlan> {
+    let ok = |a: f64| AUDIO_OK.contains(&a).then_some(a.round() as f32);
+    if r.split != Some(true) {
+        let audio = ok(audio_from(rx, r.freq_hz? as f64, off))?;
+        return Some(AudioPlan::Go { audio, split_dial: None });
+    }
+    if r.vfo == Some(1) {
+        return None;
+    }
+    if let Some(b) = r.freq_b_hz.filter(|&b| b > 0)
+        && let Some(audio) = ok(audio_from(rx, b as f64, off))
+    {
+        return Some(AudioPlan::Go { audio, split_dial: Some(b) });
+    }
+    let (dial, audio) = split_dial(rx, off);
+    Some(AudioPlan::MoveB { dial, audio })
 }
 
 /// WSPR's sub-band in the audio, Hz: 200 Hz either side of 1500.
@@ -1455,5 +1578,125 @@ mod round3_tests {
         let mut s = TxSettings { mode: TxMode::Wspr, ..Default::default() };
         frame(&mut tx, &mut s, None, false, false);
         assert_eq!(tx.wspr_rows.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    fn rig(a: u64, b: Option<u64>, split: Option<bool>) -> RigStatus {
+        RigStatus {
+            connected: true,
+            freq_hz: Some(a),
+            freq_b_hz: b,
+            split,
+            vfo: Some(0),
+            ..RigStatus::default()
+        }
+    }
+
+    /// Decision 106, USB: VFO B is the receive dial plus the offset less
+    /// 1500 Hz in 500 Hz steps, and the tone the rest; the signal lands on
+    /// the receive dial plus the offset either way.
+    #[test]
+    fn split_puts_vfo_b_so_the_tone_sits_near_1500_hz_on_usb() {
+        let rx = (14_074_000.0, false);
+        assert_eq!(split_dial(rx, 2526.0), (14_075_000, 1526.0));
+        assert_eq!(split_dial(rx, 1500.0), (14_074_000, 1500.0));
+        assert_eq!(split_dial(rx, 1749.0), (14_074_000, 1749.0));
+        assert_eq!(split_dial(rx, 1751.0), (14_074_500, 1251.0));
+        assert_eq!(split_dial(rx, 300.0), (14_073_000, 1300.0));
+        assert_eq!(split_dial(rx, 4210.0), (14_076_500, 1710.0));
+        // A receiver between hertz: VFO B to the hertz, the tone the rest.
+        let (b, a) = split_dial((14_074_000.4, false), 2526.0);
+        assert_eq!((b, a), (14_075_000, 1526.0));
+        for off in [300.0, 1234.0, 2526.0, 2990.0, 4210.0] {
+            let (b, a) = split_dial(rx, off);
+            assert!((1250.0..=1750.0).contains(&a), "{off}: {a}");
+            assert_eq!(b as f64 + a as f64, rx.0 + off);
+        }
+    }
+
+    /// Decision 106, LSB: the mirror, VFO B below the receive dial as the
+    /// audio rises.
+    #[test]
+    fn split_puts_vfo_b_so_the_tone_sits_near_1500_hz_on_lsb() {
+        let rx = (7_074_000.0, true);
+        assert_eq!(split_dial(rx, 2526.0), (7_073_000, 1526.0));
+        assert_eq!(split_dial(rx, 300.0), (7_075_000, 1300.0));
+        for off in [300.0, 1234.0, 2526.0, 2990.0] {
+            let (b, a) = split_dial(rx, off);
+            assert!((1250.0..=1750.0).contains(&a), "{off}: {a}");
+            assert_eq!(b as f64 - a as f64, rx.0 - off);
+        }
+    }
+
+    /// Out of split nothing changes: the tone is the offset from VFO A, and
+    /// an offset the radio can't send from there is still refused.
+    #[test]
+    fn without_split_the_over_goes_from_vfo_a_as_before() {
+        let rx = (14_074_000.0, false);
+        for split in [None, Some(false)] {
+            // VFO B far off is never looked at.
+            let r = rig(14_074_000, Some(14_200_000), split);
+            assert_eq!(
+                audio_plan(&r, rx, 2526.0),
+                Some(AudioPlan::Go { audio: 2526.0, split_dial: None })
+            );
+            assert_eq!(audio_plan(&r, rx, 3200.0), None);
+            assert_eq!(audio_plan(&r, rx, 50.0), None);
+            // The panel's receiver off VFO A: from VFO A, as before.
+            assert_eq!(
+                audio_plan(&r, (14_074_300.0, false), 1000.0),
+                Some(AudioPlan::Go { audio: 1300.0, split_dial: None })
+            );
+            // LSB.
+            let r = rig(7_074_000, None, split);
+            assert_eq!(
+                audio_plan(&r, (7_074_000.0, true), 1200.0),
+                Some(AudioPlan::Go { audio: 1200.0, split_dial: None })
+            );
+        }
+    }
+
+    /// AJ3G, 11 Nov 2026: in split with VFO B left elsewhere the over was
+    /// refused ("transmit dial too far ... 2526 Hz"). Now VFO B is moved,
+    /// and the over goes, keyed on VFO B as read, once it reads back there.
+    #[test]
+    fn in_split_vfo_b_left_elsewhere_is_moved_not_refused() {
+        let rx = (14_074_000.0, false);
+        let r = rig(14_074_000, Some(14_250_000), Some(true));
+        assert_eq!(
+            audio_plan(&r, rx, 2526.0),
+            Some(AudioPlan::MoveB { dial: 14_075_000, audio: 1526.0 })
+        );
+        // Not read yet: moved too.
+        let r = rig(14_074_000, None, Some(true));
+        assert!(matches!(audio_plan(&r, rx, 2526.0), Some(AudioPlan::MoveB { .. })));
+        // Read back where it was sent: the over goes from there.
+        let r = rig(14_074_000, Some(14_075_000), Some(true));
+        assert_eq!(
+            audio_plan(&r, rx, 2526.0),
+            Some(AudioPlan::Go { audio: 1526.0, split_dial: Some(14_075_000) })
+        );
+        // VFO B already somewhere the tone can go from (TX follows RX put it
+        // on the receiver): left there, so the two never pull against each
+        // other.
+        let r = rig(14_074_000, Some(14_074_000), Some(true));
+        assert_eq!(
+            audio_plan(&r, rx, 2526.0),
+            Some(AudioPlan::Go { audio: 2526.0, split_dial: Some(14_074_000) })
+        );
+        // LSB, VFO B elsewhere.
+        let r = rig(7_074_000, Some(7_000_000), Some(true));
+        assert_eq!(
+            audio_plan(&r, (7_074_000.0, true), 2526.0),
+            Some(AudioPlan::MoveB { dial: 7_073_000, audio: 1526.0 })
+        );
+        // Split receiving on VFO B transmits from A, which isn't moved.
+        let mut r = rig(14_074_000, Some(14_250_000), Some(true));
+        r.vfo = Some(1);
+        assert_eq!(audio_plan(&r, rx, 2526.0), None);
     }
 }

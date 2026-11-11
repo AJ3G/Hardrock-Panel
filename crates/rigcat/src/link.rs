@@ -45,8 +45,9 @@ enum Msg {
     ReadSettings,
     /// Set the radio's transmit power step (menu 34 on the FDM-DUO).
     SetPower(u8),
-    /// Key TUNE, this way, for at most this long.
-    TuneStart(Duration, Keying),
+    /// Key TUNE, this way, for at most this long; with a dial, only if the
+    /// radio's transmit dial reads exactly that just before (decision 106).
+    TuneStart(Duration, Keying, Option<u64>),
     /// Put the radio's transmit audio on its USB input.
     UsbAudio,
     /// The panel still wants the carrier.
@@ -116,7 +117,17 @@ impl RigLink {
     /// reads the radio's input and mode first and keys only if they pass
     /// (interlock #7).
     pub fn tune_start(&self, max: Duration, keying: Keying) {
-        self.send(Msg::TuneStart(max.min(keying.max_keyed()), keying));
+        self.send(Msg::TuneStart(max.min(keying.max_keyed()), keying, None));
+    }
+
+    /// [`RigLink::tune_start`], keyed only if the radio's transmit dial
+    /// ([`RigStatus::tx_dial_hz`]), read again straight before, is exactly
+    /// `tx_dial_hz`: the dial the caller worked its audio out for (the TX
+    /// window's over in split, decision 106). Anywhere else the over would
+    /// land off where it was meant to go, so it isn't keyed and
+    /// [`RigStatus::tune_note`] says why.
+    pub fn tune_start_on(&self, max: Duration, keying: Keying, tx_dial_hz: u64) {
+        self.send(Msg::TuneStart(max.min(keying.max_keyed()), keying, Some(tx_dial_hz)));
     }
 
     /// Set the radio's transmit audio to its USB input (menu 32 on the
@@ -462,6 +473,36 @@ fn key_audio<P: Read + Write>(
     Ok(f)
 }
 
+/// Read the dials again (VFO A, VFO B, and `GI` for split and the receive
+/// VFO) and say whether the radio would transmit on exactly `want` Hz.
+fn check_tx_dial<P: Read + Write>(
+    rig: &mut Rig<P>,
+    status: &Mutex<RigStatus>,
+    want: u64,
+) -> Result<(), String> {
+    for r in rig.proto.dial() {
+        let got = rig.query(&r);
+        let strays = std::mem::take(&mut rig.strays);
+        set(status, |s| {
+            for x in strays.iter().chain(got.as_ref().ok()) {
+                rig.proto.apply(s, x);
+            }
+        });
+        if got.is_err() {
+            return Err("The radio didn't answer the check of its transmit dial.".into());
+        }
+    }
+    let s = status.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    match s.tx_dial_hz() {
+        Some(hz) if hz == want => Ok(()),
+        Some(hz) => Err(format!(
+            "The radio's transmit dial reads {hz} Hz, not the {want} Hz the over was worked out \
+             for."
+        )),
+        None => Err("The radio's transmit dial couldn't be read.".into()),
+    }
+}
+
 /// Unkey, best effort: twice, in case the first is lost.
 fn unkey<P: Read + Write>(rig: &mut Rig<P>, status: &Mutex<RigStatus>, why: Option<String>) {
     let f = rig.proto.unkey();
@@ -541,10 +582,16 @@ fn run<P: Read + Write>(
                         asked = true;
                     }
                 }
-                Ok(Msg::TuneStart(max, keying)) if tune.is_none() => {
-                    let key = match keying {
-                        Keying::Carrier => Ok(rig.proto.key_tune()),
-                        Keying::Audio | Keying::Data => key_audio(&mut rig, status),
+                Ok(Msg::TuneStart(max, keying, on)) if tune.is_none() => {
+                    // SAFETY INTERLOCK (docs/safety-interlocks.md, #7): an
+                    // over worked out for one transmit dial is keyed only
+                    // once the radio reads that dial back, just before.
+                    let key = match on.map(|hz| check_tx_dial(&mut rig, status, hz)) {
+                        Some(Err(why)) => Err(why),
+                        _ => match keying {
+                            Keying::Carrier => Ok(rig.proto.key_tune()),
+                            Keying::Audio | Keying::Data => key_audio(&mut rig, status),
+                        },
                     };
                     if let Err(why) = &key {
                         info!("rigcat: TUNE not keyed: {why}");
@@ -852,6 +899,10 @@ mod tests {
         air: Option<Arc<std::sync::atomic::AtomicBool>>,
         /// Menu 34 as last set (MAX until then).
         power: Option<u8>,
+        /// In split (`GI`'s P7), and VFO B as last set (14.075 MHz until
+        /// then).
+        split: bool,
+        fb: Option<u64>,
     }
 
     impl Write for FakeDuo {
@@ -867,6 +918,21 @@ mod tests {
                 if let Some(c) = cmd.strip_prefix("TP").and_then(|c| c.strip_suffix(';')) {
                     self.power = c.parse().ok();
                 }
+                if cmd == "FB;" {
+                    self.out.extend(format!("FB{:011};", self.fb.unwrap_or(14_075_000)).bytes());
+                    self.sent.push(cmd);
+                    continue;
+                }
+                if let Some(c) = cmd.strip_prefix("FB").and_then(|c| c.strip_suffix(';')) {
+                    self.fb = c.parse().ok();
+                    self.sent.push(cmd);
+                    continue;
+                }
+                if cmd == "GI;" && self.split && !self.on_air {
+                    self.out.extend(b"GI0000002010000;");
+                    self.sent.push(cmd);
+                    continue;
+                }
                 let reply = match cmd.as_str() {
                     "FA;" => Some("FA00014074000;"),
                     "FP;" if self.quiet => Some("FP!000000;"),
@@ -874,6 +940,7 @@ mod tests {
                     "RP;" => Some("RP 000001;"),
                     "WR;" => Some("WR0 01.02;"),
                     "MD;" => Some("MD2;"),
+                    "RF;" => Some("RF0000;"),
                     "TI;" if self.mic => Some("TI0;"),
                     "TI;" => Some("TI1;"),
                     "GI;"
@@ -1031,7 +1098,7 @@ mod tests {
     fn tune_keys_the_carrier_and_unkeys_when_the_panel_stops_asking() {
         let (tx, st, h) = running();
         tx.send(Msg::SetPower(2)).unwrap();
-        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Carrier)).unwrap();
+        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Carrier, None)).unwrap();
         thread::sleep(Duration::from_millis(300));
         assert!(st.lock().unwrap().tuning.is_some());
         // No TuneAlive: after a second the link unkeys by itself.
@@ -1051,13 +1118,13 @@ mod tests {
     #[test]
     fn tune_stops_at_its_time_limit_and_when_the_link_is_dropped() {
         let (tx, st, h) = running();
-        tx.send(Msg::TuneStart(Duration::from_millis(400), Keying::Carrier)).unwrap();
+        tx.send(Msg::TuneStart(Duration::from_millis(400), Keying::Carrier, None)).unwrap();
         for _ in 0..8 {
             tx.send(Msg::TuneAlive).unwrap();
             thread::sleep(Duration::from_millis(100));
         }
         assert_eq!(st.lock().unwrap().tune_note.as_deref(), Some("time limit reached"));
-        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Carrier)).unwrap();
+        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Carrier, None)).unwrap();
         thread::sleep(Duration::from_millis(200));
         drop(tx);
         let sent = h.join().unwrap();
@@ -1070,7 +1137,7 @@ mod tests {
     #[test]
     fn a_stop_behind_a_queue_of_keep_alives_unkeys_at_once() {
         let (tx, st, h) = running();
-        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Carrier)).unwrap();
+        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Carrier, None)).unwrap();
         thread::sleep(Duration::from_millis(300));
         assert!(st.lock().unwrap().tuning.is_some());
         for _ in 0..15 {
@@ -1091,7 +1158,7 @@ mod tests {
     #[test]
     fn tune_with_drive_reads_the_input_and_mode_then_keys_an_ordinary_transmission() {
         let (tx, st, h) = running();
-        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Audio)).unwrap();
+        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Audio, None)).unwrap();
         for _ in 0..3 {
             tx.send(Msg::TuneAlive).unwrap();
             thread::sleep(Duration::from_millis(100));
@@ -1112,7 +1179,7 @@ mod tests {
     #[test]
     fn tune_with_drive_is_refused_while_the_radio_takes_the_microphone() {
         let (tx, st, h) = running_on(FakeDuo { mic: true, ..FakeDuo::default() });
-        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Audio)).unwrap();
+        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Audio, None)).unwrap();
         thread::sleep(Duration::from_millis(300));
         let s = st.lock().unwrap().clone();
         assert!(s.tuning.is_none());
@@ -1123,6 +1190,35 @@ mod tests {
         let sent = h.join().unwrap();
         assert!(!sent.iter().any(|c| c == "TX;"));
         assert!(sent.contains(&"TI1;".to_string()));
+    }
+
+    /// Decision 106: an over worked out for a transmit dial is keyed only
+    /// when the radio reads that dial back straight before; VFO B in split.
+    #[test]
+    fn a_data_over_keys_only_on_the_transmit_dial_it_was_worked_out_for() {
+        let (tx, st, h) = running_on(FakeDuo { split: true, quiet: true, ..FakeDuo::default() });
+        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Data, Some(14_076_000))).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        let s = st.lock().unwrap().clone();
+        assert!(s.tuning.is_none());
+        assert!(s.tune_note.as_deref().is_some_and(|n| n.contains("14075000 Hz")), "{s:?}");
+        // VFO B moved, and read back: now it keys.
+        tx.send(Msg::Set(vec![FdmDuo::default().set_freq(crate::Vfo::B, 14_076_000).unwrap()]))
+            .unwrap();
+        tx.send(Msg::TuneStart(Duration::from_secs(30), Keying::Data, Some(14_076_000))).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        let s = st.lock().unwrap().clone();
+        assert_eq!(s.tuning.map(|t| t.keying), Some(Keying::Data), "{s:?}");
+        tx.send(Msg::TuneStop(None)).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        drop(tx);
+        let sent = h.join().unwrap();
+        assert_eq!(sent.iter().filter(|c| *c == "TX;").count(), 1);
+        let key = sent.iter().position(|c| c == "TX;").unwrap();
+        let fb = sent[..key].iter().rposition(|c| c == "FB;").unwrap();
+        let set = sent.iter().position(|c| c == "FB00014076000;").unwrap();
+        assert!(set < fb, "VFO B read again after the move, before the key");
+        assert_eq!(&sent[key - 2..key], ["TI;", "MD;"]);
     }
 
     #[test]
