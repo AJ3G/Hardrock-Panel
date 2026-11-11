@@ -24,6 +24,7 @@ pub mod decim;
 pub mod demod;
 pub mod design;
 pub mod fir;
+pub mod nb;
 pub mod nco;
 pub mod nr;
 pub mod passband;
