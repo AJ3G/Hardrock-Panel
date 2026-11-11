@@ -27,6 +27,22 @@ pub(crate) const DEFAULT_TUNE_SECS: u32 = 10;
 /// Where the Tune slider starts on a first run: a quarter of the setting.
 pub(crate) const DEFAULT_DRIVE: f32 = 0.25;
 
+/// TX TUNE's key: the audio path, as FT8 and WSPR go.
+pub(crate) const TONE_LABEL: &str = "TX TUNE (USB audio)";
+
+/// RIG TUNE's key, with the power it keys at (menu 34's, `None` until read).
+pub(crate) fn carrier_label(watts: Option<f32>) -> String {
+    match watts {
+        Some(w) => format!("RIG TUNE (carrier {})", fmt_watts(w)),
+        None => "RIG TUNE (carrier, menu 34)".to_string(),
+    }
+}
+
+/// Watts as the keys say them: tenths under 10 W.
+fn fmt_watts(w: f32) -> String {
+    if w < 9.95 { format!("{w:.1} W") } else { format!("{w:.0} W") }
+}
+
 /// The power buttons, as in SDRoxide (`duo_power::PRESETS` there): label and
 /// menu 34 setting.
 pub(crate) const PRESETS: [(&str, u8); 4] = [("1W", 2), ("3W", 6), ("5W", 8), ("MAX", 9)];
@@ -268,28 +284,33 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
     let tuning = rig.tuning;
     ui.horizontal_wrapped(|ui| {
         let keyed = |k: Keying| tuning.is_some_and(|t| t.keying == k);
+        // Which path each takes, said on the key (AJ3G, 11 Nov 2026: the two
+        // read alike): TX TUNE is the audio path FT8 and WSPR use; RIG TUNE
+        // is the radio's own carrier at the full menu 34 power, which it has
+        // no slider to lower, so its key says that power.
         for (k, label, blocked, hover) in [
             (
                 Keying::Audio,
-                "TX TUNE",
+                TONE_LABEL.to_string(),
                 args.tone_blocked.as_deref(),
-                "Key the radio as its PTT does, with a 1 kHz tone from the panel at the Tune \
-                 slider's level, through the radio's USB audio: SDRoxide's TUNE. It keys the \
-                 amplifier's PTT line too. Click again to unkey. It also unkeys by itself at \
-                 the time limit, and on a trip or a high SWR.",
+                "A 1 kHz tone from the panel through the radio's USB audio, at the TX TUNE \
+                 level slider's share of menu 34: the same path as FT8 and WSPR from the TX \
+                 window. It keys the radio as its PTT does, and so the amplifier's PTT line \
+                 too (SDRoxide's TUNE). Click again to unkey. It also unkeys by itself at the \
+                 time limit, and on a trip or a high SWR.",
             ),
             (
                 Keying::Carrier,
-                "RIG TUNE",
+                carrier_label(planned_watts(rig, Keying::Carrier, 1.0)),
                 args.carrier_blocked.as_deref(),
-                "Key the radio's own TUNE carrier at the full power button setting, with no \
-                 tone. The FDM-DUO may not key its PTT output for this: if the amplifier stays \
-                 in receive, use TUNE. Click again to unkey.",
+                "The DUO's own carrier (TX2;) at the menu 34 power, set with the power keys; \
+                 no slider, no audio. The FDM-DUO may not key its PTT output for this: if the \
+                 amplifier stays in receive, use TX TUNE. Click again to unkey.",
             ),
         ] {
             let on = keyed(k);
             let can = on || (tuning.is_none() && blocked.is_none());
-            let resp = ui.add_enabled_ui(can, |ui| chrome::chip(ui, on, label)).inner;
+            let resp = ui.add_enabled_ui(can, |ui| chrome::chip(ui, on, &label)).inner;
             let resp = match blocked.filter(|_| tuning.is_none()) {
                 Some(why) => resp.on_disabled_hover_text(why),
                 None => resp.on_hover_text(hover),
@@ -380,7 +401,10 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
             );
         });
         ui.add_space(z(10.0));
-        ui.label("Tune");
+        ui.label("TX TUNE level").on_hover_text(
+            "TX TUNE's share of menu 34 (the power keys): the tone's level into the radio's \
+             USB audio.",
+        );
         let est = planned_watts(rig, Keying::Audio, *args.drive);
         let over = matches!((est, args.limit_in_line), (Some(w), Some(l)) if w > l);
         let text = est.map_or("≈ — W".to_string(), |w| format!("≈ {w:.1} W"));
@@ -390,8 +414,8 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
             theme::TEXT()
         }))
         .on_hover_text(
-            "What TUNE should put out at this level, from AJ3G's measurements: the slider \
-             spans the power button's setting in a straight line. The radio's and the \
+            "What TX TUNE should put out at this level, from AJ3G's measurements: the \
+             slider spans menu 34's power in a straight line. The radio's and the \
              amplifier's own meters show what it really does.",
         );
         // A fixed rail: `slider_vertical` is the skin without `fit_rail`'s
@@ -401,11 +425,12 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
             ui,
             egui::Slider::new(args.drive, 0.0..=1.0)
                 .show_value(true)
-                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                .custom_formatter(|v, _| format!("{:.0}% of menu 34", v * 100.0)),
         )
         .on_hover_text(
-            "TUNE's level within the power button's setting: the tone's volume into the \
-             radio's USB audio. It can be moved while TUNE is keyed.",
+            "TX TUNE's level as a share of menu 34 (the power keys): the tone's volume into \
+             the radio's USB audio. It can be moved while TX TUNE is keyed. RIG TUNE does not \
+             use it.",
         );
     });
 
@@ -494,6 +519,20 @@ mod tests {
 
     fn w(r: &RigStatus) -> Option<f32> {
         planned_watts(r, Keying::Carrier, 1.0)
+    }
+
+    #[test]
+    fn the_keys_say_their_path_and_rig_tune_its_power() {
+        assert!(TONE_LABEL.contains("USB audio"));
+        // MAX on the DUO: menu 34's watts, as the carrier keys at.
+        let r = duo(14_074_000, 9);
+        let w = planned_watts(&r, Keying::Carrier, 1.0).unwrap();
+        assert_eq!(carrier_label(Some(w)), format!("RIG TUNE (carrier {w:.1} W)"));
+        assert_eq!(carrier_label(Some(1.0)), "RIG TUNE (carrier 1.0 W)");
+        assert_eq!(carrier_label(None), "RIG TUNE (carrier, menu 34)");
+        // Not read yet: no figure.
+        let unread = RigStatus { power_code: None, ..duo(14_074_000, 9) };
+        assert_eq!(planned_watts(&unread, Keying::Carrier, 1.0), None);
     }
 
     #[test]

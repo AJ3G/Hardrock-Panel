@@ -73,6 +73,7 @@ pub mod scf;
 pub mod settings;
 pub mod skim;
 pub mod slotlines;
+pub mod txsig;
 pub mod view;
 
 use std::collections::VecDeque;
@@ -89,6 +90,7 @@ pub(crate) use paint::bw_text;
 pub use settings::ScopeSettings;
 pub use skim::{KeyTag, SkimFeed, SkimSpot};
 pub use slotlines::DecodeSlots;
+pub use txsig::{TX_WINDOW, TxSignal};
 
 use gpu_run::{Ask, GpuRun, TraceGeom};
 use markers::{Exact, ExactPeak, Markers};
@@ -122,8 +124,8 @@ pub struct ScopeRig {
     pub passband: (f32, f32),
     /// The radio is transmitting: the scope tunes nothing (interlock 9).
     pub transmitting: bool,
-    /// The radio itself says it is on the air: the display is held over it
-    /// (decision 40). Narrower than `transmitting`, which also waits for the
+    /// The radio itself says it is on the air: the received I/Q is not shown
+    /// over it (decisions 40 and 74). Narrower than `transmitting`, which also waits for the
     /// amplifier's drive reading to fall to nothing; that reading decays over
     /// most of a second after the radio has unkeyed (AJ3G's log, 21 Oct
     /// 2026), and held the scope that much longer.
@@ -199,12 +201,13 @@ pub const TX_GUARD_SECS: f64 = 0.3;
 /// again (decision 40).
 const RESET_WAIT_SECS: f64 = 2.0;
 
-/// SDR Console's way with a transmission (decision 40): the display holds
-/// what it showed while the radio transmits and for [`TX_GUARD_SECS`]
-/// after, and then starts again from the newest samples with the averages
-/// and peaks forgotten, so whatever the radio's I/Q did meanwhile (stopped,
-/// flooded with the transmitter's own signal, moved with the dial) is never
-/// drawn and never lingers.
+/// A transmission (decision 40, as decision 74 has it now): the received
+/// I/Q is not shown while the radio transmits and for [`TX_GUARD_SECS`]
+/// after (the band scrolls on, dimmed, at its last received level, with our
+/// own signal drawn: [`txsig`]), and then the spectrum starts again from the
+/// newest samples with the averages and peaks forgotten, so whatever the
+/// radio's I/Q did meanwhile (stopped, flooded with the transmitter's own
+/// signal, moved with the dial) is never drawn and never lingers.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct TxHold {
     keyed: bool,
@@ -213,6 +216,11 @@ pub(crate) struct TxHold {
 }
 
 impl TxHold {
+    /// The radio is on the air (the guard after an over is not).
+    pub(crate) fn keyed(&self) -> bool {
+        self.keyed
+    }
+
     /// This frame: whether the display is held, and whether it starts
     /// again now.
     pub(crate) fn step(&mut self, transmitting: bool, now: f64) -> (bool, bool) {
@@ -316,6 +324,15 @@ pub struct Scope {
     held_span: Option<Span>,
     reset_wait: Option<(u64, f64)>,
     reset_ask: bool,
+    /// What the panel is transmitting, set before each `ui`; its shape this
+    /// repaint while keyed; the dimmed rows laid down while held, with our
+    /// signal on them; and when the last of those went (decision 74).
+    tx_signal: Option<TxSignal>,
+    tx_shape: Option<txsig::TxShape>,
+    tx_rows: VecDeque<txsig::TxRow>,
+    held_row_at: f64,
+    /// The station being worked: its dial (radio Hz) and call.
+    dx_mark: Option<(f64, String)>,
     /// The samples the pipeline had read: fewer means a new pipeline.
     samples_seen: u64,
     /// The GPU watchdog's resyncs already told, and a note for the status
@@ -417,6 +434,11 @@ impl Scope {
             held_span: None,
             reset_wait: None,
             reset_ask: false,
+            tx_signal: None,
+            tx_shape: None,
+            tx_rows: VecDeque::new(),
+            held_row_at: f64::NAN,
+            dx_mark: None,
             samples_seen: 0,
             resyncs_told: 0,
             notice: None,
@@ -543,6 +565,21 @@ impl Scope {
     /// The bar was dragged or dropped by hand since this was last asked.
     pub fn take_bar_moved(&mut self) -> bool {
         std::mem::take(&mut self.offset_moved)
+    }
+
+    /// Each frame: what the panel is sending to the radio, and where it
+    /// lands (`None` when it sends nothing it knows of). Drawn in the TX
+    /// colour while the radio is on the air (decision 74).
+    pub fn set_tx_signal(&mut self, sig: Option<TxSignal>) {
+        self.tx_signal = sig;
+    }
+
+    /// The station being worked, as a thin line at its frequency (the
+    /// radio's own Hz) through the trace and the waterfall, labelled with
+    /// its call; `None` takes it away. Not draggable: it is where the
+    /// station is, not a control.
+    pub fn set_dx_mark(&mut self, mark: Option<(f64, String)>) {
+        self.dx_mark = mark;
     }
 
     /// The busy parts TX AUTO is steering around, radio Hz.
@@ -698,11 +735,50 @@ impl Scope {
             self.reset_wait = None;
         }
         self.held = hold || self.reset_wait.is_some();
+        self.tx_shape = match &self.tx_signal {
+            Some(sig) if self.tx_hold.keyed() => txsig::shape(sig),
+            _ => None,
+        };
+        if !self.held {
+            self.held_row_at = f64::NAN;
+        }
+    }
+
+    /// While held, the waterfall goes on scrolling at its pace with the
+    /// last spectrum received (drawn dimmed), and our own signal is noted
+    /// on each row (decision 74). Nothing before anything was received.
+    fn scroll_held(&mut self, v: View, now: f64, up: &mut Upload) {
+        let s = &self.settings;
+        let period = s.wf_speed.frames_per_row() as f64 / s.fps.max(0.1) as f64;
+        let Some(f) = self.shown().cloned() else { return };
+        let (n, at) = txsig::held_rows_due(self.held_row_at, now, period);
+        self.held_row_at = at;
+        if n == 0 {
+            return;
+        }
+        let segs = self.tx_shape.as_ref().map(|t| t.segs.clone()).unwrap_or_default();
+        let utc = utc_now();
+        let frame = Span { center: f.center_hz, width: f.span_hz };
+        let had = self.rows.wf_count();
+        for k in 0..n {
+            let t = utc - (n - 1 - k) as f64 * period;
+            self.rows.push_waterfall(&f.db, frame, v, 1, t, up);
+            self.tx_rows.push_back(txsig::TxRow { utc: t, segs: segs.clone() });
+        }
+        while self.tx_rows.len() > rows::WF_ROWS as usize {
+            self.tx_rows.pop_front();
+        }
+        let gap = (now - self.row_at).clamp(0.0, 0.5);
+        if had > 0 && gap > 0.0 {
+            self.row_interval += (gap / n as f64 - self.row_interval) * 0.2;
+        }
+        self.row_at = now;
     }
 
     /// Take the frames that came since last time: the trace, and rows for
     /// the waterfall and the surface. Nothing is taken while paused, or
-    /// while held over a transmission.
+    /// while held over a transmission (the waterfall scrolls on dimmed then:
+    /// [`Scope::scroll_held`]).
     fn take_frames(
         &mut self,
         snap: &sdr::Snapshot,
@@ -716,8 +792,13 @@ impl Scope {
         let mut up = Upload::default();
         let new_main = fresh(&snap.history, snap.generation, &mut self.last_gen);
         let new_zoom = fresh(&snap.zoom_history, snap.zoom_generation, &mut self.last_zgen);
-        if self.paused || self.held {
+        if self.paused {
             return None;
+        }
+        if self.held {
+            self.scroll_held(v, now, &mut up);
+            let up = self.rows.seal(up);
+            return (!up.is_empty()).then(|| Arc::new(up));
         }
         if snap.latest.is_some() {
             self.main = snap.latest.clone();
@@ -818,6 +899,9 @@ impl Scope {
         }
         while self.frame_times.front().is_some_and(|&t| now - t > 1.0) {
             self.frame_times.pop_front();
+        }
+        if self.held && !self.paused {
+            self.scroll_held(v, now, &mut up);
         }
         let up = self.rows.seal(up);
         (!up.is_empty()).then(|| Arc::new(up))
@@ -1097,6 +1181,77 @@ mod tests {
         assert_eq!(h.step(false, 9.0), (false, true));
     }
 
+    /// Decision 74: over an over the waterfall scrolls on at its pace with
+    /// the last spectrum received, our signal noted on each keyed row where
+    /// it lands; in the guard after it the rows scroll on with nothing of
+    /// ours; then the live spectrum is started again (the CPU spectrum's
+    /// reset asked and waited for) and no more held rows are laid.
+    #[test]
+    fn over_an_over_the_waterfall_scrolls_dimmed_with_our_signal_then_goes_live() {
+        let settings = ScopeSettings { fft_gpu: false, fps: 30.0, ..ScopeSettings::default() };
+        let per_s = 30.0 / settings.wf_speed.frames_per_row() as f64;
+        let mut sc = Scope::new(None, settings);
+        let span = Span { center: 14_074_000.0, width: 153_600.0 };
+        sc.main = Some(Arc::new(SpectrumFrame {
+            center_hz: span.center,
+            span_hz: span.width,
+            db: vec![-110.0; 2048],
+            peak: None,
+            seq: 1,
+            enbw: 1.5,
+            noise_dbm: -120.0,
+        }));
+        let mut snap =
+            sdr::Snapshot { center_hz: span.center, sample_rate: 192_000.0, ..Default::default() };
+        let v = View { lo: span.lo(), hi: span.hi() };
+        let rate = 12_000;
+        let samples = (0..TX_WINDOW)
+            .map(|i| (std::f32::consts::TAU * 1500.0 * i as f32 / rate as f32).cos())
+            .collect();
+        sc.set_tx_signal(Some(TxSignal {
+            dial_hz: 14_074_000.0,
+            lower: false,
+            what: txsig::TxWhat::Audio(txsig::TxAudio { rate, samples }),
+        }));
+        let step = |sc: &mut Scope, snap: &sdr::Snapshot, on_air: bool, t: f64| {
+            sc.hold_over_tx(snap, on_air, t);
+            sc.take_frames(snap, span, v, t);
+        };
+        // Receiving: nothing is laid by the hold.
+        step(&mut sc, &snap, false, 0.0);
+        assert!(!sc.held && sc.tx_rows.is_empty() && sc.tx_shape.is_none());
+        // Keyed for two seconds, repainted 60 times a second.
+        for i in 1..=120 {
+            step(&mut sc, &snap, true, i as f64 / 60.0);
+        }
+        assert!(sc.held && sc.tx_hold.keyed());
+        let keyed_rows = sc.tx_rows.len() as f64;
+        assert!((keyed_rows - 2.0 * per_s).abs() <= 2.0, "{keyed_rows} rows in 2 s");
+        assert_eq!(sc.rows.wf_count() as usize, sc.tx_rows.len());
+        for r in &sc.tx_rows {
+            let s = r.segs.first().expect("our signal on every keyed row");
+            assert!(s.lo < 14_075_500.0 && s.hi > 14_075_500.0, "{s:?}");
+        }
+        // Unkeyed: the guard scrolls on with nothing of ours.
+        let t0 = 2.0;
+        step(&mut sc, &snap, false, t0 + 0.01);
+        step(&mut sc, &snap, false, t0 + 0.2);
+        assert!(sc.held && sc.tx_shape.is_none());
+        assert!(sc.tx_rows.back().unwrap().segs.is_empty());
+        // The guard over: the reset is asked, and the rows go on until it
+        // has been done.
+        step(&mut sc, &snap, false, t0 + TX_GUARD_SECS + 0.01);
+        assert!(sc.reset_ask && sc.held);
+        snap.spectrum_resets = 1;
+        step(&mut sc, &snap, false, t0 + TX_GUARD_SECS + 0.1);
+        assert!(!sc.held);
+        let n = sc.tx_rows.len();
+        for i in 0..30 {
+            step(&mut sc, &snap, false, t0 + 1.0 + i as f64 / 60.0);
+        }
+        assert_eq!(sc.tx_rows.len(), n, "no held rows once live");
+    }
+
     /// The scope drawn by egui with no window over a still snapshot, and the
     /// pointer's events for each frame; what it asked for each frame.
     fn frames(sc: &mut Scope, rig: ScopeRig, events: Vec<Vec<egui::Event>>) -> Vec<ScopeOut> {
@@ -1166,6 +1321,28 @@ mod tests {
             transmitting,
             on_air: transmitting,
         }
+    }
+
+    #[test]
+    fn the_station_being_worked_is_marked_where_it_is_and_cannot_be_moved() {
+        let mut sc = Scope::new(None, ScopeSettings::default());
+        let rig = ft8_rig(false);
+        let v = view::view(Span { center: 14_100_000.0, width: 192_000.0 * USABLE_SPAN }, None);
+        let hz = 14_075_234.0;
+        sc.set_dx_mark(Some((hz, "K1ABC".into())));
+        // A drag that starts on its line moves the view or nothing, never
+        // the mark.
+        let x = ((hz - v.lo) / (v.hi - v.lo) * 1280.0) as f32;
+        let (a, b) = (egui::pos2(x, 120.0), egui::pos2(x + 40.0, 120.0));
+        frames(
+            &mut sc,
+            rig,
+            vec![press(a, true, false), vec![egui::Event::PointerMoved(b)], press(b, false, false)],
+        );
+        assert_eq!(sc.dx_mark, Some((hz, "K1ABC".to_string())));
+        sc.set_dx_mark(None);
+        frames(&mut sc, rig, vec![vec![]]);
+        assert_eq!(sc.dx_mark, None);
     }
 
     #[test]
@@ -1478,14 +1655,17 @@ mod tests {
                 p.send(c);
             }
             let seq = sc.main.as_ref().map(|f| f.seq);
-            if tx {
+            // The dimmed rows laid down while held (decision 74) are not
+            // fresh ones.
+            if sc.held {
                 held = (seq, sc.rows.wf_head());
-            } else if seen_tx {
+            }
+            if !tx && seen_tx {
                 let t0 = *rx_at.get_or_insert(now);
                 if frame_at.is_none() && seq != held.0 {
                     frame_at = Some(now - t0);
                 }
-                if row_at.is_none() && sc.rows.wf_head() != held.1 {
+                if row_at.is_none() && !sc.held && sc.rows.wf_head() != held.1 {
                     row_at = Some(now - t0);
                 }
             }

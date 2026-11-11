@@ -160,24 +160,26 @@ RF frequency and sends the radio the IF, and BAND offers the bands the
 converter reaches. The radio is never told.
 
 **TUNE.** With the radio connected, a strip under the top line has two ways to
-key the radio, its power buttons, the **Tune** slider, and how long TUNE may
-run (10 s to start, up to 60 s).
+key the radio, its power buttons, the **TX TUNE level** slider, and how long
+TUNE may run (10 s to start, up to 60 s).
 
 - **1W, 3W, 5W, MAX** set the radio's menu 34 `TX POWER`, as SDRoxide's
   buttons did. It stays set after the panel closes, as on the radio's menu, and
   is the ceiling for every program that transmits. Use MAX with the HR500 in
   line, and bring the power down with the slider.
-- **Tune** sets TX TUNE's power within the button's setting: 50% of 5W is about
-  2.5 W. The panel shows what it should come to; the meters show what it is.
-  It can be moved while keyed.
-- **TX TUNE** plays a 1 kHz tone into the radio's USB audio and keys the radio
+- **TX TUNE level** sets TX TUNE's power as a share of menu 34: 50% of 5W is
+  about 2.5 W. The panel shows what it should come to (≈ W); the meters show
+  what it is. It can be moved while keyed. RIG TUNE does not use it.
+- **TX TUNE (USB audio)** plays a 1 kHz tone into the radio's USB audio, the
+  same path FT8 and WSPR from the TX window take, and keys the radio
   as its PTT does, which also keys the amplifier through the PTT line, as
   SDRoxide's TUNE did. It needs the radio's TX IN (menu 32) on USB audio (a
   yellow line with **USB AUDIO** appears if it isn't) and the radio in USB or
   LSB. The tone plays on **TUNE sound** under Settings, Radio: the radio's own
   USB audio unless you choose another.
-- **RIG TUNE** keys the radio's own TUNE carrier at the full button setting,
-  with no tone. The FDM-DUO may not key its PTT output for it, so the HR500 may
+- **RIG TUNE (carrier … W)** keys the radio's own TUNE carrier (`TX2;`) at the
+  full menu 34 setting, with no tone; its key shows that power, which the
+  power buttons set. The FDM-DUO may not key its PTT output for it, so the HR500 may
   stay in receive; use TX TUNE to watch the amplifier.
 
 Press either again to unkey. They are greyed, with the reason on hover, unless
@@ -384,8 +386,7 @@ brings it back over the panel.
 of one CPU core the panel's receiver (filtering and demodulation) takes, and
 moves with SPAN, not with the FFT's resolution. *FFT %* is the CPU spectrum's
 share of a core; with the spectrum on the graphics card it reads *FFT on the
-GPU* and the frames a second it draws instead, since the CPU then does no
-FFT. *GPU %* is this program's share of the graphics card, everything it
+GPU* instead, since the CPU then does no FFT. *GPU %* is this program's share of the graphics card, everything it
 draws there (FFT, waterfall, windows), read from Windows as Task Manager's GPU
 column reads it: a finer FFT resolution or a faster waterfall raises it.
 
@@ -528,10 +529,16 @@ Taken at once and kept; **DEFAULTS** puts them back.
 band plan and the data-mode keys are locked, VFO A and B and split are left
 alone, and the top bar says so. Zoom, markers and the display still work.
 
-The display is also **held** while the radio transmits, as SDR Console does:
-the spectrum, waterfall and 3D surface keep what they showed before the over,
-and the top bar reads *IQ · HELD · TX*. A third of a second after the radio
-says it has stopped, the scope starts again from what the receiver hears, with the
+While the radio transmits the scope does not show what the receiver gives
+(the radio's I/Q is silent or flooded by its own transmitter then). The
+waterfall and trace keep moving, showing the band as it was last received,
+dimmed, and your own signal in the TX colour (magenta) where it lands: the
+audio the panel is sending (a TX window over, or TX TUNE's tone) placed from
+the transmit dial (VFO B in split), above it on USB and below on LSB. RIG
+TUNE's carrier is drawn at the dial. When another program keys the radio
+only the dimmed band shows. The top bar reads *IQ · TX · RX DIMMED*. A third
+of a second after the radio says it has stopped, the scope starts again from
+what the receiver hears, with the
 averages and peak hold started afresh, so nothing of your own transmission
 (or of whatever the radio's I/Q did meanwhile) lingers. If the ELAD's I/Q stays
 silent for 3 seconds once you are back on receive, the panel opens it again by

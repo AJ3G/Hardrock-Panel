@@ -19,6 +19,7 @@ use super::rows::Upload;
 use super::settings::{Scale, TopView};
 use super::skim;
 use super::slotlines;
+use super::txsig;
 use super::view::{self, FreqMap, Span, View, grid_lines, grid_step};
 use super::{Scope, ScopeOut, ScopeRig};
 use crate::theme;
@@ -60,6 +61,13 @@ fn dim() -> Color32 {
 fn accent() -> Color32 {
     theme::scope().accent
 }
+/// Our own transmission, as GLOBE and the TX window draw it.
+fn tx_ink() -> Color32 {
+    txsig::TX_INK
+}
+/// Over what was last received while the radio transmits (decision 74):
+/// dimmed, so it is plain nothing is being heard.
+const TX_VEIL: Color32 = Color32::from_black_alpha(150);
 /// A receiver passband's width, as the radio's filter is named: "2.80 kHz",
 /// "500 Hz".
 pub(crate) fn bw_text(pb: (f32, f32)) -> String {
@@ -368,6 +376,9 @@ fn paint_spectrum(
             sc.peak_cols = pk;
         }
     }
+    if has_trace && sc.held && !sc.paused {
+        paint_tx_trace(sc, &p, trace, cx);
+    }
     if has_trace && let Some(f) = &frame {
         // The noise floor estimate.
         if sc.settings.noise_line && f.noise_dbm > floor && f.noise_dbm < ceil {
@@ -402,6 +413,7 @@ fn paint_spectrum(
         paint_skim_spectrum(sc, &p, all, trace, cx);
     }
     paint_offset(sc, &p, all, cx, true);
+    paint_dx_mark(sc, &p, all, cx, true);
 
     // The radio's centre, dashed.
     let xc = x(cx.span.center);
@@ -816,6 +828,143 @@ fn paint_offset(sc: &mut Scope, p: &egui::Painter, rect: Rect, cx: &Ctx, spectru
     }
 }
 
+/// Over a transmission (decision 74): the trace as last received, dimmed,
+/// and while keyed our own signal over it in the TX colour, its peak a
+/// tenth down from the top of the scale and its shape in dB below that.
+fn paint_tx_trace(sc: &Scope, p: &egui::Painter, trace: Rect, cx: &Ctx) {
+    p.rect_filled(trace, 0.0, TX_VEIL);
+    let v = cx.view;
+    let (floor, ceil) = (sc.settings.floor_dbm, sc.settings.ceil_dbm);
+    let top = ceil - 0.1 * (ceil - floor);
+    let y = |rel: f32| {
+        let d = top + rel;
+        (trace.bottom() - (d - floor) / (ceil - floor) * trace.height())
+            .clamp(trace.top(), trace.bottom())
+    };
+    let caption = match &sc.tx_shape {
+        Some(_) => "TRANSMITTING · band as last received",
+        None => "TRANSMITTING · band as last received · our signal not known here",
+    };
+    let caption = if sc.tx_hold.keyed() { caption } else { "RECEIVE IN A MOMENT" };
+    p.text(
+        pos2(trace.left() + 8.0, trace.bottom() - 6.0),
+        Align2::LEFT_BOTTOM,
+        caption,
+        label(10.5),
+        tx_ink().gamma_multiply(0.85),
+    );
+    let Some(shape) = &sc.tx_shape else { return };
+    let line: Vec<Pos2> = shape
+        .points
+        .iter()
+        .filter(|(hz, _)| *hz >= v.lo && *hz <= v.hi)
+        .map(|&(hz, rel)| pos2(v.x_of(hz, trace.left(), trace.width()), y(rel)))
+        .collect();
+    if line.len() >= 2 {
+        p.add(Shape::line(line, Stroke::new(1.4, tx_ink())));
+    }
+    // The peak, labelled.
+    let Some(&(hz, _)) = shape.points.iter().max_by(|a, b| a.1.total_cmp(&b.1)) else { return };
+    if hz < v.lo || hz > v.hi {
+        return;
+    }
+    let xx = v.x_of(hz, trace.left(), trace.width());
+    p.vline(xx, y(0.0)..=trace.bottom(), Stroke::new(1.0, tx_ink().gamma_multiply(0.5)));
+    p.text(pos2(xx, y(0.0) - 2.0), Align2::CENTER_BOTTOM, "TX", mono(10.5), tx_ink());
+}
+
+/// The waterfall's rows laid down while the received I/Q was not shown
+/// (decision 74): dimmed, and our own signal on them in the TX colour.
+fn paint_tx_waterfall(
+    sc: &Scope,
+    p: &egui::Painter,
+    rect: Rect,
+    cx: &Ctx,
+    scroll_frac: f32,
+    pts_per_row: f32,
+    rows_vis: f32,
+) {
+    if sc.tx_rows.is_empty() {
+        return;
+    }
+    let v = cx.view;
+    let rows: Vec<Option<&txsig::TxRow>> = (0..rows_vis.ceil() as u32 + 1)
+        .map_while(|age| sc.rows.wf_time(age))
+        .map(|t| txsig::row_at(&sc.tx_rows, t))
+        .collect();
+    let y0 = |age: usize| slotlines::row_y(rect.top(), age as u32, scroll_frac, pts_per_row);
+    let clip = |a: f32, b: f32| (a.max(rect.top()), b.min(rect.bottom()));
+    let mut age = 0;
+    while age < rows.len() {
+        let Some(first) = rows[age] else {
+            age += 1;
+            continue;
+        };
+        // A run of held rows, veiled at once; within it, rows with the same
+        // marks drawn as one.
+        let mut end = age;
+        while end + 1 < rows.len() && rows[end + 1].is_some() {
+            end += 1;
+        }
+        let (a, b) = clip(y0(age), y0(end) + pts_per_row);
+        if b > a {
+            p.rect_filled(Rect::from_x_y_ranges(rect.x_range(), a..=b), 0.0, TX_VEIL);
+        }
+        let mut k = age;
+        let mut segs = &first.segs;
+        for j in age..=end + 1 {
+            let next = rows.get(j).copied().flatten().filter(|_| j <= end);
+            if next.is_some_and(|r| &r.segs == segs) {
+                continue;
+            }
+            let (a, b) = clip(y0(k), y0(j - 1) + pts_per_row);
+            for s in segs.iter().filter(|s| s.hi > v.lo && s.lo < v.hi) {
+                let (xa, xb) = (
+                    v.x_of(s.lo, rect.left(), rect.width()),
+                    v.x_of(s.hi, rect.left(), rect.width()),
+                );
+                let (xa, xb) = (xa.max(rect.left()), xb.min(rect.right()).max(xa + 1.5));
+                if b > a {
+                    p.rect_filled(
+                        Rect::from_x_y_ranges(xa..=xb, a..=b),
+                        0.0,
+                        tx_ink().gamma_multiply(0.35 + 0.65 * s.strength),
+                    );
+                }
+            }
+            if let Some(r) = next {
+                k = j;
+                segs = &r.segs;
+            }
+        }
+        age = end + 1;
+    }
+}
+
+/// The station being worked: a thin line in the trace's colour at its
+/// frequency, its call in a flag at the top of the spectrum, as the offset
+/// bar's but quieter. Nothing to grab.
+fn paint_dx_mark(sc: &Scope, p: &egui::Painter, rect: Rect, cx: &Ctx, spectrum: bool) {
+    let Some((hz, call)) = &sc.dx_mark else { return };
+    let v = cx.view;
+    let xx = v.x_of(*hz, rect.left(), rect.width());
+    if !(rect.left()..=rect.right()).contains(&xx) {
+        return;
+    }
+    let ink_dx = accent();
+    p.vline(xx.round() + 0.5, rect.y_range(), Stroke::new(1.0, ink_dx.gamma_multiply(0.7)));
+    if !spectrum || call.is_empty() {
+        return;
+    }
+    let g = p.layout_no_wrap(call.clone(), mono(10.0), ink_dx);
+    let size = g.size() + vec2(8.0, 4.0);
+    let left = if xx + 4.0 + size.x > rect.right() { xx - 4.0 - size.x } else { xx + 4.0 };
+    let r = Rect::from_min_size(pos2(left, rect.top() + 56.0), size);
+    p.rect_filled(r, 2.0, ground().gamma_multiply(0.85));
+    p.rect_stroke(r, 2.0, Stroke::new(1.0, ink_dx.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+    p.galley(pos2(r.left() + 4.0, r.top() + 2.0), g, ink_dx);
+}
+
 /// The 3D surface: the receding floor, the GPU surface, and the receiver on
 /// its front plane.
 fn paint_surface(
@@ -1092,6 +1241,8 @@ fn paint_waterfall(
         }
     }
 
+    paint_tx_waterfall(sc, &p, rect, cx, scroll_frac, px_per_row / ppp, rows_vis);
+
     // The slices' passband edges (decision 66), faint in their colours.
     for sl in &sc.slices {
         for e in [sl.passband.0, sl.passband.1] {
@@ -1220,6 +1371,7 @@ fn paint_waterfall(
     // ticks, so the lines pass behind the labels as the rows scroll (AJ3G).
     paint_skim_waterfall(sc, ui, &p, rect, cx);
     paint_offset(sc, &p, rect, cx, false);
+    paint_dx_mark(sc, &p, rect, cx, false);
 
     // The colour bar, with the levels it runs between.
     let bar = Rect::from_min_max(
@@ -1631,8 +1783,8 @@ fn top_bar(sc: &Scope, ui: &egui::Ui, r: Rect, cx: &Ctx, snap: &sdr::Snapshot) {
     let state = if sc.paused {
         "PAUSED"
     } else if sc.held {
-        // Decision 40: what was shown before the over, until it is done.
-        "HELD · TX"
+        // Decision 74: the band as last received, dimmed, and our signal.
+        "TX · RX DIMMED"
     } else if !snap.alive {
         "NO STREAM"
     } else if sc.shown().is_none() {
@@ -1740,7 +1892,9 @@ fn status_bars(sc: &Scope, ui: &egui::Ui, a: Rect, b: Rect, cx: &Ctx, snap: &sdr
     let diag = if sc.paused {
         "Display paused · stream still running".to_string()
     } else if sc.held {
-        "Held while the radio transmits · starts afresh after the over".to_string()
+        "Transmitting: the band as last received, dimmed, and our signal in the TX colour · \
+         receive starts afresh after the over"
+            .to_string()
     } else if let Some(n) = notice {
         n.clone()
     } else if !snap.alive {
@@ -1749,9 +1903,10 @@ fn status_bars(sc: &Scope, ui: &egui::Ui, a: Rect, b: Rect, cx: &Ctx, snap: &sdr
         // FFT % is the CPU spectrum thread's share of a core. With the
         // spectrum on the GPU that thread is idle, and the figure it left
         // read as the GPU's, frozen (AJ3G, 8 Nov 2026): say where the FFT
-        // runs instead, and how many frames a second it gives.
+        // runs instead. Its frame rate is not repeated here: the GPU's load
+        // is the figure (AJ3G, 11 Nov 2026).
         let fft = if sc.gpu_fft() {
-            format!("FFT on the GPU, {} frames/s", sc.frame_times.len())
+            "FFT on the GPU".to_string()
         } else {
             format!("FFT {:.0} % (CPU)", snap.spectrum_load * 100.0)
         };
