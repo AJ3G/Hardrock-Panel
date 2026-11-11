@@ -955,7 +955,9 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, sp
 /// the radio's power step is read (AJ3G, 11 Nov 2026).
 fn drive(ui: &mut egui::Ui, c: &Ctx<'_>, level: f32) {
     let w = c.rig.and_then(|r| crate::tune::planned_watts(r, rigcat::Keying::Data, level));
-    ui.label(mono(drive_text(w)).color(theme::TEXT()))
+    // Never wrapped: at the window's narrowest "≈" and "4.2 W" fell on two
+    // lines.
+    ui.add(egui::Label::new(mono(drive_text(w).replace(' ', "\u{a0}")).color(theme::TEXT())).wrap_mode(egui::TextWrapMode::Extend))
         .on_hover_text("The radio's power setting times this level: what the radio puts out into the amplifier");
 }
 
