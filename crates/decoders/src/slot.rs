@@ -44,12 +44,27 @@ pub struct SlotRecorder {
     cur: Option<Slot>,
     /// Where the last block ended, to catch stamps that jitter backwards.
     next_index: usize,
+    /// How many samples into a slot it is finished: `len`, or fewer with
+    /// [`Self::with_cut`].
+    cut: usize,
+    /// The start of a slot finished early, whose rest is not kept.
+    closed: Option<f64>,
 }
 
 impl SlotRecorder {
     pub fn new(rate: f64, period_s: f64) -> Self {
         let len = (rate * period_s).round() as usize;
-        SlotRecorder { rate, period_s, len, cur: None, next_index: 0 }
+        SlotRecorder { rate, period_s, len, cur: None, next_index: 0, cut: len, closed: None }
+    }
+
+    /// Finish each slot `cut_s` seconds in, rather than at its end: once
+    /// every transmission in it has ended (WSPR's 110.6 s), so it can be
+    /// decoded without waiting out the slot. The slot is still `period × rate`
+    /// samples long, silent after the cut, and what is heard after it until
+    /// the next slot is not kept.
+    pub fn with_cut(mut self, cut_s: f64) -> Self {
+        self.cut = ((self.rate * cut_s).round() as usize).clamp(1, self.len);
+        self
     }
 
     pub fn period_s(&self) -> f64 {
@@ -71,6 +86,18 @@ impl SlotRecorder {
         let mut rest = audio;
         while !rest.is_empty() {
             let start = slot_start(t, self.period_s);
+            if self.closed.is_some_and(|c| (c - start).abs() < 1e-6) {
+                // The slot was finished at its cut: skip to the next one.
+                let end = start + self.period_s;
+                let to_end = (((end - t) * self.rate).round() as usize).max(1);
+                if to_end >= rest.len() {
+                    break;
+                }
+                rest = &rest[to_end..];
+                t = end;
+                self.closed = None;
+                continue;
+            }
             if self.cur.as_ref().is_some_and(|s| s.start_utc < start - 1e-6)
                 && let Some(s) = self.cur.take()
             {
@@ -86,7 +113,16 @@ impl SlotRecorder {
             if self.next_index > 0 && at.abs_diff(self.next_index) <= 2 {
                 at = self.next_index;
             }
-            let room = self.len.saturating_sub(at);
+            let room = self.cut.saturating_sub(at);
+            if room == 0 && self.cut < self.len {
+                // Past the cut: finish it, and skip the rest of the slot.
+                self.closed = Some(slot.start_utc);
+                self.next_index = 0;
+                if let Some(s) = self.cur.take() {
+                    done.push(s);
+                }
+                continue;
+            }
             if room == 0 {
                 // Stamped within half a sample of the boundary: it starts the
                 // next slot.
@@ -99,10 +135,16 @@ impl SlotRecorder {
             }
             let n = room.min(rest.len());
             slot.audio[at..at + n].copy_from_slice(&rest[..n]);
-            self.next_index = if at + n >= self.len { 0 } else { at + n };
+            self.next_index = if at + n >= self.cut { 0 } else { at + n };
             rest = &rest[n..];
             t = slot.start_utc + (at + n) as f64 / self.rate;
-            if at + n >= self.len {
+            if at + n >= self.cut && self.cut < self.len {
+                // At the cut: finish it now; the rest of the slot is skipped.
+                self.closed = Some(slot.start_utc);
+                if let Some(s) = self.cur.take() {
+                    done.push(s);
+                }
+            } else if at + n >= self.len {
                 // Full: finish it now rather than wait for the next block.
                 if let Some(s) = self.cur.take() {
                     done.push(s);
@@ -169,6 +211,38 @@ mod tests {
         assert_eq!(audio.len(), 280);
         assert_eq!((audio[199], audio[200], audio[279]), (0.0, 1.0, 2.0));
         assert!((first_s - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_cut_slot_is_finished_at_the_cut_and_its_rest_skipped() {
+        // 120 s slots finished 113 s in, at 100 samples a second.
+        let mut r = SlotRecorder::new(100.0, 120.0).with_cut(113.0);
+        let start = 1_700_000_040.0;
+        let mut done = Vec::new();
+        let mut t = start;
+        let mut k = 0.0f32;
+        // 250 s of 0.37 s blocks: one slot, its tail, and most of the next.
+        while t < start + 250.0 {
+            let block: Vec<f32> = (0..37).map(|i| k + i as f32).collect();
+            for s in r.push(&block, t) {
+                // Finished as soon as the block that reaches 113 s is in.
+                assert!(t + 0.37 >= s.start_utc + 113.0 && t < s.start_utc + 113.0, "{t}");
+                done.push(s);
+            }
+            k += 37.0;
+            t += 0.37;
+        }
+        assert_eq!(done.len(), 2);
+        let s = &done[0];
+        assert_eq!((s.start_utc, s.audio.len()), (start, 12_000));
+        // Heard up to the cut, silent after it.
+        assert!(s.audio[..11_300].iter().enumerate().all(|(i, &v)| v == i as f32));
+        assert!(s.audio[11_300..].iter().all(|&v| v == 0.0));
+        // The next slot starts on its boundary with the samples sent then.
+        let n = &done[1];
+        assert_eq!((n.start_utc, n.first_s), (start + 120.0, 0.0));
+        assert!((n.audio[0] - 12_000.0).abs() < 1.0, "{}", n.audio[0]);
+        assert!((n.audio[500] - 12_500.0).abs() < 1.0);
     }
 
     #[test]

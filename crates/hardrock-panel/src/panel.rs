@@ -885,7 +885,22 @@ fn amp_panel_inner(
         Some(th) => tft::screen(ui, &sh, view, th, pop, out),
         None => panel_look(ui, &sh, view, pop, out),
     }
+    // A click the link refused or couldn't confirm, for a few seconds: the
+    // button alone only went back to what it was (AJ3G, 11 Nov 2026).
+    if let Some(why) = notice(st, std::time::Instant::now()) {
+        ui.label(RichText::new(why).size(13.0 * s).strong().color(theme::YELLOW()));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+    }
     false
+}
+
+/// How long a refused click's words stay up.
+const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// The link's word on a refused or unconfirmed click, while it is recent.
+fn notice(st: &AmpStatus, now: std::time::Instant) -> Option<&str> {
+    let recent = st.notice_at.is_some_and(|t| now.saturating_duration_since(t) < NOTICE_FOR);
+    st.notice.as_deref().filter(|_| recent)
 }
 
 /// What every look draws from, worked out once a frame.
@@ -1136,6 +1151,12 @@ fn panel_look(
                 }
             });
         }
+        // Why TUNE is red, in plain words, whether the tuner is in line or
+        // not.
+        if let Some(f) = (!atu.tuning && atu_result(atu).0).then(|| atu_failure(atu)).flatten() {
+            ui.label(RichText::new(f.line).size(12.0 * s).color(theme::ALERT()))
+                .on_hover_text(f.hover);
+        }
     }
 }
 
@@ -1281,12 +1302,16 @@ fn keys(sh: &Shown) -> Keys {
         } else {
             (failed, Tone::Red)
         };
+        let failure = (!atu.tuning && failed).then(|| atu_failure(atu)).flatten();
         Key {
             text: "TUNE".into(),
             lit,
             tone,
             enabled: live,
-            hover: "Start a tune — then key a steady carrier (CW, FM or RTTY). Press again to stop.",
+            hover: failure.map_or(
+                "Start a tune — then key a steady carrier (CW, FM or RTTY). Press again to stop.",
+                |f| f.hover,
+            ),
             why_not: off_line(),
             action: AmpAction::Tune,
         }
@@ -1329,6 +1354,52 @@ fn atu_result(atu: &AtuReadout) -> (bool, bool) {
     });
     let tuned = atu.active && atu.last_result.as_deref() == Some("Tuned");
     (failed, tuned)
+}
+
+/// Why the tuner's last tune failed, in plain words: a short line for under
+/// TUNE, and the longer hover.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AtuFailure {
+    line: &'static str,
+    hover: &'static str,
+}
+
+/// The last tune's failure in plain words, when it failed (the red TUNE
+/// light), so the light's reason can be read without the manual (AJ3G,
+/// 11 Nov 2026).
+fn atu_failure(atu: &AtuReadout) -> Option<AtuFailure> {
+    let res = atu.last_result.as_deref()?;
+    let (line, hover) = if res.starts_with("Lo power") {
+        (
+            "Lo power: the tuner saw under 0.5 W",
+            "Lo power: the tuner saw under 0.5 W for over a second, so it gave up. The carrier \
+             must stay on for the whole tune: key TX TUNE or RIG TUNE with a few watts, then \
+             press TUNE.",
+        )
+    } else if res.starts_with("SWR above") {
+        (
+            "SWR above 6:1: too far off for the tuner",
+            "SWR above 6:1: the load is beyond what the tuner can match. Check the antenna and \
+             its feed line, then press TUNE to try again.",
+        )
+    } else if res.starts_with("Failed (above 2:1)") {
+        (
+            "No match under 2:1 found",
+            "The tuner couldn't bring the SWR under 2:1. Press TUNE to try again, or check \
+             the antenna.",
+        )
+    } else if res.starts_with("Power too high") {
+        (
+            "Power too high for the tuner to tune",
+            "Power too high: the tuner tunes on low power. Lower the drive (TX TUNE level or \
+             the 1W key), then press TUNE.",
+        )
+    } else if res.starts_with("Failed") {
+        ("The last tune failed", "The tuner's last tune failed. Press TUNE to try again.")
+    } else {
+        return None;
+    };
+    Some(AtuFailure { line, hover })
 }
 
 /// The tuner's state in words, its tone, and the SWR it tuned to, while it
@@ -2483,6 +2554,36 @@ mod tests {
             status(AmpReadings { ptt: true, fwd_w: 400.0, drive_w: 6.0, ..Default::default() });
         st.pending = vec![AmpAction::SetAntenna(2)];
         assert!(!keys(&shown(&st)).ant.unwrap().enabled);
+    }
+
+    #[test]
+    fn a_refused_click_is_said_for_a_few_seconds() {
+        let t0 = std::time::Instant::now();
+        let mut st = status(AmpReadings::default());
+        st.notice = Some("Unkey first: the tuner can't switch to BYP with RF on.".into());
+        st.notice_at = Some(t0);
+        assert!(notice(&st, t0 + std::time::Duration::from_secs(2)).is_some());
+        assert_eq!(notice(&st, t0 + NOTICE_FOR), None);
+        st.notice_at = None;
+        assert_eq!(notice(&st, t0), None);
+    }
+
+    #[test]
+    fn a_failed_tune_says_why_in_plain_words() {
+        let mut atu = AtuReadout { last_result: Some("Lo power".into()), ..Default::default() };
+        assert!(atu_failure(&atu).unwrap().line.contains("under 0.5 W"));
+        atu.last_result = Some("SWR above 6:1".into());
+        assert!(atu_failure(&atu).unwrap().line.contains("6:1"));
+        atu.last_result = Some("Power too high".into());
+        assert!(atu_failure(&atu).unwrap().line.contains("Power too high"));
+        atu.last_result = Some("Tuned".into());
+        assert_eq!(atu_failure(&atu), None);
+        // The red TUNE key's hover carries it too.
+        let mut st = status(AmpReadings::default());
+        st.atu = Some(AtuReadout { last_result: Some("Lo power".into()), ..Default::default() });
+        let k = keys(&shown(&st)).tune.unwrap();
+        assert_eq!(k.tone, Tone::Red);
+        assert!(k.hover.contains("0.5 W"), "{}", k.hover);
     }
 
     #[test]

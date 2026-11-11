@@ -192,6 +192,15 @@ the SWR warning in Settings, if the radio drops to receive on a high SWR, and
 if the panel closes or stops responding. The reason is shown after it stops.
 These are safety interlocks #5, #6 and #7.
 
+**SWR while tuning.** A tuner sweeping its relays makes the SWR jump for a
+moment, so TX TUNE and RIG TUNE judge it more loosely than an ordinary over:
+the limit is twice the SWR warning (10:1 at most), the first 5 s are not
+judged at all, and after that the SWR must stay at or over the limit for
+0.3 s to stop it. While the HR500's own tuner says it is tuning, the radio's
+SWR doesn't stop TUNE at all (the amplifier protects itself), and with the
+amplifier in line its SWR is judged the same way. An FT8 or WSPR over still
+stops on the first reading at the warning.
+
 **Clearing a trip.** A trip stops TUNE at once. The HR500 keeps showing the
 trip until it is keyed again and sees normal readings; it has no reset
 (its manual: trip conditions "do not need to be manually reset, all
@@ -217,7 +226,7 @@ every setting the radio answers over CAT, with its menu number, its meaning and 
 answer as it came. **POP OUT** moves it into a window of its own, and
 **DOCK** brings it back. Popped out, it grows and shrinks with its window,
 keeping its proportions; docked, drag its side to make it wider and it grows
-the same way. The settings are read when the port opens, when you press
+the same way, and drag it smaller again and it shrinks back. The settings are read when the port opens, when you press
 **READ AGAIN**, and every 10 seconds between transmissions. Menus that have no
 CAT command, such as 37 `CW IN` and 45 keyer speed, can only be read on the
 radio.
@@ -356,7 +365,16 @@ tuner is bypassed, the drawing shows the bypass relays instead.
 
 - **TUNE** starts a tune. It blinks blue while tuning, turns green when tuned
   and red if the tune fails, with the result and SWR on the line below.
-- **ON / BYP** puts the tuner in line or bypasses it.
+  When it is red, a line under it says why in plain words, such as *Lo power:
+  the tuner saw under 0.5 W* (the carrier dropped or was too weak during the
+  tune), *SWR above 6:1: too far off for the tuner* or *Power too high for
+  the tuner to tune*; hover over it or over TUNE for what to do.
+- **ON / BYP** puts the tuner in line or bypasses it. With RF on, the
+  amplifier refuses it (interlock #1), and a yellow line says so for a few
+  seconds: *Unkey first: the tuner can't switch to BYP with RF on.* BYP while
+  the tuner is still tuning (a tune left running after a failure) cancels the
+  tune first, then bypasses; if the tuner still reads in line afterwards, the
+  line says that too.
 
 The tuner only reports step numbers. The values shown (for example "~0.20 µH ·
 step 3") are an estimate that includes the board's own stray inductance and
@@ -628,12 +646,16 @@ I/Q), and the decoder's audio (RTTY's mark and space on USB, NAVTEX on its
 1700 Hz centre). The line under the mode keys says what it did. Olivia, THOR
 and HFDL have no calling frequency: tune to them by hand. Nothing is changed
 while the radio transmits; the line says so. **POP OUT** puts DECODE in a
-window of its own, **DOCK** brings it back.
+window of its own, **DOCK** brings it back. Docked, the window keeps the size
+you drag it to: a long line or a transmission never widens or moves it, and
+what doesn't fit is clipped or scrolls.
 
 - **WSJT**: FT8, FT4, WSPR, JT65, JT9, FST4-60 and Q65-30A, from the
   receiver's audio in UTC slots. Each decode shows its UTC, SNR, DT (a
   drifting PC clock shows here), audio frequency and RF frequency. Picking
   the mode puts the receiver on its dial frequency in USB (see above).
+  WSPR is decoded 113 s into its two minutes, as soon as the beacons have
+  ended (they run 1 s to 111.6 s), rather than at the slot's end.
 - **Keyboard**: CW, RTTY (45.45 baud, 170 Hz), PSK31, NAVTEX, Olivia 8/500
   and THOR16, as running text. Set the audio frequency the signal sits at,
   except for CW, which reads whichever tone is strongest between 200 and

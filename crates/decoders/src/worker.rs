@@ -179,6 +179,10 @@ impl WsjtDecoder {
                 .name(format!("wsjt-{}-slots", mode.label()))
                 .spawn(move || {
                     let mut rec = SlotRecorder::new(wsjt::RATE, mode.period_s());
+                    if let Some(cut) = mode.decode_at_s() {
+                        // WSPR: decoded once its transmissions have ended.
+                        rec = rec.with_cut(cut);
+                    }
                     let mut rs: Option<Resampler<f32>> = None;
                     let mut buf = Vec::new();
                     // UTC of the resampler's first input, outputs so far, and
@@ -815,6 +819,14 @@ mod tests {
             assert!(end < mode.period_s(), "{}", mode.label());
         }
         assert_eq!(WsjtMode::Msk144.signal_end_s(), None);
+    }
+
+    #[test]
+    fn wspr_is_decoded_once_its_transmissions_have_ended() {
+        let at = WsjtMode::Wspr.decode_at_s().unwrap();
+        let end = WsjtMode::Wspr.signal_end_s().unwrap();
+        assert!(at > end + 1.0 && at < 114.0, "{at}");
+        assert_eq!(WsjtMode::Ft8.decode_at_s(), None);
     }
 
     #[test]

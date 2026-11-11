@@ -945,6 +945,36 @@ AJ3G found that NB and NR wouldn't switch from the panel, though the DUO's own N
 
 The WSPR temperature stop (interlock #12) used the 120 °F (48.8 °C) warning colour, so beacons stopped at 49 °C. AJ3G: "Should not trip until over 155F"; SDRoxide never stopped for heat. A beacon now isn't started, and one going out stops, only over 155 °F (68.3 °C), a step below the HR500's own 70 °C (158 °F) trip. The yellow from 120 °F stays as a warning colour only.
 
+## 78. TUNE rides out the tuner's SWR spikes (11 Nov 2026)
+
+**Why.** AJ3G, 11 Nov 2026: TUNE with the amplifier at PTT OFF stopped on a momentary SWR spike while the HR500's tuner was switching. The carrier dropped, the ELAD tripped, and the tuner then reported "Lo power" (it saw under 0.5 W for over a second), turning its TUNE light red. TUNE's stop took a single radio SWR reading at the warning, even with the amplifier bypassed.
+
+**What.** SDRoxide's rule for a tune (`swr_rails` there), as time here: during TX TUNE and RIG TUNE the SWR limit is doubled (10:1 at most), nothing is judged for the first 5 s, and then the SWR must stay at or over the limit for 0.3 s before it stops the carrier. While the amplifier reports its tuner tuning, the radio's SWR doesn't stop the tune at all, and the amplifier's own SWR in line gets the doubled limit and the same grace; otherwise it stops on one reading as before. Ordinary overs are unchanged. `tune::TuneSwr`; interlock #6 amended (AJ3G to vet).
+
+**Logged.** Every stop of an over now says why at INFO, once (`main.rs`, `stop_over`: "transmit: panel TUNE stopped after 1.3 s: The radio's SWR stayed at …"; TUNE pressed again: "transmit: TUNE stopped: pressed again"), and the link logs every unkey, with no reason as "rigcat: unkeyed as asked". The "transmit:" progress line carries the radio's SWR and "amp ATU tuning" while there is RF. AJ3G's log showed a TUNE end after 1.3 s with no reason.
+
+## 79. The red TUNE light says why (11 Nov 2026)
+
+AJ3G couldn't tell what the tuner's red TUNE light meant ("Lo power"). When the last tune failed, the AMP window now shows a line in plain words under the tuner drawing, whether the tuner is in line or not, and the TUNE key's hover says the same with what to do (`panel.rs`, `atu_failure`): *Lo power: the tuner saw under 0.5 W* (the HR500's `HRTR` `L`: under 0.5 W for over a second), *SWR above 6:1: too far off for the tuner*, *No match under 2:1 found*, *Power too high for the tuner to tune*. The words are the panel's own, not the manual's. TX TUNE at its first-run level (a quarter of menu 34) on the 1W key is about 0.25 W, under what the tuner needs; the drive defaults are unchanged, and the Lo power hover says to key a few watts.
+
+## 80. BYP after a failed tune; refused relay clicks said in words (11 Nov 2026)
+
+**Why.** AJ3G: "When the tune light goes red and I bypass the tuner, the tuner still engages." Two causes: interlock #1 refused the click while RF was on and only logged it (the key just went back), and a tune left running after a failure kept the tuner in line, since BYP sent only `HRTB0;`.
+
+**What.**
+- **The refusal is said** (`hardrock::link`, `refused_words`, `AmpStatus::notice`/`notice_at`; `panel.rs`, `notice`): a click interlock #1 or #4 refuses, or one whose status read goes unanswered, puts a line in yellow at the foot of the AMP window for 6 s, in every look: *Unkey first: the tuner can't switch to BYP with RF on.*, *Unkey first: the antenna relay can't switch with RF on.*, *Lower the drive first: …*, *The amplifier didn't answer, so … wasn't sent.* Interlock #1 itself is unchanged. A refused click never changes what the tuner shows (the drawing follows a click only once it is sent).
+- **BYP cancels a running tune first** (`act`): the link asks the tuner `HRTT;` and only when it answers that it is tuning sends `HRTU;` (which cancels a tune in progress but is also the TUNE button: with no answer, or not tuning, it is not sent, so BYP never starts a tune), waits 100 ms, then `HRTB0;`. ON is unchanged.
+- **Read back:** the tuner is read back 300 ms after ON or BYP, as before; if it still reads the other way, the line says *The tuner still reads in line after BYP.* (or bypassed after ON), and the key goes back to what it reads.
+
+## 81. RADIO and DECODE windows: their size is the operator's (11 Nov 2026)
+
+- **RADIO** (docked) wouldn't shrink after being made bigger: it claimed all its room with `set_min_size`, and its face, a little bigger than the room while its scale settled, became the size egui keeps a window at least as big as. Now the face is drawn in a child that isn't allocated in the window, clipped to the room, and only the room counts (as the TX window's columns, decision 71).
+- **DECODE** (docked) slid sideways during TX: its width followed its contents. It is drawn the same way, with a minimum of 420 × 320, so it moves and resizes only when dragged.
+
+## 82. WSPR decoded at the beacons' end (11 Nov 2026)
+
+AJ3G: decode WSPR at the end of the transmissions, not of the slot. A WSPR transmission runs from 1 s to 111.6 s of its two minutes, so the decoder's slot recorder now finishes a WSPR slot 113 s in (`WsjtMode::decode_at_s`, `SlotRecorder::with_cut`), leaving 1.4 s for a late start, and the decode comes about 7 s sooner. The slot is still 120 s of samples, silent after the cut, and what is heard from 113 s to 120 s is not kept. DECODE's WSPR and the skimmer's both. Searching for candidates during the slot was not done.
+
 ## 83. The scope over a transmission: the TX monitor, SDRoxide's way (11 Nov 2026)
 
 **Why.** AJ3G, 11 Nov 2026: "In Scope my TX does not look natural, the Waterfall looks awful, the Spectrum is not fluid, please look at how SDROxide handles this." Decision 74 held the last received picture dimmed and drew our signal over it from an 8192-sample snapshot taken each repaint: flat coloured bars on the waterfall, an unaveraged line that jumped, and a band that looked frozen.
@@ -1031,4 +1061,3 @@ A band change cleared HEARD with the FT8 list. Now WSPR's reports are kept acros
 ## 96. GLOBE: a solid globe (11 Nov 2026)
 
 **What.** Nothing behind the globe is drawn any more: the faint far side of an arc (decision 73's `BEHIND`), the ring where a path ends behind the globe, and the FT8 strobe's pulse behind it are gone. An arc lifted above the surface still shows where it rises past the limb (`sphere::arc_runs` marks those pieces in front; `drawn_runs` keeps only those). The flat map is unchanged.
-

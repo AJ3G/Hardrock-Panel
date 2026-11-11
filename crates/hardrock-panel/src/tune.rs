@@ -249,6 +249,9 @@ pub(crate) fn tone_blocked(rig: &RigStatus, device: Option<&str>) -> Option<Stri
 /// `carried_trip` is a trip the amplifier already showed when this TUNE
 /// started and hasn't cleared since: that one doesn't stop it, since keying
 /// is what clears it. Any other trip does.
+///
+/// This is the rule for an ordinary over (a TX window over, an outside
+/// program's). TX TUNE and RIG TUNE judge SWR by [`TuneSwr`] instead.
 pub(crate) fn tune_must_stop(
     amp: &AmpStatus,
     rig: &RigStatus,
@@ -256,18 +259,10 @@ pub(crate) fn tune_must_stop(
     watts: Option<f32>,
     carried_trip: bool,
 ) -> Option<String> {
-    if amp.alerts.tripped && !carried_trip {
-        return Some("The amplifier tripped.".into());
-    }
-    let blocked = amp_blocked(amp, rig, watts);
-    if blocked.is_some() {
-        return blocked;
-    }
-    let r = amp.readings?;
-    let limit = amp.model.limits().drive_warn_w;
-    if r.ptt && r.drive_w > limit {
-        return Some(format!("Drive {:.1} W went over the {limit:.0} W limit.", r.drive_w));
-    }
+    let r = match stop_but_swr(amp, rig, watts, carried_trip) {
+        Err(why) => return Some(why),
+        Ok(r) => r?,
+    };
     if r.ptt && r.swr >= swr_warn {
         return Some(format!("The amplifier's SWR reached {:.1}:1.", r.swr));
     }
@@ -275,6 +270,129 @@ pub(crate) fn tune_must_stop(
         return Some(format!("The radio's SWR reached {s:.1}:1."));
     }
     None
+}
+
+/// [`tune_must_stop`] without its SWR checks: `Err` with why the over must
+/// stop, else the amplifier's readings (`None` without them, which
+/// [`amp_blocked`] has already refused when they matter).
+fn stop_but_swr(
+    amp: &AmpStatus,
+    rig: &RigStatus,
+    watts: Option<f32>,
+    carried_trip: bool,
+) -> Result<Option<AmpReadings>, String> {
+    if amp.alerts.tripped && !carried_trip {
+        return Err("The amplifier tripped.".into());
+    }
+    if let Some(why) = amp_blocked(amp, rig, watts) {
+        return Err(why);
+    }
+    let Some(r) = amp.readings else { return Ok(None) };
+    let limit = amp.model.limits().drive_warn_w;
+    if r.ptt && r.drive_w > limit {
+        return Err(format!("Drive {:.1} W went over the {limit:.0} W limit.", r.drive_w));
+    }
+    Ok(Some(r))
+}
+
+/// How far a TUNE raises the SWR limit: twice the warning, as SDRoxide's
+/// `swr_tune_limit`, but never past [`TUNE_SWR_MAX`].
+const TUNE_SWR_SCALE: f32 = 2.0;
+/// The top of the scale the radios report; a TUNE's limit stops here.
+const TUNE_SWR_MAX: f32 = 10.0;
+/// How long after keying a TUNE's SWR is not believed at all: SDRoxide's
+/// 150 meter samples (about 5 s), the time a tuner takes to sweep.
+pub(crate) const TUNE_SWR_SETTLE: Duration = Duration::from_secs(5);
+/// How long the SWR must stay at or over a TUNE's limit before it stops it:
+/// SDRoxide's six readings in a row (about a fifth of a second), here as a
+/// time, a little longer since the radio is read every 50 to 150 ms while
+/// keyed, so one spike never covers it alone.
+pub(crate) const TUNE_SWR_DWELL: Duration = Duration::from_millis(300);
+
+/// The SWR limit while tuning: the warning doubled, capped at 10:1.
+pub(crate) fn swr_tune_limit(swr_warn: f32) -> f32 {
+    (swr_warn * TUNE_SWR_SCALE).min(TUNE_SWR_MAX)
+}
+
+/// The SWR rule for TX TUNE and RIG TUNE, ported from SDRoxide's
+/// (`swr_rails` and `SWR_TRIP_SAMPLES` in its engine).
+///
+/// SAFETY INTERLOCK (docs/safety-interlocks.md, #6): a tune is the
+/// deliberate act of keying into a load that is not yet matched, and a tuner
+/// sweeping its relays makes the SWR jump for a moment. Stopped on one
+/// reading, the carrier dropped mid-cycle, the HR500's tuner then reported
+/// "Lo power" and the TUNE light went red (AJ3G, 11 Nov 2026). So, during a
+/// TUNE:
+/// - The radio's SWR is judged against the warning doubled (10:1 at most,
+///   [`swr_tune_limit`]), not at all for the first [`TUNE_SWR_SETTLE`], and
+///   stops it only after staying at or over that for [`TUNE_SWR_DWELL`].
+///   While the amplifier says its tuner is tuning, the radio's SWR doesn't
+///   stop it at all: the amplifier protects itself then.
+/// - The amplifier's own SWR in line stops it at the warning on one reading,
+///   as before, except while its tuner is tuning: then it is judged as the
+///   radio's is above.
+///
+/// Everything else in [`tune_must_stop`] still stops it at once.
+#[derive(Default)]
+pub(crate) struct TuneSwr {
+    /// When the SWR first read at or over the tune limit, in this run of
+    /// such readings.
+    over_since: Option<Instant>,
+}
+
+impl TuneSwr {
+    /// Forget the last run of high readings: when no TUNE is keyed.
+    pub(crate) fn reset(&mut self) {
+        self.over_since = None;
+    }
+
+    /// Why a TUNE keyed for `keyed_for` must stop now, or `None`; once a
+    /// frame while it is keyed. The arguments are [`tune_must_stop`]'s.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn must_stop(
+        &mut self,
+        amp: &AmpStatus,
+        rig: &RigStatus,
+        swr_warn: f32,
+        watts: Option<f32>,
+        carried_trip: bool,
+        keyed_for: Duration,
+        now: Instant,
+    ) -> Option<String> {
+        let r = match stop_but_swr(amp, rig, watts, carried_trip) {
+            Err(why) => return Some(why),
+            Ok(r) => r?,
+        };
+        let atu_tuning = amp.atu.as_ref().is_some_and(|a| a.tuning);
+        let limit = swr_tune_limit(swr_warn);
+        let settled = keyed_for >= TUNE_SWR_SETTLE;
+        if r.ptt && !atu_tuning && r.swr >= swr_warn {
+            return Some(format!("The amplifier's SWR reached {:.1}:1.", r.swr));
+        }
+        let mut over = None;
+        if settled && r.ptt && atu_tuning && r.swr >= limit {
+            over = Some(format!(
+                "The amplifier's SWR stayed at {:.1}:1 while its tuner tuned (limit {limit:.1}:1 \
+                 while tuning).",
+                r.swr
+            ));
+        }
+        if settled
+            && !atu_tuning
+            && over.is_none()
+            && let Some(s) = rig.swr_ratio().filter(|s| *s >= limit)
+        {
+            over = Some(format!(
+                "The radio's SWR stayed at {s:.1}:1 (limit {limit:.1}:1 while tuning)."
+            ));
+        }
+        let Some(why) = over else {
+            self.over_since = None;
+            return None;
+        };
+        let since = *self.over_since.get_or_insert(now);
+        (now.saturating_duration_since(since) >= TUNE_SWR_DWELL).then_some(why)
+    }
 }
 
 /// The amplifier's last good readings, for an over already keyed.
@@ -811,5 +929,95 @@ mod tests {
         a.readings.as_mut().unwrap().drive_w = 9.0;
         let r = duo(14_074_000, 2);
         assert!(tune_must_stop(&a, &r, 5.0, w(&r), false).unwrap().contains("Drive"));
+    }
+
+    /// A TUNE's SWR rule, read once at each of `steps` (time since keying,
+    /// the amplifier, the radio's SWR).
+    fn tune_run(steps: &[(u64, &AmpStatus, f32)]) -> Vec<Option<String>> {
+        let t0 = Instant::now();
+        let mut g = TuneSwr::default();
+        steps
+            .iter()
+            .map(|(ms, a, swr)| {
+                let mut r = duo(14_074_000, 2);
+                r.swr = elad::parse_swr(&format!("0 {swr:05.2}"));
+                let at = Duration::from_millis(*ms);
+                g.must_stop(a, &r, 3.0, w(&r), false, at, t0 + at)
+            })
+            .collect()
+    }
+
+    fn atu_tuning(mut a: AmpStatus) -> AmpStatus {
+        a.atu = Some(hardrock::AtuReadout { active: true, tuning: true, ..Default::default() });
+        a
+    }
+
+    #[test]
+    fn the_tune_limit_is_twice_the_warning_up_to_ten() {
+        assert_eq!(swr_tune_limit(2.5), 5.0);
+        assert_eq!(swr_tune_limit(3.0), 6.0);
+        assert_eq!(swr_tune_limit(6.0), 10.0);
+    }
+
+    #[test]
+    fn a_tune_ignores_the_radios_swr_for_its_first_five_seconds() {
+        let a = amp(false, 5);
+        let out = tune_run(&[(0, &a, 9.9), (2000, &a, 9.9), (4900, &a, 9.9)]);
+        assert!(out.iter().all(Option::is_none), "{out:?}");
+    }
+
+    #[test]
+    fn after_that_a_tune_stops_only_for_swr_held_over_twice_the_warning() {
+        let a = amp(false, 5);
+        // 5:1 is over the 3:1 warning but under the 6:1 tune limit.
+        let out = tune_run(&[(6000, &a, 5.0), (7000, &a, 5.0), (8000, &a, 5.0)]);
+        assert!(out.iter().all(Option::is_none), "{out:?}");
+        // A spike over 6:1 for less than the dwell, then back down: runs on.
+        let out = tune_run(&[(6000, &a, 8.0), (6200, &a, 8.0), (6300, &a, 2.0), (6400, &a, 8.0)]);
+        assert!(out.iter().all(Option::is_none), "{out:?}");
+        // Held for the dwell: stops.
+        let out = tune_run(&[(6000, &a, 8.0), (6100, &a, 8.0), (6300, &a, 8.0)]);
+        assert_eq!(out[..2], [None, None]);
+        assert!(out[2].as_deref().unwrap().contains("radio's SWR"), "{out:?}");
+    }
+
+    #[test]
+    fn the_radios_swr_never_stops_a_tune_while_the_amplifiers_tuner_tunes() {
+        let a = atu_tuning(amp(false, 5));
+        let out = tune_run(&[(6000, &a, 9.9), (7000, &a, 9.9), (9000, &a, 9.9)]);
+        assert!(out.iter().all(Option::is_none), "{out:?}");
+    }
+
+    #[test]
+    fn in_line_the_amplifiers_swr_stops_a_tune_at_once_unless_its_tuner_tunes() {
+        let mut a = amp(true, 5);
+        a.readings.as_mut().unwrap().swr = 3.2;
+        let out = tune_run(&[(100, &a, 1.0)]);
+        assert!(out[0].as_deref().unwrap().contains("amplifier's SWR"), "{out:?}");
+        // Its tuner tuning: the doubled limit, the settle time and the dwell.
+        let mut t = atu_tuning(a.clone());
+        t.readings.as_mut().unwrap().swr = 7.0;
+        let out = tune_run(&[(100, &t, 1.0), (5000, &t, 1.0), (5200, &t, 1.0), (5300, &t, 1.0)]);
+        assert_eq!(out[..3], [None, None, None]);
+        assert!(out[3].as_deref().unwrap().contains("amplifier's SWR"), "{out:?}");
+        t.readings.as_mut().unwrap().swr = 5.0;
+        assert!(tune_run(&[(6000, &t, 1.0), (7000, &t, 1.0)]).iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn a_tune_still_stops_at_once_for_everything_but_swr() {
+        let mut a = amp(true, 5);
+        a.readings.as_mut().unwrap().drive_w = 9.0;
+        assert!(tune_run(&[(100, &a, 1.0)])[0].as_deref().unwrap().contains("Drive"));
+        let mut a = amp(false, 5);
+        a.alerts.tripped = true;
+        assert!(tune_run(&[(100, &a, 1.0)])[0].as_deref().unwrap().contains("tripped"));
+    }
+
+    #[test]
+    fn an_ordinary_over_keeps_its_one_reading_swr_stop() {
+        let mut r = duo(14_074_000, 2);
+        r.swr = elad::parse_swr("0 03.50");
+        assert!(tune_must_stop(&amp(false, 5), &r, 3.0, w(&r), false).is_some());
     }
 }

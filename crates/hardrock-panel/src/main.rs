@@ -195,6 +195,12 @@ struct App {
     /// The amplifier's last good readings, which an over in progress rides
     /// a short silence on (#6).
     amp_hold: tune::AmpHold,
+    /// TX TUNE's and RIG TUNE's SWR rule (interlock #6): the run of high
+    /// readings it is timing.
+    tune_swr: tune::TuneSwr,
+    /// The over (by when it was keyed) whose stop has been logged, so each
+    /// stop's reason goes in the log once.
+    stop_logged: Option<Instant>,
     /// Why the tone wouldn't play, last time.
     tone_error: Option<String>,
     /// Since when the radio has been seen transmitting.
@@ -309,6 +315,8 @@ impl App {
             sounds: audio::output_devices(),
             trip_carried: false,
             amp_hold: tune::AmpHold::default(),
+            tune_swr: tune::TuneSwr::default(),
+            stop_logged: None,
             tone_asked: None,
             tx_sources: (String::new(), None),
             tone_error: None,
@@ -394,15 +402,24 @@ impl App {
         }
         let now = Instant::now();
         self.amp_hold.note(amp, now);
+        if !tuning.is_some_and(|t| matches!(t.keying, Keying::Audio | Keying::Carrier)) {
+            self.tune_swr.reset();
+        }
         let (Some(link), Some(r), Some(t)) = (&self.rig, rig, tuning) else { return };
         // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): an over in
         // progress is judged by the amplifier's last readings for up to 5 s
         // of silence (the HR500 skips replies while keyed), and stopped
         // after that; see `tune::AmpHold`.
+        let what = match t.keying {
+            _ if outside => "outside program's over",
+            Keying::Data => "TX window over",
+            Keying::Audio => "panel TUNE",
+            Keying::Carrier => "RIG TUNE",
+        };
         let held = match self.amp_hold.over_view(amp, now) {
             Ok(v) => v,
             Err(why) => {
-                link.tune_stop(Some(why));
+                stop_over(link, &mut self.stop_logged, &t, what, Some(why));
                 return;
             }
         };
@@ -419,7 +436,7 @@ impl App {
                         .then(|| "transmitting from outside programs was turned off".to_string())
                 });
             match why {
-                Some(why) => link.tune_stop(Some(why)),
+                Some(why) => stop_over(link, &mut self.stop_logged, &t, what, Some(why)),
                 None => link.tune_alive(),
             }
             return;
@@ -433,7 +450,7 @@ impl App {
                 .map(Some)
                 .or_else(|| self.tx.keep(amp, decoders::slot::utc_now()));
             match why {
-                Some(why) => link.tune_stop(why),
+                Some(why) => stop_over(link, &mut self.stop_logged, &t, what, why),
                 None => {
                     // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): the
                     // over's audio follows LEVEL live, set only once the
@@ -451,14 +468,19 @@ impl App {
         // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): a TUNE in
         // progress is stopped the moment the amplifier trips, leaves the
         // radio's band in line, is driven past its limit (or the Tune slider
-        // is raised past it), or either SWR reaches the warning.
-        let why = tune::tune_must_stop(amp, r, self.saved.swr_warn, watts, self.trip_carried)
+        // is raised past it), or the SWR stays high past the tuner's
+        // sweep (`tune::TuneSwr`: the limit doubled, 5 s to settle, and
+        // never the radio's while the amplifier's tuner is tuning).
+        let keyed_for = now.saturating_duration_since(t.since);
+        let why = self
+            .tune_swr
+            .must_stop(amp, r, self.saved.swr_warn, watts, self.trip_carried, keyed_for, now)
             .or_else(|| {
                 (t.keying == Keying::Audio && !self.tone.playing())
                     .then(|| "the tone stopped playing".to_string())
             });
         match why {
-            Some(why) => link.tune_stop(Some(why)),
+            Some(why) => stop_over(link, &mut self.stop_logged, &t, what, Some(why)),
             None => link.tune_alive(),
         }
     }
@@ -646,6 +668,7 @@ impl App {
         if t.stop
             && let Some(link) = &self.rig
         {
+            tracing::info!("transmit: TUNE stopped: pressed again");
             link.tune_stop(None);
         }
         let secs = self.saved.tune_secs.clamp(*tune::TUNE_SECS.start(), *tune::TUNE_SECS.end());
@@ -1863,6 +1886,24 @@ fn amp_keyed(amp: &AmpStatus) -> bool {
 
 /// Everything that says the station is transmitting, in a few words: the
 /// scope holds and the controls lock while any of them does.
+/// Unkey an over the panel judged must stop, and log why, once an over
+/// (AJ3G, 11 Nov 2026: a TUNE ended after 1.3 s with no reason in the log).
+fn stop_over(
+    link: &RigLink,
+    logged: &mut Option<Instant>,
+    t: &rigcat::Tuning,
+    what: &str,
+    why: Option<String>,
+) {
+    if *logged != Some(t.since) {
+        *logged = Some(t.since);
+        let after = t.since.elapsed().as_secs_f32();
+        let why = why.as_deref().unwrap_or("its message ended");
+        tracing::info!("transmit: {what} stopped after {after:.1} s: {why}");
+    }
+    link.tune_stop(why);
+}
+
 fn tx_sources(rig: Option<&RigStatus>, amp: &AmpStatus) -> String {
     let mut v = Vec::new();
     if let Some(r) = rig.filter(|r| r.connected) {
@@ -1875,10 +1916,19 @@ fn tx_sources(rig: Option<&RigStatus>, amp: &AmpStatus) -> String {
         if let Some(t) = r.tx_state.filter(|t| *t != 0) {
             v.push(format!("radio GI {t}"));
         }
+        // The SWR the TUNE stop judges (decision 78), while there is RF.
+        if !v.is_empty()
+            && let Some(swr) = r.swr_ratio()
+        {
+            v.push(format!("radio SWR {swr:.1}"));
+        }
     }
     if amp.connected {
         if amp.transmitting == Some(true) {
             v.push("amp TX light".into());
+        }
+        if !v.is_empty() && amp.atu.as_ref().is_some_and(|a| a.tuning) {
+            v.push("amp ATU tuning".into());
         }
         if let Some(a) = amp.readings {
             if a.drive_w >= 0.1 {
@@ -1993,6 +2043,22 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_transmit_line_carries_the_radios_swr_and_the_tuner() {
+        let mut r = RigStatus {
+            connected: true,
+            tx_state: Some(1),
+            swr: rigcat::elad::parse_swr("0 03.20"),
+            ..RigStatus::default()
+        };
+        let mut amp = AmpStatus { connected: true, ..AmpStatus::default() };
+        amp.atu = Some(hardrock::AtuReadout { tuning: true, ..Default::default() });
+        assert_eq!(tx_sources(Some(&r), &amp), "radio GI 1, radio SWR 3.2, amp ATU tuning");
+        // Receiving, neither says it is transmitting.
+        r.tx_state = None;
+        assert_eq!(tx_sources(Some(&r), &amp), "");
+    }
 
     #[test]
     fn a_first_run_warns_at_sdroxides_tune_limit() {

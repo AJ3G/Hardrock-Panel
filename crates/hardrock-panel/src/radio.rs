@@ -258,12 +258,27 @@ pub(crate) fn radio_window(
             .min_size([MIN_SCALE * (BODY_W + CASE_W) + DOCK_MARGIN, 240.0])
             .show(ctx, |ui| {
                 chrome::window_body_bg(ui);
-                // A window is as big as its contents measure: the face is
-                // centred in all the room it was dragged to, not shrunk round.
-                ui.set_min_size(ui.available_size());
-                fitted(ui, "radio-docked", |ui| {
+                // The face is centred in all the room the window was dragged
+                // to, not shrunk round, and drawn in a child that is not
+                // allocated in the window: only that room counts as the
+                // window's content size, which egui keeps the window at
+                // least as big as. Claiming the face's own size, a face a
+                // little bigger than the room (still at its old scale while
+                // the fit settles) kept the window from being dragged
+                // smaller again (AJ3G, 11 Nov 2026), as the TX window's
+                // columns did.
+                let area = ui.available_rect_before_wrap();
+                let area = egui::Rect::from_min_size(area.min, area.size().max(egui::Vec2::ZERO));
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(area)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                child.set_clip_rect(area.intersect(ui.clip_rect()));
+                fitted(&mut child, "radio-docked", |ui| {
                     radio_body(ui, false, st, &mut tune, &mut out, &mut prefs, &mut rui)
                 });
+                ui.advance_cursor_after_rect(area);
             });
     }
     ctx.data_mut(|d| {

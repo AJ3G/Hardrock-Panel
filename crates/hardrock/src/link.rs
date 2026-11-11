@@ -455,6 +455,10 @@ const FRESH: Duration = Duration::from_millis(100);
 /// change with the old one); after that the control shows what is read.
 const PENDING_HOLD: Duration = Duration::from_secs(1);
 
+/// The pause between cancelling a tune (`HRTU;`) and bypassing the tuner,
+/// so the tuner has let the tune go before it is told to bypass.
+const CANCEL_SETTLE: Duration = Duration::from_millis(100);
+
 /// Whether a status frame shows RF in the amplifier: keyed (its TX light),
 /// drive of 0.1 W or more, or output of 1 W or more. Interlocks #1 and #3
 /// refuse a relay switch when it does.
@@ -611,9 +615,18 @@ fn run<P: std::io::Read + std::io::Write>(
                     Err(e) => {
                         warn!("hardrock: {a:?}: {e}");
                         drop_pending(status, &mut sent, a);
+                        if let Some(why) = refused_words(a, false) {
+                            notify(status, why);
+                        }
                     }
-                    Ok(None) => drop_pending(status, &mut sent, a),
+                    Ok(None) => {
+                        drop_pending(status, &mut sent, a);
+                        if let Some(why) = refused_words(a, true) {
+                            notify(status, why);
+                        }
+                    }
                     Ok(Some(did)) => {
+                        set(status, |st| st.notice = None);
                         // The drawing follows the click at once rather than
                         // waiting for the relays: the amplifier answers a
                         // read straight after with the old state.
@@ -818,6 +831,23 @@ fn run<P: std::io::Read + std::io::Write>(
                 let asked = Instant::now();
                 if let Ok(Response::AtuActive(a)) = amp.query(&Command::GetAtuActive) {
                     set(status, |st| st.atu.get_or_insert_with(AtuReadout::default).active = a);
+                    // ON or BYP sent, its relays given time to settle, and
+                    // the tuner still reads the other way: say so.
+                    let stuck = sent.iter().find_map(|c| match c.action {
+                        AmpAction::SetAtu(on) if on != a && c.at + ATU_SETTLE <= asked => Some(on),
+                        _ => None,
+                    });
+                    if let Some(on) = stuck {
+                        warn!("hardrock: tuner {} asked, still reads otherwise", atu_word(on));
+                        notify(
+                            status,
+                            if on {
+                                "The tuner still reads bypassed after ON.".into()
+                            } else {
+                                "The tuner still reads in line after BYP.".into()
+                            },
+                        );
+                    }
                     let done: Vec<AmpAction> = sent
                         .iter()
                         .filter(|c| {
@@ -855,6 +885,42 @@ fn run<P: std::io::Read + std::io::Write>(
             next_atu = Instant::now() + ATU_POLL;
         }
     }
+}
+
+/// Show the operator why a click did nothing (see [`AmpStatus::notice`]).
+fn notify(status: &Mutex<AmpStatus>, why: String) {
+    set(status, |st| {
+        st.notice = Some(why);
+        st.notice_at = Some(Instant::now());
+    });
+}
+
+/// ON or BYP, as the tuner's key reads.
+fn atu_word(on: bool) -> &'static str {
+    if on { "ON" } else { "BYP" }
+}
+
+/// Why a click was refused, in words for the AMP window: `refused` when
+/// interlock #1 or #4 refused it, else when the amplifier didn't answer.
+/// `None` for clicks that need no word (TUNE, the temperature scale).
+fn refused_words(a: AmpAction, refused: bool) -> Option<String> {
+    let what = match a {
+        AmpAction::SetAtu(on) => format!("the tuner can't switch to {}", atu_word(on)),
+        AmpAction::SetAntenna(_) => "the antenna relay can't switch".into(),
+        AmpAction::SetBand(_) | AmpAction::BandUp | AmpAction::BandDown => {
+            "the band can't change".into()
+        }
+        AmpAction::SetPtt(true) if refused => {
+            return Some("Lower the drive first: it is over the amplifier's limit for PTT.".into());
+        }
+        AmpAction::SetPtt(_) if !refused => "PTT ON/OFF".into(),
+        _ => return None,
+    };
+    Some(if refused {
+        format!("Unkey first: {what} with RF on.")
+    } else {
+        format!("The amplifier didn't answer, so {what} wasn't sent. Try again.")
+    })
 }
 
 /// Stop showing `a`'s control as asked: done, refused or not read back.
@@ -970,7 +1036,20 @@ fn act<P: std::io::Read + std::io::Write>(
             None => Ok(()),
         },
         AmpAction::Tune => amp.send(&Command::Tune),
-        AmpAction::SetAtu(on) => amp.send(&Command::SetAtuActive(on)),
+        AmpAction::SetAtu(false) => {
+            // A tune still running, or armed and waiting for a carrier, keeps
+            // the tuner in line: AJ3G pressed BYP after a failed tune and it
+            // stayed in. HRTU cancels a tune in progress, but it is also the
+            // TUNE button and starts one, so it goes only when the tuner says
+            // it is tuning now; no answer, not sent.
+            if let Ok(Response::Tuning(true)) = amp.query(&Command::IsTuning) {
+                info!("hardrock: BYP while the tuner tunes: cancelling the tune first");
+                amp.send(&Command::Tune)?;
+                std::thread::sleep(CANCEL_SETTLE);
+            }
+            amp.send(&Command::SetAtuActive(false))
+        }
+        AmpAction::SetAtu(true) => amp.send(&Command::SetAtuActive(true)),
         AmpAction::SetCelsius(c) => {
             amp.send(&Command::SetTempScale(if c { TempScale::C } else { TempScale::F }))
         }
@@ -1030,6 +1109,10 @@ mod tests {
         band: u8,
         /// The antenna relay ignores its command.
         stuck: bool,
+        /// The tuner is tuning (`HRTT1`); `HRTU` starts or cancels a tune.
+        tuning: bool,
+        /// The tuner's relays ignore `HRTB`.
+        atu_stuck: bool,
         /// Nothing is answered at all.
         silent: bool,
     }
@@ -1050,6 +1133,8 @@ mod tests {
                 drive: 0,
                 band: 7,
                 stuck: false,
+                tuning: false,
+                atu_stuck: false,
                 silent: false,
             })))
         }
@@ -1079,7 +1164,7 @@ mod tests {
                 ),
                 "HRTP" => "HRTP75F;".into(),
                 "HRTB" => format!("HRTB{};", u8::from(self.atu)),
-                "HRTT" => "HRTT0;".into(),
+                "HRTT" => format!("HRTT{};", u8::from(self.tuning)),
                 "HRTMP" => "HRTM-L012-C034-H1-B5-S000-F145-;".into(),
                 "HRTR" => "HRTRS;".into(),
                 _ => return None,
@@ -1097,8 +1182,10 @@ mod tests {
                 c if c.starts_with("HRBN") && c.len() > 4 => {
                     self.band = c[4..].parse().unwrap_or(self.band)
                 }
-                "HRTB0" => self.atu = false,
-                "HRTB1" => self.atu = true,
+                // A tune in progress keeps the tuner in line.
+                "HRTB0" if !self.atu_stuck && !self.tuning => self.atu = false,
+                "HRTB1" if !self.atu_stuck => self.atu = true,
+                "HRTU" => self.tuning = !self.tuning,
                 _ => {}
             }
             if let Some(a) = self.answer(cmd) {
@@ -1343,6 +1430,66 @@ mod tests {
         let mut amp = Amp::new(port.clone()).with_timeout(Duration::from_millis(100));
         act(&mut amp, AmpAction::SetPtt(false), None, &l, None).unwrap();
         assert_eq!(log(&port), ["HRMD0"]);
+    }
+
+    #[test]
+    fn bypass_cancels_a_tune_the_tuner_reports_and_never_starts_one() {
+        let l = crate::types::AmpModel::Hr500.limits();
+        let run = |tuning: bool, skip: fn(&str, u32) -> bool| {
+            let port = SimPort::new(Duration::from_millis(5), skip);
+            port.sim().atu = true;
+            port.sim().tuning = tuning;
+            let mut amp = Amp::new(port.clone()).with_timeout(Duration::from_millis(100));
+            let r = act(&mut amp, AmpAction::SetAtu(false), None, &l, None).unwrap();
+            let sent = log(&port);
+            let sim = port.sim();
+            (r, sent, sim.atu, sim.tuning)
+        };
+        // Tuning (a failed tune left armed): HRTU cancels it, then HRTB0.
+        let (r, sent, atu, tuning) = run(true, answers_all);
+        assert_eq!(r, Some(AmpAction::SetAtu(false)));
+        assert_eq!(sent, ["HRST", "HRTT", "HRTU", "HRTB0"]);
+        assert!(!atu && !tuning);
+        // Not tuning: HRTU would start a tune, so it isn't sent.
+        let (_, sent, atu, tuning) = run(false, answers_all);
+        assert_eq!(sent, ["HRST", "HRTT", "HRTB0"]);
+        assert!(!atu && !tuning);
+        // No answer to HRTT: not sent either.
+        let (_, sent, _, tuning) = run(true, |c, _| c == "HRTT");
+        assert_eq!(sent, ["HRST", "HRTT", "HRTB0"]);
+        assert!(tuning);
+        // ON never reads the tuning state.
+        let port = SimPort::new(Duration::from_millis(5), answers_all);
+        let mut amp = Amp::new(port.clone()).with_timeout(Duration::from_millis(100));
+        act(&mut amp, AmpAction::SetAtu(true), None, &l, None).unwrap();
+        assert_eq!(log(&port), ["HRST", "HRTB1"]);
+    }
+
+    #[test]
+    fn a_refused_or_unconfirmed_tuner_click_says_why() {
+        let port = SimPort::new(Duration::from_millis(10), answers_all);
+        port.sim().atu = true;
+        let link = SimLink::start(port.clone());
+        assert!(wait_for(&link, |s| s.atu.as_ref().is_some_and(|a| a.active)));
+        // SAFETY INTERLOCK #1: RF on, BYP refused; the window says why and
+        // the tuner still shows in line.
+        port.sim().fwd = 100;
+        assert!(wait_for(&link, |s| s.readings.unwrap().fwd_w > 50.0));
+        link.action(AmpAction::SetAtu(false));
+        assert!(wait_for(&link, |s| s.notice.is_some()));
+        let st = link.status();
+        assert!(st.notice.as_deref().unwrap().starts_with("Unkey first"), "{:?}", st.notice);
+        assert!(st.notice_at.is_some());
+        assert!(st.atu.unwrap().active);
+        assert!(!log(&port).iter().any(|c| c == "HRTB0"));
+        // No RF, but the relays don't follow: read back and said.
+        port.sim().fwd = 0;
+        port.sim().atu_stuck = true;
+        assert!(wait_for(&link, |s| s.readings.unwrap().fwd_w < 1.0));
+        link.action(AmpAction::SetAtu(false));
+        assert!(wait_for(&link, |s| s.notice.as_deref().is_some_and(|n| n.contains("still"))));
+        assert!(log(&port).iter().any(|c| c == "HRTB0"));
+        assert!(wait_for(&link, |s| s.pending.is_empty() && s.atu.as_ref().unwrap().active));
     }
 
     /// Wait until `f` holds of the link's status, or a few seconds.
