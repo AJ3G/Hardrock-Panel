@@ -1032,7 +1032,13 @@ impl Scope {
         if !v.zoomed(span) || main_bin * 1.5 < v.width() / px.max(1.0) as f64 {
             return None;
         }
-        let width = v.width() * 1.5;
+        // Decimated no further than ZOOM_MIN_RATE: below it even the
+        // smallest FFT the analyser takes spans seconds of samples, and a
+        // view zoomed in to WSPR's 200 Hz crawled and smeared (AJ3G, 11 Nov
+        // 2026). The zoomed band is then wider than the view, which shows
+        // part of it. (The decimation follows from the width, here and in
+        // the pipelines both.)
+        let width = (v.width() * 1.5).max(ZOOM_MIN_RATE * sdr::zoom::USABLE);
         let factor = sdr::zoom_factor(span.width, width);
         if factor < 2 {
             return None;
@@ -1045,6 +1051,11 @@ impl Scope {
         Some(ZoomRequest { center_hz: center, width_hz: width, fft_size })
     }
 }
+
+/// The lowest rate the zoom FFT is decimated to, samples a second: at it a
+/// 4096-point FFT holds one second, so the zoomed trace keeps up with the
+/// band.
+const ZOOM_MIN_RATE: f64 = 4096.0;
 
 /// The share of the I/Q rate the scope shows and tunes in. ELAD's own driver
 /// gives each of the DUO's rates a bandwidth of 0.8 of it (153.6 kHz at 192k,

@@ -278,12 +278,20 @@ impl FreqMap {
 /// The zoom FFT's size for a view `view_w` Hz across `px` pixels when the
 /// zoomed band runs at `rate`: about two bins a pixel, but never finer than
 /// `min_bin` Hz and never more than a second of samples (or the display
-/// would lag the band), between 4096 and 262 144 points.
+/// would lag the band), between 2048 (the analyser's smallest) and 262 144 points.
+///
+/// The second is a hard limit. It used to give way to a 4096-point floor,
+/// so a view zoomed in to a few hundred Hz (WSPR's 200 Hz) ran at a zoomed
+/// rate of a few hundred samples a second and each FFT took 6 to 15 s of
+/// them: the trace crawled and smeared like persistence (AJ3G, 11 Nov
+/// 2026).
 pub fn zoom_fft_size(rate: f64, view_w: f64, px: f32, min_bin: f64) -> usize {
     let want_bin = (view_w / (2.0 * px.max(1.0) as f64)).max(min_bin);
     let n = (rate / want_bin).max(1.0) as usize;
-    let n = n.next_power_of_two().min((rate.max(1.0) as usize).next_power_of_two());
-    n.clamp(4096, 262_144)
+    // The largest power of two within a second of samples.
+    let second = rate.max(2048.0) as usize;
+    let cap = if second.is_power_of_two() { second } else { second.next_power_of_two() / 2 };
+    n.next_power_of_two().min(cap).clamp(2048, 262_144)
 }
 
 #[cfg(test)]
@@ -520,8 +528,12 @@ mod tests {
         // 6 kHz over 1000 px at 12 kHz: 3 Hz bins wanted, 4096 points.
         assert_eq!(zoom_fft_size(12_000.0, 6000.0, 1000.0, 0.1), 4096);
         // 1.5 kHz across 2000 px of a 3 kHz band wants 0.375 Hz bins, but a
-        // second of samples is 4096 points.
-        assert_eq!(zoom_fft_size(3000.0, 1500.0, 2000.0, 0.1), 4096);
+        // second of samples holds 2048 points.
+        assert_eq!(zoom_fft_size(3000.0, 1500.0, 2000.0, 0.1), 2048);
+        // WSPR's 200 Hz zoomed in, at the lowest zoomed rate: no FFT spans
+        // more than a second of samples.
+        let n = zoom_fft_size(4096.0, 300.0, 1600.0, 0.05);
+        assert!(n as f64 / 4096.0 <= 1.0, "{n} points at 4096 Hz");
         assert_eq!(zoom_fft_size(96_000.0, 40_000.0, 2000.0, 0.1), 16_384);
         // Never finer than asked.
         assert_eq!(zoom_fft_size(96_000.0, 40_000.0, 2000.0, 20.0), 8192);
