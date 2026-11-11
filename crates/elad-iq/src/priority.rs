@@ -7,6 +7,12 @@
 //! it starts. Elsewhere the scheduler is left alone: raising a thread above
 //! normal needs privileges there (`CAP_SYS_NICE` or real-time limits), and
 //! both threads spend most of their time blocked anyway.
+//!
+//! The other way, the wide skimmer's decoders are lowered
+//! ([`lower_current_thread`]) so a slot's worth of them decoding at once
+//! never takes the CPU from the I/Q path, the receiver's own decoder or the
+//! UI (AJ3G, 11 Nov 2026: at 6144 kHz everything froze for a moment every
+//! slot). Lowering needs no privileges, so it is done on Linux too.
 
 /// How far above normal a thread is raised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,12 +32,19 @@ pub fn raise_current_thread(p: Priority) -> bool {
     imp::raise(p)
 }
 
+/// Lower the calling thread below normal, for background work that may wait
+/// (Windows' below-normal; nice 10 on Linux). Returns whether the system
+/// accepted it; `false` where there is no way to.
+pub fn lower_current_thread() -> bool {
+    imp::lower()
+}
+
 #[cfg(windows)]
 mod imp {
     use super::Priority;
     use windows_sys::Win32::System::Threading::{
-        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_HIGHEST,
-        THREAD_PRIORITY_TIME_CRITICAL,
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+        THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_HIGHEST, THREAD_PRIORITY_TIME_CRITICAL,
     };
 
     pub(super) fn raise(p: Priority) -> bool {
@@ -44,6 +57,11 @@ mod imp {
         // that needs no closing, and SetThreadPriority only reads it.
         unsafe { SetThreadPriority(GetCurrentThread(), level) != 0 }
     }
+
+    pub(super) fn lower() -> bool {
+        // SAFETY: as above.
+        unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) != 0 }
+    }
 }
 
 #[cfg(not(windows))]
@@ -51,6 +69,21 @@ mod imp {
     use super::Priority;
 
     pub(super) fn raise(_: Priority) -> bool {
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn lower() -> bool {
+        unsafe extern "C" {
+            fn nice(inc: std::ffi::c_int) -> std::ffi::c_int;
+        }
+        // SAFETY: nice takes a plain int and touches nothing of ours. On
+        // Linux it sets the calling thread's own niceness, not the process's.
+        unsafe { nice(10) != -1 }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(super) fn lower() -> bool {
         false
     }
 }
@@ -63,5 +96,11 @@ mod tests {
     fn raising_a_thread_never_fails_loudly() {
         let ok = std::thread::spawn(|| raise_current_thread(Priority::AboveNormal)).join().unwrap();
         assert_eq!(ok, cfg!(windows));
+    }
+
+    #[test]
+    fn lowering_a_thread_works_where_it_can() {
+        let ok = std::thread::spawn(lower_current_thread).join().unwrap();
+        assert_eq!(ok, cfg!(any(windows, target_os = "linux")));
     }
 }

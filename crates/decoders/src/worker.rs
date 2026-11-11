@@ -95,12 +95,22 @@ pub struct WsjtConfig {
     /// too little of its signals was heard. One second keeps every station
     /// starting on time; MSK144's pings come any time, so it takes any slot.
     pub max_late_s: f64,
+    /// A wide skimmer's decoder (decision 110): its threads below normal
+    /// priority, and its slots decoded a few at a time on their own pool
+    /// ([`crate::background`]). The receiver's own decoder is not.
+    pub background: bool,
 }
 
 impl WsjtConfig {
     pub fn new(mode: WsjtMode) -> Self {
         let max_late_s = if mode == WsjtMode::Msk144 { mode.period_s() } else { 1.0 };
-        WsjtConfig { mode, input_rate: sdr::AUDIO_RATE, my_calls: Vec::new(), max_late_s }
+        WsjtConfig {
+            mode,
+            input_rate: sdr::AUDIO_RATE,
+            my_calls: Vec::new(),
+            max_late_s,
+            background: false,
+        }
     }
 
     /// The UTC start of the first slot the decoder takes whole when its audio
@@ -173,11 +183,15 @@ impl WsjtDecoder {
         let mode = cfg.mode;
         let in_rate = cfg.input_rate;
         let max_late = cfg.max_late_s;
+        let background = cfg.background;
 
         feed.threads.push(
             std::thread::Builder::new()
                 .name(format!("wsjt-{}-slots", mode.label()))
                 .spawn(move || {
+                    if background {
+                        crate::background::lower_current_thread();
+                    }
                     let mut rec = SlotRecorder::new(wsjt::RATE, mode.period_s());
                     if let Some(cut) = mode.decode_at_s() {
                         // WSPR: decoded once its transmissions have ended.
@@ -249,6 +263,9 @@ impl WsjtDecoder {
             std::thread::Builder::new()
                 .name(format!("wsjt-{}-decode", mode.label()))
                 .spawn(move || {
+                    if background {
+                        crate::background::lower_current_thread();
+                    }
                     let mut session = WsjtSession::new();
                     session.seed(&calls.iter().map(String::as_str).collect::<Vec<_>>());
                     let mut live: Option<Msk144Live> = None;
@@ -309,6 +326,9 @@ impl WsjtDecoder {
                                         l.finish(&mut session);
                                         l.decodes().to_vec()
                                     }
+                                    _ if background => crate::background::decode(|| {
+                                        wsjt::decode_slot(mode, &s.audio, slot_utc, &mut session)
+                                    }),
                                     _ => wsjt::decode_slot(mode, &s.audio, slot_utc, &mut session),
                                 };
                                 (slot_utc, decodes, false)
