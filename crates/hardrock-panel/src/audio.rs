@@ -45,13 +45,44 @@ pub(crate) fn radio_device(names: &[String]) -> Option<String> {
         .cloned()
 }
 
-/// The last stretch of audio sent to the radio: what the scope draws of our
-/// own transmission while the radio is keyed (decision 74).
+/// Audio sent to the radio, every sample of it in order: what the scope's
+/// TX monitor analyses while the radio is keyed (decision 83).
 pub(crate) use crate::scope::txsig::TxAudio;
 
-/// The rate [`Tone::recent`] renders the tone at: its spectrum is one line
-/// whatever the output's rate.
-const TONE_VIEW_RATE: u32 = 48_000;
+/// How much a [`Tap`] holds between two reads, seconds: a repaint that comes
+/// later than this loses the oldest samples, never the newest.
+const TAP_SECS: f64 = 1.0;
+
+/// Every sample an output stream sends, as it sends it: the output callback
+/// pushes each one (never waiting; a full ring drops it), and the scope's
+/// repaint takes what came since its last read ([`Tap::take`]).
+struct Tap {
+    rate: u32,
+    rx: std::sync::Mutex<rtrb::Consumer<f32>>,
+}
+
+impl Tap {
+    /// A tap for a stream at `rate`, and the end its callback pushes to.
+    fn new(rate: u32) -> (Tap, rtrb::Producer<f32>) {
+        let (tx, rx) = rtrb::RingBuffer::new((rate as f64 * TAP_SECS).max(1024.0) as usize);
+        (Tap { rate, rx: std::sync::Mutex::new(rx) }, tx)
+    }
+
+    /// The samples sent since the last read, oldest first: all of them, or
+    /// the newest `max` when more came.
+    fn take(&self, max: usize) -> TxAudio {
+        let mut rx = self.rx.lock().unwrap_or_else(|e| e.into_inner());
+        let n = rx.slots();
+        let mut samples = Vec::with_capacity(n.min(max));
+        if let Ok(chunk) = rx.read_chunk(n) {
+            let (a, b) = chunk.as_slices();
+            let skip = n.saturating_sub(max);
+            samples.extend(a.iter().chain(b).skip(skip));
+            chunk.commit_all();
+        }
+        TxAudio { rate: self.rate, samples }
+    }
+}
 
 /// A tone playing, or ready to.
 #[derive(Default)]
@@ -61,6 +92,8 @@ pub(crate) struct Tone {
     level: Arc<AtomicU32>,
     /// The device it plays on.
     device: Option<String>,
+    /// What it has sent, for the scope.
+    tap: Option<Tap>,
 }
 
 impl Tone {
@@ -72,15 +105,12 @@ impl Tone {
         self.level.store(g.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
-    /// The last `n` samples of the tone as it plays, at its level: the same
-    /// sine the output callback makes, for the scope (decision 74). `None`
-    /// while it is not playing.
-    pub(crate) fn recent(&self, n: usize) -> Option<TxAudio> {
+    /// The samples of the tone sent to the radio since the last call (at
+    /// most the newest `max`), exactly as the output callback made them, for
+    /// the scope's TX monitor (decision 83). `None` while it is not playing.
+    pub(crate) fn recent(&self, max: usize) -> Option<TxAudio> {
         self.stream.as_ref()?;
-        let g = f32::from_bits(self.level.load(Ordering::Relaxed));
-        let inc = std::f32::consts::TAU * TONE_HZ / TONE_VIEW_RATE as f32;
-        let samples = (0..n).map(|i| (i as f32 * inc).cos() * g).collect();
-        Some(TxAudio { rate: TONE_VIEW_RATE, samples })
+        Some(self.tap.as_ref()?.take(max))
     }
 
     /// Start the tone on the output named `name`, at amplitude `gain`.
@@ -101,11 +131,13 @@ impl Tone {
         let supported = device.default_output_config().map_err(|e| e.to_string())?;
         let fmt = supported.sample_format();
         let config = supported.config();
+        let (tap, push) = Tap::new(config.sample_rate);
+        let lv = self.level.clone();
         let stream = match fmt {
-            SampleFormat::F32 => build::<f32>(&device, config, self.level.clone()),
-            SampleFormat::I16 => build::<i16>(&device, config, self.level.clone()),
-            SampleFormat::I32 => build::<i32>(&device, config, self.level.clone()),
-            SampleFormat::U16 => build::<u16>(&device, config, self.level.clone()),
+            SampleFormat::F32 => build::<f32>(&device, config, lv, push),
+            SampleFormat::I16 => build::<i16>(&device, config, lv, push),
+            SampleFormat::I32 => build::<i32>(&device, config, lv, push),
+            SampleFormat::U16 => build::<u16>(&device, config, lv, push),
             other => {
                 return Err(format!("\"{name}\" wants {other:?} samples, which aren't supported"));
             }
@@ -113,6 +145,7 @@ impl Tone {
         stream.play().map_err(|e| e.to_string())?;
         self.stream = Some(stream);
         self.device = Some(name.to_string());
+        self.tap = Some(tap);
         Ok(())
     }
 
@@ -120,6 +153,7 @@ impl Tone {
         self.set_gain(0.0);
         self.stream = None;
         self.device = None;
+        self.tap = None;
     }
 }
 
@@ -127,6 +161,7 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
     level: Arc<AtomicU32>,
+    mut tap: rtrb::Producer<f32>,
 ) -> Result<cpal::Stream, String> {
     let rate = config.sample_rate as f32;
     let channels = config.channels.max(1) as usize;
@@ -140,7 +175,9 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
                 let want = f32::from_bits(level.load(Ordering::Relaxed));
                 for frame in data.chunks_mut(channels) {
                     now += (want - now).clamp(-step, step);
-                    let v = (phase.cos() * now).to_sample::<T>();
+                    let s = phase.cos() * now;
+                    let _ = tap.push(s);
+                    let v = s.to_sample::<T>();
                     phase += inc;
                     if phase > std::f32::consts::TAU {
                         phase -= std::f32::consts::TAU;
@@ -168,9 +205,8 @@ pub(crate) struct Player {
     /// Silence before the message, then its length, in samples.
     lead: usize,
     len: usize,
-    /// The message's samples and the output's rate, for [`Player::recent`].
-    buf: Option<Arc<Vec<f32>>>,
-    rate: u32,
+    /// What it has sent, silence and message alike, for the scope.
+    tap: Option<Tap>,
 }
 
 impl Player {
@@ -187,15 +223,13 @@ impl Player {
         self.level.store(g.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
-    /// The last `n` samples of the message that have gone to the output, at
-    /// their level, for the scope (decision 74): `None` before the message
-    /// starts and once it has ended.
-    pub(crate) fn recent(&self, n: usize) -> Option<TxAudio> {
-        let buf = self.buf.as_ref().filter(|_| self.stream.is_some())?;
-        let g = f32::from_bits(self.level.load(Ordering::Relaxed));
-        let at = played(self.pos.load(Ordering::Relaxed), self.lead, buf.len())?;
-        let samples = buf[at.saturating_sub(n)..at].iter().map(|v| v * g).collect();
-        Some(TxAudio { rate: self.rate, samples })
+    /// The samples that have gone to the output since the last call (at
+    /// most the newest `max`), at their level, the silence before the
+    /// message included, for the scope's TX monitor (decision 83): `None`
+    /// while nothing plays.
+    pub(crate) fn recent(&self, max: usize) -> Option<TxAudio> {
+        self.stream.as_ref()?;
+        Some(self.tap.as_ref()?.take(max))
     }
 
     /// Play on the output `name` at amplitude `gain`: `render` makes the
@@ -236,14 +270,15 @@ impl Player {
         self.len = samples.len();
         self.pos.store(0, Ordering::Relaxed);
         let buf = Arc::new(samples);
-        self.buf = Some(buf.clone());
-        self.rate = rate;
+        let (tap, push) = Tap::new(rate);
+        self.tap = Some(tap);
         let (lv, pos) = (self.level.clone(), self.pos.clone());
+        let at = (buf, lead, push);
         let stream = match fmt {
-            SampleFormat::F32 => build_buf::<f32>(&device, config, lv, pos, buf, lead),
-            SampleFormat::I16 => build_buf::<i16>(&device, config, lv, pos, buf, lead),
-            SampleFormat::I32 => build_buf::<i32>(&device, config, lv, pos, buf, lead),
-            SampleFormat::U16 => build_buf::<u16>(&device, config, lv, pos, buf, lead),
+            SampleFormat::F32 => build_buf::<f32>(&device, config, lv, pos, at),
+            SampleFormat::I16 => build_buf::<i16>(&device, config, lv, pos, at),
+            SampleFormat::I32 => build_buf::<i32>(&device, config, lv, pos, at),
+            SampleFormat::U16 => build_buf::<u16>(&device, config, lv, pos, at),
             other => {
                 return Err(format!("\"{name}\" wants {other:?} samples, which aren't supported"));
             }
@@ -256,15 +291,8 @@ impl Player {
     pub(crate) fn stop(&mut self) {
         self.set_gain(0.0);
         self.stream = None;
-        self.buf = None;
+        self.tap = None;
     }
-}
-
-/// How much of a message `len` samples long has played at output position
-/// `pos` after `lead` samples of silence: `None` before it starts and after
-/// it ends.
-fn played(pos: usize, lead: usize, len: usize) -> Option<usize> {
-    pos.checked_sub(lead).filter(|&at| at > 0 && at <= len)
 }
 
 fn build_buf<T: cpal::SizedSample + cpal::FromSample<f32>>(
@@ -272,8 +300,7 @@ fn build_buf<T: cpal::SizedSample + cpal::FromSample<f32>>(
     config: cpal::StreamConfig,
     level: Arc<AtomicU32>,
     pos: Arc<std::sync::atomic::AtomicUsize>,
-    buf: Arc<Vec<f32>>,
-    lead: usize,
+    (buf, lead, mut tap): (Arc<Vec<f32>>, usize, rtrb::Producer<f32>),
 ) -> Result<cpal::Stream, String> {
     let channels = config.channels.max(1) as usize;
     device
@@ -284,7 +311,9 @@ fn build_buf<T: cpal::SizedSample + cpal::FromSample<f32>>(
                 let mut p = pos.load(Ordering::Relaxed);
                 for frame in data.chunks_mut(channels) {
                     let v = p.checked_sub(lead).and_then(|i| buf.get(i)).copied().unwrap_or(0.0);
-                    let v = (v * g).to_sample::<T>();
+                    let s = v * g;
+                    let _ = tap.push(s);
+                    let v = s.to_sample::<T>();
                     for x in frame.iter_mut() {
                         *x = v;
                     }
@@ -311,12 +340,25 @@ mod tests {
     }
 
     #[test]
-    fn what_has_played_is_counted_from_the_message_start() {
-        assert_eq!(played(100, 480, 1000), None);
-        assert_eq!(played(480, 480, 1000), None);
-        assert_eq!(played(500, 480, 1000), Some(20));
-        assert_eq!(played(1480, 480, 1000), Some(1000));
-        assert_eq!(played(1481, 480, 1000), None);
+    fn the_tap_gives_every_sample_once_in_order_and_keeps_the_newest() {
+        let (tap, mut push) = Tap::new(48_000);
+        for i in 0..10 {
+            push.push(i as f32).unwrap();
+        }
+        let a = tap.take(100);
+        assert_eq!((a.rate, a.samples), (48_000, (0..10).map(|i| i as f32).collect::<Vec<_>>()));
+        assert!(tap.take(100).samples.is_empty(), "nothing twice");
+        for i in 10..20 {
+            push.push(i as f32).unwrap();
+        }
+        assert_eq!(tap.take(4).samples, vec![16.0, 17.0, 18.0, 19.0]);
+        // A full ring drops what comes, never blocks the audio thread.
+        let n = (48_000.0 * TAP_SECS) as usize;
+        for _ in 0..n {
+            push.push(1.0).unwrap();
+        }
+        assert!(push.push(2.0).is_err());
+        assert_eq!(tap.take(usize::MAX).samples.len(), n);
     }
 
     #[test]

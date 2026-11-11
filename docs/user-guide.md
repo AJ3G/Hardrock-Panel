@@ -383,6 +383,12 @@ the 3D FFT), the band plan and the waterfall from the radio's I/Q, with the
 panel's own receiver in it. **POP OUT** puts it in a window of its own; **DOCK**
 brings it back over the panel.
 
+**The noise floor** (*Noise floor* in the scope's settings) is a bold dashed
+line across the spectrum at the band's median level, its reading (*NF … dBm/bin
+· RBW …*) at the right edge on a dark box so it stays legible over the trace.
+While you transmit, the I/Q line names what is on the air: *Transmitting: FT8
+over from the panel*, *WSPR beacon*, *TX TUNE* or *RIG TUNE*, in the TX colour.
+
 **The line under the scope** says how it is keeping up: *DSP %* is the share
 of one CPU core the panel's receiver (filtering and demodulation) takes, and
 moves with SPAN, not with the FFT's resolution. *FFT %* is the CPU spectrum's
@@ -531,13 +537,20 @@ band plan and the data-mode keys are locked, VFO A and B and split are left
 alone, and the top bar says so. Zoom, markers and the display still work.
 
 While the radio transmits the scope does not show what the receiver gives
-(the radio's I/Q is silent or flooded by its own transmitter then). The
-waterfall and trace keep moving, showing the band as it was last received,
-dimmed, and your own signal in the TX colour (magenta) where it lands: the
-audio the panel is sending (a TX window over, or TX TUNE's tone) placed from
-the transmit dial (VFO B in split), above it on USB and below on LSB. RIG
-TUNE's carrier is drawn at the dial. When another program keys the radio
-only the dimmed band shows. The top bar reads *IQ · TX · RX DIMMED*. A third
+(the radio's I/Q is silent or flooded by its own transmitter then). It shows
+the **TX monitor** instead: every sample of the audio the panel is sending (a
+TX window over, or TX TUNE's tone; RIG TUNE as a carrier at the dial),
+analysed as it goes out at the scope's own frame rate and averaging, and
+placed where it lands from the transmit dial (VFO B in split), above it on
+USB and below on LSB. The trace (in the TX colour, orange), the waterfall,
+the 3D view and the zoom all keep moving with only your own signal in them;
+the rest of the span sits at the band's noise floor as last received, and
+full-scale audio sits 30 dB under the top of the dB scale. The top bar reads
+*IQ · TX MONITOR*, and the trace's foot says what is on the air (*FT8 over*,
+*WSPR beacon*, *TX TUNE*, *RIG TUNE*). When another program keys the radio
+the panel doesn't know what it sends, so the band as last received scrolls on
+dimmed and the top bar reads *IQ · TX · RX DIMMED*. FIT doesn't follow the
+display while you transmit. A third
 of a second after the radio says it has stopped, the scope starts again from
 what the receiver hears, with the
 averages and peak hold started afresh, so nothing of your own transmission
@@ -669,7 +682,7 @@ For the WSJT modes:
   callsign at its frequency: a box beside the signal at the top of the
   waterfall and the call standing up the foot of the spectrum. A station
   calling CQ is in blue. The labels are the newest slot's, and fade over the
-  next two. Point at one for its message, SNR and AF; click it to pick its
+  next two; in WSPR each new decode cycle's labels replace the last cycle's. Point at one for its message, SNR and AF; click it to pick its
   line here. **SKIM WIDE** (FT8 and FT4) also decodes both FT8 and FT4 on
   every other dial of theirs inside the I/Q span, up to eight of each: at
   192 kHz on 20 m, FT4 on 14.080 while you run FT8 on 14.074 (or FT8 while
@@ -771,7 +784,7 @@ it is on another mode). Use a dummy load for your first overs.
 - **LEVEL** is each mode's drive, a share of the radio's power setting, as
   the Tune slider is; beside it, the drive that gives (*≈ 2.5 W*, or *— W*
   until the radio's power setting has been read).
-- The slot bar is cyan while you listen and magenta while you transmit, with
+- The slot bar is cyan while you listen and orange while you transmit, with
   a mark where the over ends. **DT** is your clock against the stations you
   hear; past 0.5 s it turns amber, and Windows' time wants syncing.
 - The window sizes freely: drag its corner either way. The decode list and
@@ -810,7 +823,7 @@ QSO queues it first. Click a queued call to drop it.
   only the country is known), and badges from your log: **DXCC**, **BAND**,
   **GRID**, **NEW**, **DUPE** (dupes fade). A station calling you has a blue
   band, ▶ and bold text, at the top of its turn; a CQ you can answer is green
-  (a directed CQ only when it includes you); your own overs are magenta.
+  (a directed CQ only when it includes you); your own overs are orange.
 - **TX audio and the scope's bar.** While TX is open the red offset bar on
   SCOPE is where you transmit. **AUTO** picks the clearest gap in your own
   slots before each over and shades the busy parts faintly; **MANUAL** follows
@@ -913,19 +926,19 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
 - **WSPR HEARD ME** (off to start) asks wspr.live every five minutes who
   heard your WSPR beacon in the last hour (WSPRnet if wspr.live doesn't
   answer); only your callsign is sent. Stations that heard you are a hollow
-  magenta ring with a dashed magenta path and → in HEARD, naming where the
+  orange ring with a dashed orange path and → in HEARD, naming where the
   report came from; stations you heard are a filled dot, a solid path and ←.
   A station can be both.
 - **The FT8 strobe.** While the TX window works a station, GLOBE picks it and
-  a pulse runs along its path: magenta out from you while you transmit, green
+  a pulse runs along its path: orange out from you while you transmit, green
   back to you otherwise.
 - **Paths** are translucent arcs rising over the Earth, higher the longer the
   path, from your station to the station's dot. Behind the globe they are
   drawn faint, so turn the globe (right over a pole if you like) and the arc
   follows. On the flat map a path that runs off one edge and on at the other
   has a small ring at each side. A station heard both ways is one dot with
-  the magenta ring round it, at its most precise grid, and one path with a
-  magenta glow.
+  the orange ring round it, at its most precise grid, and one path with a
+  orange glow.
 - **SHOW.** **I HEARD** shows the stations you decoded, **HEARD ME** those
   that heard you (PSK Reporter, WSPR HEARD ME; turn those SOURCES on), and
   **BOTH** all of them. **FT8 ONLY** (or whichever mode) shows only the mode

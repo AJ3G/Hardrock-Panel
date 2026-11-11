@@ -128,12 +128,18 @@ pub fn age_slots(utc: f64, now: f64, period: f64) -> u32 {
 
 /// The labels to show at `now`: the newest decode of each station (on each
 /// dial), with its opacity; stations last heard more than
-/// [`SLOTS_SHOWN`] slots ago are left out.
+/// [`SLOTS_SHOWN`] slots ago are left out. WSPR's are the newest decode
+/// cycle's only: each cycle's labels clear the last's, as WSPR's two-minute
+/// slots make three of them a crowd of old news (AJ3G, 11 Nov 2026).
 pub fn labels(feed: &SkimFeed, now: f64) -> Vec<(SkimSpot, f32)> {
+    let wspr = |s: &SkimSpot| s.key.is_none() && s.wsjt == Some(WsjtMode::Wspr);
+    let newest_wspr =
+        feed.spots.iter().filter(|s| wspr(s)).map(|s| s.utc).fold(f64::NEG_INFINITY, f64::max);
     let mut out: Vec<(SkimSpot, f32)> = Vec::new();
     for s in &feed.spots {
         let a = match s.key {
             Some(k) => key_alpha(k.mode, s.utc, k.active, now),
+            None if wspr(s) && s.utc < newest_wspr => None,
             // By its own mode's slots: SKIM WIDE's FT8 beside FT4 fades
             // as FT8 does.
             None => alpha(age_slots(s.utc, now, s.wsjt.map_or(feed.period_s, |m| m.period_s()))),
@@ -304,6 +310,33 @@ mod tests {
         };
         assert_eq!(labels(&feed, 46.0).len(), 2);
         assert!(feed.spots[0].cq());
+    }
+
+    #[test]
+    fn each_wspr_cycle_clears_the_last_ones_labels_but_ft8_fades_over_three() {
+        let w =
+            |call: &str, utc: f64| SkimSpot { wsjt: Some(WsjtMode::Wspr), ..spot(call, utc, 1.0) };
+        let feed = SkimFeed {
+            period_s: 120.0,
+            spots: vec![w("K1ABC", 240.0), w("W9XYZ", 240.0), w("G4ABC", 120.0), w("K1ABC", 0.0)],
+            ..Default::default()
+        };
+        // Decoded at about 362 s: the 240 s cycle alone, at full strength.
+        let l = labels(&feed, 362.0);
+        let mut calls: Vec<&str> = l.iter().map(|(s, _)| s.call.as_str()).collect();
+        calls.sort();
+        assert_eq!(calls, ["K1ABC", "W9XYZ"]);
+        assert!(l.iter().all(|(s, a)| s.utc == 240.0 && *a == 1.0));
+        // A cycle with nothing decoded leaves the last one to fade as before.
+        assert_eq!(labels(&feed, 482.0).len(), 2);
+        // FT8 in the same feed (SKIM WIDE) keeps its three-slot fade.
+        let mut f = feed.clone();
+        f.spots.push(spot("DL1AA", 330.0, 2.0));
+        f.spots.push(spot("DL1AA", 300.0, 2.0));
+        f.spots.push(spot("F5XX", 315.0, 3.0));
+        let l = labels(&f, 362.0);
+        assert!(l.iter().any(|(s, a)| s.call == "F5XX" && *a == alpha(2).unwrap()));
+        assert!(l.iter().any(|(s, a)| s.call == "DL1AA" && *a == alpha(1).unwrap()));
     }
 
     #[test]

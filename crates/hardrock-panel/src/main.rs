@@ -915,12 +915,16 @@ impl App {
 
     fn scope_window(&mut self, ctx: &egui::Context, rig: Option<&RigStatus>, transmitting: bool) {
         let mut open = true;
-        let tx_why = transmitting.then(|| tx_why(rig, &self.status()));
-        // What the panel is sending, for the scope to draw over an over
-        // (decision 74): the TX window's over, else TX TUNE's tone.
-        let sending =
-            self.tx.sounding(scope::TX_WINDOW).or_else(|| self.tone.recent(scope::TX_WINDOW));
-        self.scope.set_tx_signal(rig.and_then(|r| scope::TxSignal::from_rig(r, sending)));
+        // What the TX window has on the air, by name (decision 83).
+        let over = self.tx.over_mode().map(|m| match m {
+            tx::TxMode::Ft8 => "FT8 over",
+            tx::TxMode::Wspr => "WSPR beacon",
+        });
+        let tx_why = transmitting.then(|| tx_why(rig, &self.status(), over));
+        // Every sample the panel sent since the last frame, for the scope's
+        // TX monitor (decision 83): the TX window's over, else TX TUNE's tone.
+        let sending = self.tx.sounding(scope::TX_TAP).or_else(|| self.tone.recent(scope::TX_TAP));
+        self.scope.set_tx_signal(rig.and_then(|r| scope::TxSignal::from_rig(r, sending, over)));
         let srig = scope::ScopeRig {
             rx_hz: self.rx.rx_hz,
             mode: self.rx.mode,
@@ -1821,7 +1825,11 @@ fn passband_for(m: sdr::Mode, width: u32) -> (f32, f32) {
 
 /// The amplifier says it is keyed, or shows RF (as interlocks 1 and 2).
 /// Why the panel takes the radio to be transmitting, for the operator.
-fn tx_why(rig: Option<&RigStatus>, amp: &AmpStatus) -> String {
+fn tx_why(rig: Option<&RigStatus>, amp: &AmpStatus, over: Option<&str>) -> String {
+    // A TUNE of the panel's: what is on the air, by name (decision 83).
+    if let Some(t) = rig.filter(|r| r.connected).and_then(|r| r.tuning) {
+        return format!("{} from the panel", scope::txsig::on_air(t.keying, over));
+    }
     if let Some(r) = rig.filter(|r| r.connected).and_then(RigStatus::tx_reason) {
         return r;
     }

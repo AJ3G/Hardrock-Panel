@@ -145,7 +145,9 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
         // is wrong can be seen for what it is.
         if let Some(why) = a.tx_why.as_deref() {
             ui.label(
-                RichText::new(format!("Transmitting: {why}")).size(12.0).color(theme::YELLOW()),
+                RichText::new(format!("Transmitting: {why}"))
+                    .size(12.0)
+                    .color(crate::scope::txsig::TX_INK),
             );
         }
         if rx.error.is_some() && chrome::chip(ui, false, "TRY AGAIN").clicked() {

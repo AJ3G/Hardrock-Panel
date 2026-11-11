@@ -904,6 +904,8 @@ AJ3G's round-2 GLOBE items (11 Nov 2026).
 
 ## 74. The scope over a transmission: the band dimmed, our own signal in the TX colour (11 Nov 2026)
 
+**Superseded by decision 83** (11 Nov 2026) for anything the panel sends: the TX monitor replaces the dimmed band and the flat marks. The dimmed hold below stays only for a keying the panel knows nothing of (an outside program).
+
 **Why.** AJ3G, 11 Nov 2026: "When in TX do not lock scope instead playback my audio at the frequency I am on." Decision 40 froze the whole display for the over; with FT8 and WSPR going out from the panel (decision 70) that froze it for 13 s or 110 s at a time.
 
 **What.**
@@ -942,3 +944,30 @@ AJ3G found that NB and NR wouldn't switch from the panel, though the DUO's own N
 ## 77. WSPR stops for heat only over 155 °F (11 Nov 2026)
 
 The WSPR temperature stop (interlock #12) used the 120 °F (48.8 °C) warning colour, so beacons stopped at 49 °C. AJ3G: "Should not trip until over 155F"; SDRoxide never stopped for heat. A beacon now isn't started, and one going out stops, only over 155 °F (68.3 °C), a step below the HR500's own 70 °C (158 °F) trip. The yellow from 120 °F stays as a warning colour only.
+
+## 83. The scope over a transmission: the TX monitor, SDRoxide's way (11 Nov 2026)
+
+**Why.** AJ3G, 11 Nov 2026: "In Scope my TX does not look natural, the Waterfall looks awful, the Spectrum is not fluid, please look at how SDROxide handles this." Decision 74 held the last received picture dimmed and drew our signal over it from an 8192-sample snapshot taken each repaint: flat coloured bars on the waterfall, an unaveraged line that jumped, and a band that looked frozen.
+
+**What** (after SDRoxide's `tx_analyzer`, `tx_monitor_analyzer` and `make_tx_frame` in `sdroxide-radio/src/engine.rs`).
+- **Every sample.** The audio streams now have a tap (`audio.rs`, `Tap`: a lock-free ring the output callback pushes each sample into, never waiting, a second deep). `Player::recent` and `Tone::recent` give the samples sent since the last call, the over's lead-in silence included, instead of the last 8192.
+- **One analyser, the scope's own settings.** `scope/txmon.rs`, `TxMonitor`: an `sdr::Spectrum` fed the audio as I/Q (Q at zero) at the output's rate, at the scope's frame rate, window and averaging, with half-overlapped segments so no sample is skipped. It is fed whether or not the radio is keyed, so it is full at key-down; its frames are thrown away until then.
+- **A window for what is shown.** `monitor_fft_size`: 1024 points across the view, a power of two from 2048 to 16384 (a third of a second at 48 kHz), not the panadapter's FFT size. A change of size starts a new analyser from the last 16384 samples kept, so it is full at once.
+- **Ordinary frames.** `txmon::rf_frame` lays each analyser frame across the span (16384 bins) and, zoomed in, across the view as the zoom FFT's frame (4096 bins): audio at `f` at the transmit dial plus `f` on USB, minus `f` on LSB (`txsig::tx_dial`: VFO B in split), up to 3.5 kHz; the rest of the span at the band's noise floor as last received (also the frame's NF). Full-scale audio sits 30 dB under the top of the dB scale (`TX_MON_HEADROOM_DB`; a real tone's 6 dB is put back). The frames go into the trace (drawn in the TX colour, on the CPU even with the GPU spectrum, which is not run meanwhile), the waterfall at its own row rate and colours, and the 3D surface, exactly as received frames do (`Scope::take_tx`). The RX trace is gone at key-down.
+- **RIG TUNE** is fed as a full-scale carrier at the dial (`TxMonitor::feed_carrier`). **The guard after an over** keeps the monitor running on silence (`feed_silence`), so nothing stops; then receive starts afresh as before (decision 40's guard and reset unchanged). **An outside program** keying the radio: decision 74's dimmed hold, unchanged.
+- **FIT** doesn't run and the waterfall's auto levels hold while the display is held, so the over never moves the scale.
+
+**Where.** `scope/txmon.rs` (new, with tests), `scope/txsig.rs` (what is on the air: `TxSignal`, `on_air`), `scope/mod.rs` (`feed_tx_monitor`, `take_tx`, `gpu_trace`; the two over tests), `scope/paint.rs`, `audio.rs`, `main.rs` (`scope_window`: hands the scope the tap's samples and the over's name).
+
+## 84. Our own TX colour is deep orange (11 Nov 2026)
+
+AJ3G's rule: yellow and red for warnings only, our own TX signal orange. `txsig::TX_INK` and `globe::TX_COLOUR` (and so the TX window's TX colour, GLOBE's heard-me rings and strobe) are `#ff7a1a`, was magenta `#e06cf5`. The scope window's *Transmitting: …* line is in it too (it was the warning yellow).
+
+## 85. The noise floor line stands out (11 Nov 2026)
+
+The NF line is a 2-point dashed line in the strong ink (was 1 point, faint), and its reading sits at the trace's right edge on a dark box, above the line (below it when there is no room), so it is legible over the trace (`paint::nf_label_rect`).
+
+## 86. What is on the air, by name; WSPR's labels per cycle (11 Nov 2026)
+
+- The I/Q status line said "a TUNE from the panel is running" for every keying of the panel's. It now names it: *FT8 over* or *WSPR beacon* (the TX window's mode), *TX TUNE*, *RIG TUNE* (`txsig::on_air`, from the TUNE's keying and `Tx::over_mode`; `rigcat::RigStatus::tx_reason` names the keying too). The scope's TX caption uses the same name.
+- **WSPR labels:** each new WSPR decode cycle clears the last cycle's labels from the scope (`skim::labels`: only the newest WSPR cycle in the feed is shown; a cycle with no decodes leaves the last to fade as before). FT8, FT4 and the keyboard skimmer keep the three-slot fade. Display only: DECODE's list is untouched.

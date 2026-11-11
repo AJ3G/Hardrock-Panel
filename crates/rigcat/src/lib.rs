@@ -210,8 +210,16 @@ impl RigStatus {
     /// Why [`Self::transmitting`] is true, in words for the operator, or
     /// `None` when it isn't.
     pub fn tx_reason(&self) -> Option<String> {
-        if self.tuning.is_some() {
-            return Some("a TUNE from the panel is running".into());
+        if let Some(t) = self.tuning {
+            // What is on the air, as the panel names its keys.
+            return Some(
+                match t.keying {
+                    Keying::Audio => "TX TUNE from the panel",
+                    Keying::Carrier => "RIG TUNE from the panel",
+                    Keying::Data => "a data over from the panel",
+                }
+                .into(),
+            );
         }
         if let Some(w) = self.fwd.filter(|p| p.valid && p.w > 0.0).map(|p| p.w) {
             return Some(format!("the radio reports {w:.2} W forward (FP)"));

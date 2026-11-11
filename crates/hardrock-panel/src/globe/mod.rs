@@ -638,7 +638,7 @@ const QTH_GREEN: Color32 = Color32::from_rgb(0x41, 0xd1, 0x7a);
 const DECODE_CYAN: [u8; 3] = [0x3f, 0xd0, 0xe8];
 /// The transmit colour, magenta as in the TX mockup: the stations that heard
 /// AJ3G, and the strobe while keyed.
-pub(crate) const TX_COLOUR: Color32 = Color32::from_rgb(0xe0, 0x6c, 0xf5);
+pub(crate) const TX_COLOUR: Color32 = Color32::from_rgb(0xff, 0x7a, 0x1a);
 /// The strobe in the DX's slot. Yellow and red stay for warnings.
 const RX_COLOUR: Color32 = QTH_GREEN;
 /// The legend's row under the map.

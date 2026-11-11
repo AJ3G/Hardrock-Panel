@@ -73,6 +73,7 @@ pub mod scf;
 pub mod settings;
 pub mod skim;
 pub mod slotlines;
+pub mod txmon;
 pub mod txsig;
 pub mod view;
 
@@ -90,7 +91,7 @@ pub(crate) use paint::bw_text;
 pub use settings::ScopeSettings;
 pub use skim::{KeyTag, SkimFeed, SkimSpot};
 pub use slotlines::DecodeSlots;
-pub use txsig::{TX_WINDOW, TxSignal};
+pub use txsig::{TX_TAP, TxSignal};
 
 use gpu_run::{Ask, GpuRun, TraceGeom};
 use markers::{Exact, ExactPeak, Markers};
@@ -201,13 +202,15 @@ pub const TX_GUARD_SECS: f64 = 0.3;
 /// again (decision 40).
 const RESET_WAIT_SECS: f64 = 2.0;
 
-/// A transmission (decision 40, as decision 74 has it now): the received
-/// I/Q is not shown while the radio transmits and for [`TX_GUARD_SECS`]
-/// after (the band scrolls on, dimmed, at its last received level, with our
-/// own signal drawn: [`txsig`]), and then the spectrum starts again from the
-/// newest samples with the averages and peaks forgotten, so whatever the
-/// radio's I/Q did meanwhile (stopped, flooded with the transmitter's own
-/// signal, moved with the dial) is never drawn and never lingers.
+/// A transmission (decision 40, as decisions 74 and 83 have it now): the
+/// received I/Q is not shown while the radio transmits and for
+/// [`TX_GUARD_SECS`] after (the TX monitor shows what the panel is sending
+/// instead, [`txmon`]; or, when the panel sends nothing it knows of, the
+/// band scrolls on dimmed at its last received level, [`txsig`]), and then
+/// the spectrum starts again from the newest samples with the averages and
+/// peaks forgotten, so whatever the radio's I/Q did meanwhile (stopped,
+/// flooded with the transmitter's own signal, moved with the dial) is never
+/// drawn and never lingers.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct TxHold {
     keyed: bool,
@@ -324,11 +327,19 @@ pub struct Scope {
     held_span: Option<Span>,
     reset_wait: Option<(u64, f64)>,
     reset_ask: bool,
-    /// What the panel is transmitting, set before each `ui`; its shape this
-    /// repaint while keyed; the dimmed rows laid down while held, with our
-    /// signal on them; and when the last of those went (decision 74).
+    /// What the panel is transmitting, set before each `ui` (decision 83);
+    /// the TX monitor's analyser over it; whether its frames are what is
+    /// shown (from key-down with a signal of ours to the end of the hold);
+    /// where the signal lands (the last known); the band's noise floor
+    /// before the over; and a count for the monitor's frames.
     tx_signal: Option<TxSignal>,
-    tx_shape: Option<txsig::TxShape>,
+    tx_mon: txmon::TxMonitor,
+    tx_live: bool,
+    tx_place: Option<(f64, bool)>,
+    rx_noise: Option<f32>,
+    tx_seq: u64,
+    /// The dimmed rows laid down while held over an outside program's
+    /// keying, and when the last of those went (decision 74).
     tx_rows: VecDeque<txsig::TxRow>,
     held_row_at: f64,
     /// The station being worked: its dial (radio Hz) and call.
@@ -435,7 +446,11 @@ impl Scope {
             reset_wait: None,
             reset_ask: false,
             tx_signal: None,
-            tx_shape: None,
+            tx_mon: txmon::TxMonitor::default(),
+            tx_live: false,
+            tx_place: None,
+            rx_noise: None,
+            tx_seq: 0,
             tx_rows: VecDeque::new(),
             held_row_at: f64::NAN,
             dx_mark: None,
@@ -477,6 +492,12 @@ impl Scope {
         self.settings.fft_gpu && self.gpu_run.is_some()
     }
 
+    /// The trace on screen is the GPU's: computed there, and not the TX
+    /// monitor's (which is made and drawn on the CPU).
+    pub(crate) fn gpu_trace(&self) -> bool {
+        self.gpu_fft() && !self.tx_live
+    }
+
     /// Bytes a second of I/Q going to the GPU lately.
     pub fn gpu_iq_bytes_per_sec(&self) -> f64 {
         self.gpu_run.as_ref().map_or(0.0, |r| r.samples_per_sec * 8.0)
@@ -490,7 +511,7 @@ impl Scope {
 
     /// What the markers read: the frame on screen, with the GPU's peaks.
     fn bins<'a>(&'a self, f: &'a SpectrumFrame) -> Exact<'a> {
-        if self.gpu_fft() {
+        if self.gpu_trace() {
             Exact { frame: f, peaks: &self.exact, bin_hz: self.bin_hz }
         } else {
             Exact { frame: f, peaks: &[], bin_hz: f.bin_width() }
@@ -567,9 +588,10 @@ impl Scope {
         std::mem::take(&mut self.offset_moved)
     }
 
-    /// Each frame: what the panel is sending to the radio, and where it
-    /// lands (`None` when it sends nothing it knows of). Drawn in the TX
-    /// colour while the radio is on the air (decision 74).
+    /// Each frame: what the panel is sending to the radio (the audio sent
+    /// since the last frame, every sample), and where it lands (`None` when
+    /// it sends nothing it knows of). Analysed as it comes; shown in place
+    /// of the received spectrum while the radio is on the air (decision 83).
     pub fn set_tx_signal(&mut self, sig: Option<TxSignal>) {
         self.tx_signal = sig;
     }
@@ -734,19 +756,149 @@ impl Scope {
         {
             self.reset_wait = None;
         }
+        let was_held = self.held;
         self.held = hold || self.reset_wait.is_some();
-        self.tx_shape = match &self.tx_signal {
-            Some(sig) if self.tx_hold.keyed() => txsig::shape(sig),
-            _ => None,
-        };
+        if !was_held && let Some(f) = self.shown() {
+            // The band's floor as last received, for the TX monitor's rest
+            // of the span.
+            self.rx_noise = Some(f.noise_dbm).filter(|n| n.is_finite());
+        }
+        let keyed = self.tx_hold.keyed();
+        if let Some(sig) = &self.tx_signal {
+            self.tx_place = Some((sig.dial_hz, sig.lower));
+        }
+        // Ours from key-down to the end of the hold: the guard after the
+        // over goes on with the monitor (silent by then), not the dimmed band.
+        self.tx_live = self.held && (self.tx_live || (keyed && self.tx_signal.is_some()));
         if !self.held {
             self.held_row_at = f64::NAN;
         }
+        self.feed_tx_monitor(snap, keyed, now);
     }
 
-    /// While held, the waterfall goes on scrolling at its pace with the
-    /// last spectrum received (drawn dimmed), and our own signal is noted
-    /// on each row (decision 74). Nothing before anything was received.
+    /// Everything the panel sent since the last repaint into the TX
+    /// monitor, keyed or not, so it is full at key-down; RIG TUNE's carrier
+    /// while keyed; silence while its frames are shown and nothing is sent.
+    fn feed_tx_monitor(&mut self, snap: &sdr::Snapshot, keyed: bool, now: f64) {
+        let view_hz = self.shown_view.map_or_else(|| span_of(snap).width, |v| v.width());
+        let s = &self.settings;
+        let mut cfg = sdr::SpectrumConfig {
+            fft_size: 0,
+            window: s.window.to_sdr(),
+            overlap: sdr::Overlap::Half,
+            averaging: s.averaging(),
+            peak_hold: false,
+            peak_decay_db_per_s: 0.0,
+            fps: s.fps,
+            calibration_db: 0.0,
+        };
+        match self.tx_signal.as_mut().map(|s| &mut s.what) {
+            Some(txsig::TxWhat::Audio(a)) => {
+                cfg.fft_size = txmon::monitor_fft_size(a.rate as f64, view_hz);
+                let x = std::mem::take(&mut a.samples);
+                self.tx_mon.feed(a.rate, &x, cfg);
+            }
+            Some(txsig::TxWhat::Carrier) if keyed => {
+                cfg.fft_size = txmon::monitor_fft_size(48_000.0, view_hz);
+                self.tx_mon.feed_carrier(now, cfg);
+            }
+            _ if self.tx_live => {
+                cfg.fft_size = txmon::monitor_fft_size(48_000.0, view_hz);
+                self.tx_mon.feed_silence(now, cfg);
+            }
+            _ => self.tx_mon.idle(),
+        }
+        if !self.tx_live {
+            // Not shown: analysed only so the next over starts full.
+            self.tx_mon.take();
+        }
+    }
+
+    /// The TX monitor's frames this repaint, laid across the span where our
+    /// signal lands (and across the view, as the zoom FFT's, when zoomed in),
+    /// into the trace, the waterfall and the surface as received frames go
+    /// (decision 83). From key-down the trace is ours at once: the band's
+    /// floor until the first frame.
+    fn take_tx(&mut self, span: Span, v: View, now: f64, up: &mut Upload) {
+        let s = &self.settings;
+        let floor =
+            self.rx_noise.unwrap_or(s.floor_dbm + 0.1 * (s.ceil_dbm - s.floor_dbm)).max(-240.0);
+        let (dial_hz, lower) = self.tx_place.unwrap_or((span.center, false));
+        let lay = |band: Span, bins: usize| txmon::Lay {
+            dial_hz,
+            lower,
+            band,
+            bins,
+            floor_dbm: floor,
+            ceil_dbm: s.ceil_dbm,
+        };
+        let main_lay = lay(span, TX_MAIN_BINS);
+        // Zoomed in: a frame over the view as well, finer, as the zoom FFT's
+        // (its clean part holds the view).
+        let zoom_lay = (v.width() < span.width / 4.0).then(|| {
+            lay(Span { center: v.center(), width: v.width() / sdr::zoom::USABLE * 1.02 }, 4096)
+        });
+        let ours = self.main.as_ref().is_some_and(|f| f.seq >= TX_SEQ0);
+        if !ours {
+            self.tx_seq += 1;
+            let blank = SpectrumFrame {
+                center_hz: span.center,
+                span_hz: span.width,
+                db: vec![floor; 2],
+                peak: None,
+                seq: TX_SEQ0 + self.tx_seq,
+                enbw: 1.0,
+                noise_dbm: floor,
+            };
+            self.main = Some(Arc::new(blank));
+            self.zoom = None;
+        }
+        let utc = utc_now();
+        let had = self.rows.wf_count();
+        let laid = up.wf.len();
+        let mut last = None;
+        for a in self.tx_mon.take() {
+            self.tx_seq += 1;
+            let seq = TX_SEQ0 + self.tx_seq;
+            let main = Arc::new(txmon::rf_frame(&a, main_lay, seq));
+            let zoom = zoom_lay.map(|l| Arc::new(txmon::rf_frame(&a, l, seq)));
+            let src = zoom.clone().unwrap_or_else(|| main.clone());
+            self.rows.push_waterfall(
+                &src.db,
+                Span { center: src.center_hz, width: src.span_hz },
+                v,
+                self.settings.wf_speed.frames_per_row(),
+                utc,
+                up,
+            );
+            self.frame_times.push_back(now);
+            self.main = Some(main);
+            self.zoom = zoom;
+            last = Some(src);
+        }
+        if up.wf.len() > laid {
+            let gap = (now - self.row_at).clamp(0.0, 0.5);
+            if had > 0 && gap > 0.0 {
+                let n = (up.wf.len() - laid) as f64;
+                self.row_interval += (gap / n - self.row_interval) * 0.2;
+            }
+            self.row_at = now;
+        }
+        while self.frame_times.front().is_some_and(|&t| now - t > 1.0) {
+            self.frame_times.pop_front();
+        }
+        if self.settings.top.has_surface() {
+            let latest =
+                last.as_ref().map(|f| (&f.db[..], Span { center: f.center_hz, width: f.span_hz }));
+            self.rows.push_surface(latest, v, now, self.settings.surface_rows_per_sec, up);
+        } else {
+            self.rows.clear_surface();
+        }
+    }
+
+    /// While held over a keying the panel knows nothing of, the waterfall
+    /// goes on scrolling at its pace with the last spectrum received (drawn
+    /// dimmed, decision 74). Nothing before anything was received.
     fn scroll_held(&mut self, v: View, now: f64, up: &mut Upload) {
         let s = &self.settings;
         let period = s.wf_speed.frames_per_row() as f64 / s.fps.max(0.1) as f64;
@@ -756,14 +908,13 @@ impl Scope {
         if n == 0 {
             return;
         }
-        let segs = self.tx_shape.as_ref().map(|t| t.segs.clone()).unwrap_or_default();
         let utc = utc_now();
         let frame = Span { center: f.center_hz, width: f.span_hz };
         let had = self.rows.wf_count();
         for k in 0..n {
             let t = utc - (n - 1 - k) as f64 * period;
             self.rows.push_waterfall(&f.db, frame, v, 1, t, up);
-            self.tx_rows.push_back(txsig::TxRow { utc: t, segs: segs.clone() });
+            self.tx_rows.push_back(txsig::TxRow { utc: t });
         }
         while self.tx_rows.len() > rows::WF_ROWS as usize {
             self.tx_rows.pop_front();
@@ -777,7 +928,8 @@ impl Scope {
 
     /// Take the frames that came since last time: the trace, and rows for
     /// the waterfall and the surface. Nothing is taken while paused, or
-    /// while held over a transmission (the waterfall scrolls on dimmed then:
+    /// while held over a transmission (the TX monitor's frames are taken
+    /// then, [`Scope::take_tx`], or the waterfall scrolls on dimmed,
     /// [`Scope::scroll_held`]).
     fn take_frames(
         &mut self,
@@ -787,7 +939,7 @@ impl Scope {
         now: f64,
     ) -> Option<Arc<Upload>> {
         if self.gpu_fft() {
-            return self.take_gpu(v, now);
+            return self.take_gpu(span, v, now);
         }
         let mut up = Upload::default();
         let new_main = fresh(&snap.history, snap.generation, &mut self.last_gen);
@@ -796,7 +948,11 @@ impl Scope {
             return None;
         }
         if self.held {
-            self.scroll_held(v, now, &mut up);
+            if self.tx_live {
+                self.take_tx(span, v, now, &mut up);
+            } else {
+                self.scroll_held(v, now, &mut up);
+            }
             let up = self.rows.seal(up);
             return (!up.is_empty()).then(|| Arc::new(up));
         }
@@ -848,7 +1004,18 @@ impl Scope {
 
     /// [`Scope::take_frames`] with the FFT on the GPU: plan what it runs
     /// this repaint, and take what came back.
-    fn take_gpu(&mut self, v: View, now: f64) -> Option<Arc<Upload>> {
+    fn take_gpu(&mut self, span: Span, v: View, now: f64) -> Option<Arc<Upload>> {
+        if self.tx_live && !self.paused {
+            // The TX monitor's frames, made on the CPU; the GPU spectrum
+            // is not run (it starts afresh after the over), and anything it
+            // still had coming is not shown.
+            let _ = self.gpu_run.as_mut()?.take_readout();
+            self.trace_geom = None;
+            let mut up = Upload::default();
+            self.take_tx(span, v, now, &mut up);
+            let up = self.rows.seal(up);
+            return (!up.is_empty()).then(|| Arc::new(up));
+        }
         let run = self.gpu_run.as_mut()?;
         if run.resyncs != self.resyncs_told {
             self.resyncs_told = run.resyncs;
@@ -1052,6 +1219,12 @@ impl Scope {
     }
 }
 
+/// Bins in a TX monitor frame across the span: 9.4 Hz each at 153.6 kHz.
+const TX_MAIN_BINS: usize = 16_384;
+/// The TX monitor's frames count from here, so the scope can tell them from
+/// received ones.
+const TX_SEQ0: u64 = 1 << 62;
+
 /// The lowest rate the zoom FFT is decimated to, samples a second: at it a
 /// 4096-point FFT holds one second, so the zoomed trace keeps up with the
 /// band.
@@ -1192,13 +1365,7 @@ mod tests {
         assert_eq!(h.step(false, 9.0), (false, true));
     }
 
-    /// Decision 74: over an over the waterfall scrolls on at its pace with
-    /// the last spectrum received, our signal noted on each keyed row where
-    /// it lands; in the guard after it the rows scroll on with nothing of
-    /// ours; then the live spectrum is started again (the CPU spectrum's
-    /// reset asked and waited for) and no more held rows are laid.
-    #[test]
-    fn over_an_over_the_waterfall_scrolls_dimmed_with_our_signal_then_goes_live() {
+    fn tx_test_scope() -> (Scope, Span, View, f64) {
         let settings = ScopeSettings { fft_gpu: false, fps: 30.0, ..ScopeSettings::default() };
         let per_s = 30.0 / settings.wf_speed.frames_per_row() as f64;
         let mut sc = Scope::new(None, settings);
@@ -1212,45 +1379,113 @@ mod tests {
             enbw: 1.5,
             noise_dbm: -120.0,
         }));
+        (sc, span, View { lo: span.lo(), hi: span.hi() }, per_s)
+    }
+
+    /// Decision 83: over an over of ours the scope shows the TX monitor's
+    /// frames from key-down, the RX picture gone at once: our audio where
+    /// it lands, the rest at the band's floor, rows at the waterfall's own
+    /// pace with no veil; in the guard after it the monitor goes on (silent);
+    /// then the live spectrum is started again as before.
+    #[test]
+    fn over_an_over_of_ours_the_scope_shows_what_we_send_then_goes_live() {
+        let (mut sc, span, v, per_s) = tx_test_scope();
         let mut snap =
             sdr::Snapshot { center_hz: span.center, sample_rate: 192_000.0, ..Default::default() };
-        let v = View { lo: span.lo(), hi: span.hi() };
-        let rate = 12_000;
-        let samples = (0..TX_WINDOW)
-            .map(|i| (std::f32::consts::TAU * 1500.0 * i as f32 / rate as f32).cos())
-            .collect();
-        sc.set_tx_signal(Some(TxSignal {
+        let rate = 48_000u32;
+        let mut at = 0usize;
+        // What the tap gives each repaint: the next 800 samples of a
+        // 1500 Hz tone at half scale.
+        let mut chunk = || {
+            let x: Vec<f32> = (at..at + 800)
+                .map(|i| 0.5 * (std::f32::consts::TAU * 1500.0 * i as f32 / rate as f32).cos())
+                .collect();
+            at += 800;
+            txsig::TxAudio { rate, samples: x }
+        };
+        let sig = |a| TxSignal {
             dial_hz: 14_074_000.0,
             lower: false,
-            what: txsig::TxWhat::Audio(txsig::TxAudio { rate, samples }),
-        }));
+            what: txsig::TxWhat::Audio(a),
+            name: "FT8 over".into(),
+        };
         let step = |sc: &mut Scope, snap: &sdr::Snapshot, on_air: bool, t: f64| {
             sc.hold_over_tx(snap, on_air, t);
             sc.take_frames(snap, span, v, t);
         };
-        // Receiving: nothing is laid by the hold.
-        step(&mut sc, &snap, false, 0.0);
-        assert!(!sc.held && sc.tx_rows.is_empty() && sc.tx_shape.is_none());
+        // Sounding before key-down (the over's lead): received as usual.
+        for i in 0..10 {
+            sc.set_tx_signal(Some(sig(chunk())));
+            step(&mut sc, &snap, false, i as f64 / 60.0);
+        }
+        assert!(!sc.held && !sc.tx_live && sc.main.as_ref().unwrap().seq == 1);
         // Keyed for two seconds, repainted 60 times a second.
+        let rows0 = sc.rows.wf_count();
+        sc.set_tx_signal(Some(sig(chunk())));
+        step(&mut sc, &snap, true, 10.0 / 60.0);
+        assert!(sc.tx_live && sc.main.as_ref().unwrap().seq >= TX_SEQ0, "the RX trace gone");
+        for i in 11..=130 {
+            sc.set_tx_signal(Some(sig(chunk())));
+            step(&mut sc, &snap, true, i as f64 / 60.0);
+        }
+        assert!(sc.held && sc.tx_live && sc.tx_rows.is_empty(), "no veiled rows");
+        let rows = (sc.rows.wf_count() - rows0) as f64;
+        assert!((rows - 2.0 * per_s).abs() <= 2.0, "{rows} rows in 2 s");
+        let f = sc.main.clone().unwrap();
+        let (k, top) =
+            f.db.iter()
+                .enumerate()
+                .fold((0, f32::MIN), |a, (k, &d)| if d > a.1 { (k, d) } else { a });
+        assert!((f.bin_hz(k) - 14_075_500.0).abs() < 20.0, "ours at {}", f.bin_hz(k));
+        let want = sc.settings.ceil_dbm - txmon::TX_MON_HEADROOM_DB - 6.02;
+        assert!((top - want).abs() < 1.5, "{top} for {want}");
+        assert_eq!((f.db[0], f.noise_dbm), (-120.0, -120.0), "the rest at the band's floor");
+        // Unkeyed, the stream stopped: the guard goes on with the monitor.
+        sc.set_tx_signal(None);
+        let t0 = 130.0 / 60.0;
+        let n = sc.rows.wf_count();
+        for i in 1..=15 {
+            step(&mut sc, &snap, false, t0 + i as f64 / 60.0);
+        }
+        assert!(sc.held && sc.tx_live);
+        assert!(sc.rows.wf_count() > n, "the waterfall moves on in the guard");
+        let quiet = sc.main.as_ref().unwrap().db.iter().copied().fold(f32::MIN, f32::max);
+        assert!(quiet < top - 6.0, "fading out with the averaging: {quiet} from {top}");
+        // The guard over: the reset is asked, and the monitor goes on until
+        // it has been done; then received frames again.
+        step(&mut sc, &snap, false, t0 + TX_GUARD_SECS + 0.05);
+        assert!(sc.reset_ask && sc.held && sc.tx_live);
+        snap.spectrum_resets = 1;
+        step(&mut sc, &snap, false, t0 + TX_GUARD_SECS + 0.1);
+        assert!(!sc.held && !sc.tx_live);
+    }
+
+    /// Decision 74, kept for a keying the panel knows nothing of: the
+    /// waterfall scrolls on at its pace with the last spectrum received,
+    /// dimmed, then the live spectrum is started again and no more held
+    /// rows are laid.
+    #[test]
+    fn over_an_outside_programs_over_the_band_scrolls_dimmed_then_goes_live() {
+        let (mut sc, span, v, per_s) = tx_test_scope();
+        let mut snap =
+            sdr::Snapshot { center_hz: span.center, sample_rate: 192_000.0, ..Default::default() };
+        sc.set_tx_signal(None);
+        let step = |sc: &mut Scope, snap: &sdr::Snapshot, on_air: bool, t: f64| {
+            sc.hold_over_tx(snap, on_air, t);
+            sc.take_frames(snap, span, v, t);
+        };
+        step(&mut sc, &snap, false, 0.0);
+        assert!(!sc.held && sc.tx_rows.is_empty());
         for i in 1..=120 {
             step(&mut sc, &snap, true, i as f64 / 60.0);
         }
-        assert!(sc.held && sc.tx_hold.keyed());
+        assert!(sc.held && sc.tx_hold.keyed() && !sc.tx_live);
         let keyed_rows = sc.tx_rows.len() as f64;
         assert!((keyed_rows - 2.0 * per_s).abs() <= 2.0, "{keyed_rows} rows in 2 s");
         assert_eq!(sc.rows.wf_count() as usize, sc.tx_rows.len());
-        for r in &sc.tx_rows {
-            let s = r.segs.first().expect("our signal on every keyed row");
-            assert!(s.lo < 14_075_500.0 && s.hi > 14_075_500.0, "{s:?}");
-        }
-        // Unkeyed: the guard scrolls on with nothing of ours.
+        assert_eq!(sc.main.as_ref().unwrap().seq, 1, "the band as last received");
         let t0 = 2.0;
         step(&mut sc, &snap, false, t0 + 0.01);
-        step(&mut sc, &snap, false, t0 + 0.2);
-        assert!(sc.held && sc.tx_shape.is_none());
-        assert!(sc.tx_rows.back().unwrap().segs.is_empty());
-        // The guard over: the reset is asked, and the rows go on until it
-        // has been done.
         step(&mut sc, &snap, false, t0 + TX_GUARD_SECS + 0.01);
         assert!(sc.reset_ask && sc.held);
         snap.spectrum_resets = 1;

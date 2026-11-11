@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, FontId, Mesh, Pos2, Rect, Sense, Shape, Stroke, pos2, vec2,
+    self, Align2, Color32, CursorIcon, FontId, Mesh, Pos2, Rect, Sense, Shape, Stroke, Vec2, pos2,
+    vec2,
 };
 
 use super::bandplan;
@@ -65,8 +66,9 @@ fn accent() -> Color32 {
 fn tx_ink() -> Color32 {
     txsig::TX_INK
 }
-/// Over what was last received while the radio transmits (decision 74):
-/// dimmed, so it is plain nothing is being heard.
+/// Over what was last received while the radio transmits something the
+/// panel does not know (decision 74): dimmed, so it is plain nothing is
+/// being heard.
 const TX_VEIL: Color32 = Color32::from_black_alpha(150);
 /// A receiver passband's width, as the radio's filter is named: "2.80 kHz",
 /// "500 Hz".
@@ -300,7 +302,7 @@ fn paint_spectrum(
     let frame = sc.shown().cloned();
     let ppp = ui.ctx().pixels_per_point();
     sc.trace_px = if has_trace { (trace.width() * ppp).round() as u32 } else { 0 };
-    let on_gpu = sc.gpu_fft();
+    let on_gpu = sc.gpu_trace();
     if has_trace && on_gpu {
         // The GPU's own columns, drawn where they fall in the view; the
         // persistence from what came back of them.
@@ -338,7 +340,8 @@ fn paint_spectrum(
         if sc.settings.persist {
             paint_persistence(sc, ui, trace, &cols, cx.now);
         }
-        // Fill, then the line.
+        // Fill, then the line: in the TX colour while it is the TX monitor's.
+        let trace_ink = if sc.tx_live { tx_ink() } else { accent() };
         if !cols.is_empty() {
             let top_a = 0.45;
             let mut mesh = Mesh::default();
@@ -346,8 +349,8 @@ fn paint_spectrum(
                 let yy = y(c).clamp(trace.top(), trace.bottom());
                 let t = 1.0 - (yy - trace.top()) / trace.height().max(1.0);
                 let a = 0.03 + (top_a - 0.03) * t;
-                mesh.colored_vertex(pos2(xx, yy), accent().gamma_multiply(a));
-                mesh.colored_vertex(pos2(xx, trace.bottom()), accent().gamma_multiply(0.03));
+                mesh.colored_vertex(pos2(xx, yy), trace_ink.gamma_multiply(a));
+                mesh.colored_vertex(pos2(xx, trace.bottom()), trace_ink.gamma_multiply(0.03));
                 if i > 0 {
                     let k = (i * 2) as u32;
                     mesh.add_triangle(k - 2, k - 1, k);
@@ -363,7 +366,7 @@ fn paint_spectrum(
                 .map(|(&c, &xx)| pos2(xx, y(c).clamp(trace.top(), trace.bottom())))
                 .collect();
             let a = if sc.settings.persist { 0.55 } else { 1.0 };
-            p.add(Shape::line(line, Stroke::new(1.2, accent().gamma_multiply(a))));
+            p.add(Shape::line(line, Stroke::new(1.2, trace_ink.gamma_multiply(a))));
         }
         if sc.settings.peak && f.peak.is_some() {
             let (pk, pxs) = columns(f, v, trace, ncols, true);
@@ -377,26 +380,35 @@ fn paint_spectrum(
         }
     }
     if has_trace && sc.held && !sc.paused {
-        paint_tx_trace(sc, &p, trace, cx);
+        paint_tx_trace(sc, &p, trace);
     }
     if has_trace && let Some(f) = &frame {
-        // The noise floor estimate.
+        // The noise floor estimate: a line that stands out from the trace,
+        // and its reading at the right edge on a dark box, legible over
+        // whatever is under it (AJ3G, 11 Nov 2026).
         if sc.settings.noise_line && f.noise_dbm > floor && f.noise_dbm < ceil {
             let yy = y(f.noise_dbm);
             p.add(Shape::dashed_line(
                 &[pos2(trace.left(), yy), pos2(trace.right(), yy)],
-                Stroke::new(1.0, ink().gamma_multiply(0.45)),
-                6.0,
-                5.0,
+                Stroke::new(NF_LINE_W, ink().gamma_multiply(0.9)),
+                8.0,
+                4.0,
             ));
             let rbw = f.bin_width() * f.enbw as f64;
-            p.text(
-                pos2(trace.right() - 4.0, (yy - 2.0).min(all.bottom() - 16.0)),
-                Align2::RIGHT_BOTTOM,
+            let g = p.layout_no_wrap(
                 format!("NF {:.0} dBm/bin · RBW {}", f.noise_dbm, fmt_hz(rbw)),
-                mono(9.5),
-                dim(),
+                mono(10.5),
+                ink(),
             );
+            let r = nf_label_rect(trace, yy, g.size());
+            p.rect_filled(r, 2.0, Color32::from_black_alpha(200));
+            p.rect_stroke(
+                r,
+                2.0,
+                Stroke::new(1.0, ink().gamma_multiply(0.5)),
+                egui::StrokeKind::Inside,
+            );
+            p.galley(r.min + vec2(5.0, 2.0), g, ink());
         }
     }
 
@@ -475,7 +487,8 @@ fn paint_spectrum(
     }
 
     // FIT, twice a second.
-    if sc.settings.fit && cx.now - sc.fit_at > 0.5 && !sc.cols.is_empty() {
+    // Never over a transmission: the TX monitor's levels are not the band's.
+    if sc.settings.fit && !sc.held && cx.now - sc.fit_at > 0.5 && !sc.cols.is_empty() {
         sc.fit_at = cx.now;
         if let Some(t) = levels::fit_target(&sc.cols) {
             let (a, b) = levels::fit_step((sc.settings.floor_dbm, sc.settings.ceil_dbm), t);
@@ -771,7 +784,11 @@ fn paint_offset(sc: &mut Scope, p: &egui::Painter, rect: Rect, cx: &Ctx, spectru
         let (a, b) = (v.x_of(lo, rect.left(), rect.width()), v.x_of(hi, rect.left(), rect.width()));
         let (a, b) = (a.min(b).max(rect.left()), a.max(b).min(rect.right()));
         if b > a {
-            p.rect_filled(Rect::from_x_y_ranges(a..=b, rect.y_range()), 0.0, ink().gamma_multiply(0.07));
+            p.rect_filled(
+                Rect::from_x_y_ranges(a..=b, rect.y_range()),
+                0.0,
+                ink().gamma_multiply(0.07),
+            );
         }
     }
     let Some(bar) = sc.offset else { return };
@@ -828,58 +845,53 @@ fn paint_offset(sc: &mut Scope, p: &egui::Painter, rect: Rect, cx: &Ctx, spectru
     }
 }
 
-/// Over a transmission (decision 74): the trace as last received, dimmed,
-/// and while keyed our own signal over it in the TX colour, its peak a
-/// tenth down from the top of the scale and its shape in dB below that.
-fn paint_tx_trace(sc: &Scope, p: &egui::Painter, trace: Rect, cx: &Ctx) {
-    p.rect_filled(trace, 0.0, TX_VEIL);
-    let v = cx.view;
-    let (floor, ceil) = (sc.settings.floor_dbm, sc.settings.ceil_dbm);
-    let top = ceil - 0.1 * (ceil - floor);
-    let y = |rel: f32| {
-        let d = top + rel;
-        (trace.bottom() - (d - floor) / (ceil - floor) * trace.height())
-            .clamp(trace.top(), trace.bottom())
+/// Over a transmission: what is shown, said at the trace's foot in the TX
+/// colour. The TX monitor's frames are drawn as any (decision 83); with
+/// nothing of ours known, the band as last received under a veil (decision
+/// 74).
+fn paint_tx_trace(sc: &Scope, p: &egui::Painter, trace: Rect) {
+    let name = sc.tx_signal.as_ref().map_or("our audio", |s| s.name.as_str());
+    let caption = if !sc.tx_hold.keyed() {
+        "RECEIVE IN A MOMENT".to_string()
+    } else if sc.tx_live {
+        format!("TX MONITOR · {name} · as sent, where it lands")
+    } else {
+        "TRANSMITTING · band as last received · our signal not known here".to_string()
     };
-    let caption = match &sc.tx_shape {
-        Some(_) => "TRANSMITTING · band as last received",
-        None => "TRANSMITTING · band as last received · our signal not known here",
-    };
-    let caption = if sc.tx_hold.keyed() { caption } else { "RECEIVE IN A MOMENT" };
-    p.text(
-        pos2(trace.left() + 8.0, trace.bottom() - 6.0),
-        Align2::LEFT_BOTTOM,
-        caption,
-        label(10.5),
-        tx_ink().gamma_multiply(0.85),
+    if !sc.tx_live {
+        p.rect_filled(trace, 0.0, TX_VEIL);
+    }
+    let g = p.layout_no_wrap(caption, label(10.5), tx_ink());
+    let at = pos2(trace.left() + 8.0, trace.bottom() - 6.0 - g.size().y);
+    p.rect_filled(
+        Rect::from_min_size(at - vec2(4.0, 2.0), g.size() + vec2(8.0, 4.0)),
+        2.0,
+        Color32::from_black_alpha(170),
     );
-    let Some(shape) = &sc.tx_shape else { return };
-    let line: Vec<Pos2> = shape
-        .points
-        .iter()
-        .filter(|(hz, _)| *hz >= v.lo && *hz <= v.hi)
-        .map(|&(hz, rel)| pos2(v.x_of(hz, trace.left(), trace.width()), y(rel)))
-        .collect();
-    if line.len() >= 2 {
-        p.add(Shape::line(line, Stroke::new(1.4, tx_ink())));
-    }
-    // The peak, labelled.
-    let Some(&(hz, _)) = shape.points.iter().max_by(|a, b| a.1.total_cmp(&b.1)) else { return };
-    if hz < v.lo || hz > v.hi {
-        return;
-    }
-    let xx = v.x_of(hz, trace.left(), trace.width());
-    p.vline(xx, y(0.0)..=trace.bottom(), Stroke::new(1.0, tx_ink().gamma_multiply(0.5)));
-    p.text(pos2(xx, y(0.0) - 2.0), Align2::CENTER_BOTTOM, "TX", mono(10.5), tx_ink());
+    p.galley(at, g, tx_ink());
 }
 
-/// The waterfall's rows laid down while the received I/Q was not shown
-/// (decision 74): dimmed, and our own signal on them in the TX colour.
+/// The noise floor's reading: at the right edge of `trace`, just above the
+/// line at `yy` (below it when there is no room), inside the trace.
+fn nf_label_rect(trace: Rect, yy: f32, text: Vec2) -> Rect {
+    let size = text + vec2(10.0, 4.0);
+    let above = yy - 3.0 - size.y;
+    let top = if above >= trace.top() { above } else { yy + 3.0 };
+    let top = top.min(trace.bottom() - size.y).max(trace.top());
+    Rect::from_min_size(pos2(trace.right() - 4.0 - size.x, top), size)
+}
+
+/// The NF line's width, points: twice the trace's, so it reads as a line of
+/// its own (AJ3G, 11 Nov 2026).
+const NF_LINE_W: f32 = 2.0;
+
+/// The waterfall's rows laid down while held over a keying the panel knows
+/// nothing of (decision 74): dimmed. (The TX monitor's rows are ordinary
+/// rows.)
 fn paint_tx_waterfall(
     sc: &Scope,
     p: &egui::Painter,
     rect: Rect,
-    cx: &Ctx,
     scroll_frac: f32,
     pts_per_row: f32,
     rows_vis: f32,
@@ -887,55 +899,25 @@ fn paint_tx_waterfall(
     if sc.tx_rows.is_empty() {
         return;
     }
-    let v = cx.view;
-    let rows: Vec<Option<&txsig::TxRow>> = (0..rows_vis.ceil() as u32 + 1)
+    let held: Vec<bool> = (0..rows_vis.ceil() as u32 + 1)
         .map_while(|age| sc.rows.wf_time(age))
-        .map(|t| txsig::row_at(&sc.tx_rows, t))
+        .map(|t| txsig::row_at(&sc.tx_rows, t).is_some())
         .collect();
     let y0 = |age: usize| slotlines::row_y(rect.top(), age as u32, scroll_frac, pts_per_row);
-    let clip = |a: f32, b: f32| (a.max(rect.top()), b.min(rect.bottom()));
     let mut age = 0;
-    while age < rows.len() {
-        let Some(first) = rows[age] else {
+    while age < held.len() {
+        if !held[age] {
             age += 1;
             continue;
-        };
-        // A run of held rows, veiled at once; within it, rows with the same
-        // marks drawn as one.
+        }
+        // A run of held rows, veiled at once.
         let mut end = age;
-        while end + 1 < rows.len() && rows[end + 1].is_some() {
+        while end + 1 < held.len() && held[end + 1] {
             end += 1;
         }
-        let (a, b) = clip(y0(age), y0(end) + pts_per_row);
+        let (a, b) = (y0(age).max(rect.top()), (y0(end) + pts_per_row).min(rect.bottom()));
         if b > a {
             p.rect_filled(Rect::from_x_y_ranges(rect.x_range(), a..=b), 0.0, TX_VEIL);
-        }
-        let mut k = age;
-        let mut segs = &first.segs;
-        for j in age..=end + 1 {
-            let next = rows.get(j).copied().flatten().filter(|_| j <= end);
-            if next.is_some_and(|r| &r.segs == segs) {
-                continue;
-            }
-            let (a, b) = clip(y0(k), y0(j - 1) + pts_per_row);
-            for s in segs.iter().filter(|s| s.hi > v.lo && s.lo < v.hi) {
-                let (xa, xb) = (
-                    v.x_of(s.lo, rect.left(), rect.width()),
-                    v.x_of(s.hi, rect.left(), rect.width()),
-                );
-                let (xa, xb) = (xa.max(rect.left()), xb.min(rect.right()).max(xa + 1.5));
-                if b > a {
-                    p.rect_filled(
-                        Rect::from_x_y_ranges(xa..=xb, a..=b),
-                        0.0,
-                        tx_ink().gamma_multiply(0.35 + 0.65 * s.strength),
-                    );
-                }
-            }
-            if let Some(r) = next {
-                k = j;
-                segs = &r.segs;
-            }
         }
         age = end + 1;
     }
@@ -1241,7 +1223,7 @@ fn paint_waterfall(
         }
     }
 
-    paint_tx_waterfall(sc, &p, rect, cx, scroll_frac, px_per_row / ppp, rows_vis);
+    paint_tx_waterfall(sc, &p, rect, scroll_frac, px_per_row / ppp, rows_vis);
 
     // The slices' passband edges (decision 66), faint in their colours.
     for sl in &sc.slices {
@@ -1782,8 +1764,11 @@ fn top_bar(sc: &Scope, ui: &egui::Ui, r: Rect, cx: &Ctx, snap: &sdr::Snapshot) {
     p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, edge()));
     let state = if sc.paused {
         "PAUSED"
+    } else if sc.held && sc.tx_live {
+        // Decision 83: what we send, analysed as it goes out.
+        "TX MONITOR"
     } else if sc.held {
-        // Decision 74: the band as last received, dimmed, and our signal.
+        // Decision 74: the band as last received, dimmed.
         "TX · RX DIMMED"
     } else if !snap.alive {
         "NO STREAM"
@@ -1891,8 +1876,12 @@ fn status_bars(sc: &Scope, ui: &egui::Ui, a: Rect, b: Rect, cx: &Ctx, snap: &sdr
     let notice = sc.notice.as_ref().filter(|(_, until)| cx.now < *until).map(|(n, _)| n);
     let diag = if sc.paused {
         "Display paused · stream still running".to_string()
+    } else if sc.held && sc.tx_live {
+        "Transmitting: the TX monitor shows the audio we send, where it lands · receive starts \
+         afresh after the over"
+            .to_string()
     } else if sc.held {
-        "Transmitting: the band as last received, dimmed, and our signal in the TX colour · \
+        "Transmitting something the panel did not send: the band as last received, dimmed · \
          receive starts afresh after the over"
             .to_string()
     } else if let Some(n) = notice {
@@ -1950,6 +1939,11 @@ impl Scope {
         let Some(f) = self.shown() else {
             return (self.settings.floor_dbm, self.settings.ceil_dbm);
         };
+        // Over a transmission the colours stay as the band had them: the TX
+        // monitor's rows are coloured as received ones would be.
+        if let Some(l) = self.wf_levels.filter(|_| self.held) {
+            return l;
+        }
         let strongest = self.cols.iter().copied().fold(f.noise_dbm, f32::max);
         let target = levels::wf_auto_levels(f.noise_dbm, strongest);
         let cur = self.wf_levels.unwrap_or(target);
