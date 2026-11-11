@@ -306,14 +306,7 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
         );
         return;
     }
-    // Turns, newest first; within each, calling-you rows pinned to the top.
-    let mut turns: Vec<(i64, Vec<usize>)> = Vec::new();
-    for (i, r) in tx.rows.iter().enumerate() {
-        match turns.last_mut() {
-            Some((t, v)) if *t == r.d.slot_utc => v.push(i),
-            _ => turns.push((r.d.slot_utc, vec![i])),
-        }
-    }
+    let turns = slot_groups(&tx.rows);
     let me_call = c.station.call().unwrap_or_default();
     let dx = tx.qso.dx_call().map(str::to_string);
     let mut act: Option<(usize, Act)> = None;
@@ -336,7 +329,7 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
                 }),
                 Sort::Country => idx.sort_by(|&a, &b| rows[a].country.cmp(&rows[b].country)),
             }
-            idx.sort_by_key(|&i| !rows[i].to_me);
+            idx.sort_by_key(|&i| (!rows[i].ours, !rows[i].to_me));
             let even = sched::is_even(t, sched::FT8_PERIOD);
             ui.label(
                 RichText::new(format!("{} · {} · {} decodes", crate::decode::hms(t as f64), if even { "EVEN" } else { "ODD" }, idx.len()))
@@ -384,6 +377,17 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
         }
         Act::Queue => tx.queue(&r),
     }
+}
+
+/// The list's turns, newest slot first, one for each slot however late its
+/// decodes came (a slot's that finish after the next one's made a second
+/// heading for it: AJ3G, 11 Nov 2026), each with its rows' indexes.
+fn slot_groups(rows: &std::collections::VecDeque<ListRow>) -> Vec<(i64, Vec<usize>)> {
+    let mut by_slot: std::collections::BTreeMap<i64, Vec<usize>> = Default::default();
+    for (i, r) in rows.iter().enumerate() {
+        by_slot.entry(r.d.slot_utc).or_default().push(i);
+    }
+    by_slot.into_iter().rev().collect()
 }
 
 enum Act {
@@ -558,6 +562,11 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
                 if let Some(g) = tx.qso.dx_grid() {
                     ui.label(mono(g));
                 }
+                // Where we copy them: the offset alone (AJ3G, 11 Nov 2026).
+                if let Some((_, hz, _)) = tx.dx_mark() {
+                    ui.label(mono(format!("{hz:.0} Hz")))
+                        .on_hover_text("The audio offset you copy them at, from their latest decode");
+                }
             });
             let (rcvd, sent) = tx.qso.reports();
             let f = |v: Option<i16>| v.map_or("–".into(), crate::tx::msg::fmt_report);
@@ -665,6 +674,12 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
             (&mut s.skip_tx1, "Skip Tx1", "Answer a CQ with the report, not the grid"),
             (&mut s.auto_seq, "Auto Seq", "Send the right reply to what you hear, through to the log"),
             (&mut s.call_first, "Call 1st", "Answer the first (strongest new) caller to your CQ by itself"),
+            (
+                &mut s.call_after_rr73,
+                "Call after RR73",
+                "Waiting for a station working someone else: call them as soon as they send that station \
+                 RR73, RRR or 73, rather than wait for their next CQ",
+            ),
             (&mut s.tx_even, "TX even/1st", "Call CQ in the even slots (:00, :30)"),
         ] {
             if chrome::chip(ui, *v, l).on_hover_text(tip).clicked() {
@@ -745,7 +760,14 @@ fn wspr_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
     let call = c.station.call().unwrap_or_default();
     let grid: String = c.station.grid().unwrap_or_default().chars().take(4).collect();
     let ok = wave::Message::wspr(&call, &grid, s.wspr_dbm, 1500.0).is_some();
-    ui.label(mono(format!("{call} {grid} {}", s.wspr_dbm)).color(if ok { theme::TEXT_STRONG() } else { theme::YELLOW() }));
+    ui.horizontal(|ui| {
+        ui.label(mono(format!("{call} {grid} {}", s.wspr_dbm)).color(if ok { theme::TEXT_STRONG() } else { theme::YELLOW() }));
+        // The offset the beacon goes (or last went) out on.
+        if let Some(hz) = tx.wspr_offset(s) {
+            ui.label(mono(format!("{hz:.0} Hz")))
+                .on_hover_text("The audio offset of the beacon on the air, or of the last one with ROAM on");
+        }
+    });
     if !ok {
         ui.label(
             RichText::new("Type 1 only: a plain callsign and a 4-character grid. A compound call can't be sent.")
@@ -801,5 +823,45 @@ fn wspr_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
     );
     if let Some((text, _, hz, end)) = tx.over() {
         ui.label(mono(format!("On the air: {text} at {hz:.0} Hz, {:.0} s left", (end - c.now).max(0.0))).color(tx_ink()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tx::msg;
+
+    pub(crate) fn row(text: &str, slot: i64, ours: bool) -> ListRow {
+        ListRow {
+            d: msg::parse(text, slot, -10, 0.1, 1500.0),
+            row: 1,
+            rf_hz: 14_075_500.0,
+            country: None,
+            continent: None,
+            cq_zone: None,
+            itu_zone: None,
+            path: None,
+            badges: Default::default(),
+            to_me: false,
+            cq_ok: false,
+            ours,
+        }
+    }
+
+    #[test]
+    fn a_slot_whose_decodes_come_late_keeps_one_heading() {
+        // Newest first, as the list holds them: slot 30's decodes, then
+        // our over in slot 45, then slot 30's late ones, then slot 15's.
+        let rows: std::collections::VecDeque<ListRow> = [
+            row("CQ K1ABC FN42", 30, false),
+            row("UN7GBX AJ3G -18", 45, true),
+            row("CQ W9XYZ EN52", 30, false),
+            row("CQ JA1ABC PM95", 15, false),
+        ]
+        .into_iter()
+        .collect();
+        let g = slot_groups(&rows);
+        assert_eq!(g.iter().map(|t| t.0).collect::<Vec<_>>(), vec![45, 30, 15]);
+        assert_eq!(g[1].1, vec![0, 2]);
     }
 }

@@ -115,6 +115,10 @@ pub(crate) struct Config {
     pub skip_tx1: bool,
     /// Call 1st: adopt the first (best) station answering our CQ by itself.
     pub call_first: bool,
+    /// Call after RR73: in Wait CQ, call the station again as soon as they
+    /// sign off with the one they were working, rather than wait for
+    /// their next CQ (AJ3G, 11 Nov 2026).
+    pub call_after_73: bool,
 }
 
 impl Default for Config {
@@ -132,6 +136,7 @@ impl Default for Config {
             max_tx_repeats: 10,
             skip_tx1: false,
             call_first: true,
+            call_after_73: true,
         }
     }
 }
@@ -205,6 +210,12 @@ fn reply_step(p: &Payload) -> Option<Step> {
         Payload::Rrr | Payload::Rr73 => Some(Step::Tx73),
         Payload::B73 => None,
     }
+}
+
+/// A sign-off: RR73, RRR, 73, or R73 as some send it.
+fn is_signoff(text: &str) -> bool {
+    matches!(classify(text), Payload::Rr73 | Payload::Rrr | Payload::B73)
+        || text.split_whitespace().nth(2) == Some("R73")
 }
 
 /// A station calling us, not one signing off.
@@ -565,13 +576,28 @@ impl Qso {
                     self.step = resume;
                     changed = true;
                 } else if let Some(other) = other {
-                    changed |= self.note_working(&from, &other, now_utc);
+                    if self.cfg.call_after_73 && is_signoff(&d.message) {
+                        self.resume_after_signoff(&from, &other, now_utc);
+                    } else {
+                        self.note_working(&from, &other, now_utc);
+                    }
+                    changed = true;
                 }
                 continue;
             }
 
             // They took someone else's call: hold until they are free,
             // rather than double into their exchange.
+            // Signing off with them, they are free from our next slot:
+            // carry on calling.
+            if let Some(other) = other.as_deref()
+                && self.cfg.call_after_73
+                && is_signoff(&d.message)
+                && matches!(self.step, Step::TxGrid | Step::TxReport)
+            {
+                changed |= self.note_working(&from, other, now_utc);
+                continue;
+            }
             if let Some(other) = other
                 && matches!(self.step, Step::TxGrid | Step::TxReport | Step::TxRReport)
             {
@@ -652,6 +678,15 @@ impl Qso {
                 (fresh, snr.div_euclid(6), new_entity, *snr)
             })
             .map(|(c, _)| c.to_string())
+    }
+
+    /// Call After RR73: the station held for has signed off with `other`,
+    /// so call them from the open step in our next slot.
+    fn resume_after_signoff(&mut self, dx: &str, other: &str, now_utc: i64) {
+        self.note(format!("{dx} signed off with {other}: calling {dx}"), now_utc);
+        self.progress();
+        self.progress_utc = now_utc;
+        self.step = if self.cfg.skip_tx1 { Step::TxReport } else { Step::TxGrid };
     }
 
     fn note_working(&mut self, dx: &str, other: &str, now_utc: i64) -> bool {
@@ -951,6 +986,47 @@ mod tests {
         assert!(!q.wants_tx());
         q.on_rx(&[d("CQ W9XYZ EN52")], 60);
         assert_eq!(q.step(), Step::TxGrid);
+    }
+
+    #[test]
+    fn call_after_rr73_calls_them_when_they_sign_off_with_the_other() {
+        for (signoff, skip, want) in [
+            ("K1ABC W9XYZ RR73", false, "W9XYZ AJ3G FN20"),
+            ("K1ABC W9XYZ RRR", true, "W9XYZ AJ3G -05"),
+            ("K1ABC W9XYZ 73", false, "W9XYZ AJ3G FN20"),
+            ("K1ABC W9XYZ R73", false, "W9XYZ AJ3G FN20"),
+        ] {
+            let mut q = Qso::new(Config { skip_tx1: skip, ..cfg() });
+            q.start_qso("W9XYZ", None, -5, true, 0);
+            assert_eq!(q.step(), Step::WaitCq);
+            // Still in their exchange: hold.
+            q.on_rx(&[d("K1ABC W9XYZ R-12")], 15);
+            assert_eq!(q.step(), Step::WaitCq);
+            assert!(q.on_rx(&[d(signoff)], 45));
+            assert_eq!(q.plan_tx().as_deref(), Some(want), "{signoff}");
+            let note = q.transcript().last().expect("a note");
+            assert!(note.note && note.text == "W9XYZ signed off with K1ABC: calling W9XYZ", "{note:?}");
+        }
+    }
+
+    #[test]
+    fn without_call_after_rr73_wait_cq_holds_for_their_cq() {
+        let mut q = Qso::new(Config { call_after_73: false, ..cfg() });
+        q.start_qso("W9XYZ", None, -5, true, 0);
+        q.on_rx(&[d("K1ABC W9XYZ RR73")], 15);
+        assert_eq!(q.step(), Step::WaitCq);
+        assert!(!q.wants_tx());
+        q.on_rx(&[d("CQ W9XYZ EN52")], 30);
+        assert_eq!(q.step(), Step::TxGrid);
+    }
+
+    #[test]
+    fn a_station_signing_off_with_another_while_we_call_is_called_on() {
+        let mut q = Qso::new(cfg());
+        q.start_qso("W9XYZ", None, -5, false, 0);
+        q.on_rx(&[d("K1ABC W9XYZ RR73")], 15);
+        assert_eq!(q.step(), Step::TxGrid);
+        assert!(q.wants_tx());
     }
 
     #[test]
