@@ -222,6 +222,9 @@ pub(crate) struct ListRow {
     pub row: u64,
     pub rf_hz: f64,
     pub country: Option<String>,
+    /// The flag its country flies, for [`crate::flags::Flags`]; `""` for
+    /// none (decision 105).
+    pub flag: &'static str,
     pub continent: Option<&'static str>,
     pub cq_zone: Option<u8>,
     pub itu_zone: Option<u8>,
@@ -342,6 +345,8 @@ pub(crate) struct Tx {
     logged: VecDeque<(qso::Logged, f64)>,
     /// The row picked in the list.
     pub picked: Option<u64>,
+    /// The decode list's flag textures (decision 105).
+    pub flags: crate::flags::Flags,
     /// The WSPR offset this beacon went at, and whether one has gone.
     wspr_hz: f32,
     wspr_sent: bool,
@@ -387,6 +392,7 @@ impl Default for Tx {
             to_log: None,
             logged: VecDeque::new(),
             picked: None,
+            flags: Default::default(),
             wspr_hz: 1500.0,
             wspr_sent: false,
             roam: 0x9e37_79b9_7f4a_7c15,
@@ -907,6 +913,7 @@ impl Tx {
                 row: h.row,
                 rf_hz: h.rf_hz,
                 country: ent.as_ref().map(|e| e.name.clone()),
+                flag: ent.as_ref().map_or("", |e| e.flag),
                 continent: ent.as_ref().map(|e| e.continent),
                 cq_zone: ent.as_ref().map(|e| e.cq_zone),
                 itu_zone: ent.as_ref().map(|e| e.itu_zone),
@@ -1055,6 +1062,7 @@ impl Tx {
                 row: 0,
                 rf_hz: 0.0,
                 country: None,
+                flag: "",
                 continent: None,
                 cq_zone: None,
                 itu_zone: None,

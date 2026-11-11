@@ -43,6 +43,8 @@ mod audio;
 mod decode;
 mod decodelog;
 mod dxcc;
+mod entity_flags;
+mod flags;
 mod globe;
 mod gpu_gate;
 mod gpuload;

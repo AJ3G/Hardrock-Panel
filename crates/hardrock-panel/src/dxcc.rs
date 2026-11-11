@@ -34,6 +34,9 @@ pub(crate) struct Entity {
     /// it, which unlike the name is never reworded. Two calls are in the same
     /// DXCC entity exactly when these match.
     pub prefix: String,
+    /// The flag the entity flies, a code [`crate::flags::Flags`] draws
+    /// (`"DE"`, `"GB-SCT"`), or `""` for none (decision 105).
+    pub flag: &'static str,
     /// The ADIF DXCC entity number. The country file has none: always `None`
     /// from [`lookup`].
     pub dxcc: Option<u16>,
@@ -188,6 +191,15 @@ fn parse_token(
 }
 
 impl Cty {
+    /// The name and primary prefix an entity line counts as for DXCC: its
+    /// own, or for a WAE-only area its parent entity's.
+    fn dxcc_of(&self, e: &Ent) -> (&'static str, &'static str) {
+        match e.dxcc_parent.and_then(|pp| self.ents.iter().find(|x| x.prefix == pp)) {
+            Some(parent) => (parent.name, parent.prefix),
+            None => (e.name, e.prefix),
+        }
+    }
+
     fn find(&self, call: &str) -> Option<&Pfx> {
         let up = call.trim().to_ascii_uppercase();
         if up.is_empty() {
@@ -208,14 +220,11 @@ impl Cty {
         let e = &self.ents[p.ent];
         // A WAE-only area counts as its DXCC entity, by that entity's name and
         // prefix, but keeps its own zones, continent and centre.
-        let (name, prefix) =
-            match e.dxcc_parent.and_then(|pp| self.ents.iter().find(|x| x.prefix == pp)) {
-                Some(parent) => (parent.name, parent.prefix),
-                None => (e.name, e.prefix),
-            };
+        let (name, prefix) = self.dxcc_of(e);
         Entity {
             name: name.to_string(),
             prefix: prefix.to_string(),
+            flag: crate::entity_flags::flag_for_prefix(prefix),
             dxcc: None,
             continent: p.cont,
             cq_zone: p.cq,
@@ -233,6 +242,17 @@ impl Cty {
 pub(crate) fn lookup(call: &str) -> Option<Entity> {
     let c = cty();
     c.find(call).map(|p| c.entity(p))
+}
+
+/// The flag code and entity name of `call`, as [`lookup`] would give them but
+/// without building an [`Entity`]: for the decode lists, which ask for every
+/// row they draw, every frame. `None` when the country file has no prefix for
+/// the call; a code of `""` when the entity flies no flag we ship.
+pub(crate) fn flag_of(call: &str) -> Option<(&'static str, &'static str)> {
+    let c = cty();
+    let p = c.find(call)?;
+    let (name, prefix) = c.dxcc_of(&c.ents[p.ent]);
+    Some((crate::entity_flags::flag_for_prefix(prefix), name))
 }
 
 /// The entity a token names when it is meant *as* a prefix (the `JA` of
@@ -383,6 +403,48 @@ mod tests {
         // And keeps its own continent: African Italy is in Africa.
         assert_eq!(lookup("IG9ABC").unwrap().continent, "AF");
         assert!(entity_count() > 330, "{} entities", entity_count());
+    }
+
+    /// The flag table is hand-written against the country file, so it goes
+    /// stale silently when cty.dat is updated and gains an entity. Every
+    /// entity line has a row (a flagless one says so with `""`), every row
+    /// names an entity, and every flag a row names is a PNG we ship.
+    #[test]
+    fn every_entity_has_a_flag_row_and_its_flag_is_shipped() {
+        let c = cty();
+        let prefixes: Vec<&str> = c.ents.iter().map(|e| e.prefix).collect();
+        let missing: Vec<&str> =
+            prefixes.iter().copied().filter(|p| !crate::entity_flags::covers_prefix(p)).collect();
+        assert!(missing.is_empty(), "no flag-table row for DXCC prefixes {missing:?}");
+        let stale: Vec<&str> = crate::entity_flags::all_prefixes()
+            .into_iter()
+            .filter(|p| !prefixes.contains(p))
+            .collect();
+        assert!(stale.is_empty(), "flag-table rows for unknown DXCC prefixes {stale:?}");
+        for p in prefixes {
+            let f = crate::entity_flags::flag_for_prefix(p);
+            assert!(f.is_empty() || crate::flags::shipped(f), "{p} names {f}, which has no PNG");
+        }
+    }
+
+    #[test]
+    fn a_call_resolves_to_its_flag() {
+        let flag = |call: &str| lookup(call).map(|e| e.flag);
+        assert_eq!(flag("DL1ABC"), Some("DE"));
+        assert_eq!(flag("W1AW"), Some("US"));
+        // Pieces of a country that fly their own flag.
+        assert_eq!(flag("KL7ABC"), Some("US-AK"));
+        assert_eq!(flag("GM4ABC"), Some("GB-SCT"));
+        // A WAE-only area flies its DXCC entity's flag.
+        assert_eq!(flag("IT9ABC"), Some("IT"));
+        // A dependency flies the flag of whoever administers it.
+        assert_eq!(flag("FT4XA"), Some("TF"));
+        // The light lookup agrees with the full one.
+        assert_eq!(flag_of("DL1ABC"), Some(("DE", "Fed. Rep. of Germany")));
+        assert_eq!(flag_of("IT9ABC"), Some(("IT", "Italy")));
+        // Unknown: no entity, so no flag.
+        assert_eq!(flag_of(""), None);
+        assert_eq!(crate::entity_flags::flag_for_prefix("ZZZZ"), "");
     }
 
     #[test]
