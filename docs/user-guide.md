@@ -365,6 +365,10 @@ tuner is bypassed, the drawing shows the bypass relays instead.
 
 - **TUNE** starts a tune. It blinks blue while tuning, turns green when tuned
   and red if the tune fails, with the result and SWR on the line below.
+  When it is red, a line under it says why in plain words, such as *Lo power:
+  the tuner saw under 0.5 W* (the carrier dropped or was too weak during the
+  tune), *SWR above 6:1: too far off for the tuner* or *Power too high for
+  the tuner to tune*; hover over it or over TUNE for what to do.
 - **ON / BYP** puts the tuner in line or bypasses it.
 
 The tuner only reports step numbers. The values shown (for example "~0.20 µH ·

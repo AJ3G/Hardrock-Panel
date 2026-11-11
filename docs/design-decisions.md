@@ -949,3 +949,7 @@ The WSPR temperature stop (interlock #12) used the 120 °F (48.8 °C) warning co
 
 **What.** SDRoxide's rule for a tune (`swr_rails` there), as time here: during TX TUNE and RIG TUNE the SWR limit is doubled (10:1 at most), nothing is judged for the first 5 s, and then the SWR must stay at or over the limit for 0.3 s before it stops the carrier. While the amplifier reports its tuner tuning, the radio's SWR doesn't stop the tune at all, and the amplifier's own SWR in line gets the doubled limit and the same grace; otherwise it stops on one reading as before. Ordinary overs are unchanged. `tune::TuneSwr`; interlock #6 amended (AJ3G to vet).
 
+## 79. The red TUNE light says why (11 Nov 2026)
+
+AJ3G couldn't tell what the tuner's red TUNE light meant ("Lo power"). When the last tune failed, the AMP window now shows a line in plain words under the tuner drawing, whether the tuner is in line or not, and the TUNE key's hover says the same with what to do (`panel.rs`, `atu_failure`): *Lo power: the tuner saw under 0.5 W* (the HR500's `HRTR` `L`: under 0.5 W for over a second), *SWR above 6:1: too far off for the tuner*, *No match under 2:1 found*, *Power too high for the tuner to tune*. The words are the panel's own, not the manual's. TX TUNE at its first-run level (a quarter of menu 34) on the 1W key is about 0.25 W, under what the tuner needs; the drive defaults are unchanged, and the Lo power hover says to key a few watts.
+
