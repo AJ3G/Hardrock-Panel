@@ -9,6 +9,7 @@ use rigcat::RigLink;
 use super::{
     FreqMode, ListRow, Sort, Tx, TxMode, TxSettings, WsprKey, WsprRow, WsprSort, sched, wave,
 };
+use crate::flags::{self, Flags};
 use crate::globe::field::Reception;
 use crate::globe::wspr::WsprReport;
 use crate::station::{self, StationSettings};
@@ -391,7 +392,8 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
                     .color(theme::CYAN_DIM()),
             );
             for i in idx {
-                if let Some(a) = row_ui(ui, &tx.rows[i], tx.picked == Some(tx.rows[i].row), dx.as_deref(), &me_call) {
+                let (r, picked) = (&tx.rows[i], tx.picked == Some(tx.rows[i].row));
+                if let Some(a) = row_ui(ui, r, picked, dx.as_deref(), &me_call, &mut tx.flags) {
                     act = Some((i, a));
                 }
             }
@@ -839,7 +841,14 @@ enum Act {
     Queue,
 }
 
-fn row_ui(ui: &mut egui::Ui, r: &ListRow, picked: bool, dx: Option<&str>, me: &str) -> Option<Act> {
+fn row_ui(
+    ui: &mut egui::Ui,
+    r: &ListRow,
+    picked: bool,
+    dx: Option<&str>,
+    me: &str,
+    flags: &mut Flags,
+) -> Option<Act> {
     let mut act = None;
     let h = 20.0;
     let w = ui.available_width();
@@ -875,6 +884,13 @@ fn row_ui(ui: &mut egui::Ui, r: &ListRow, picked: bool, dx: Option<&str>, me: &s
         x.set(x.get() + wpx);
     };
     put(if r.to_me { "▶".into() } else { " ".into() }, theme::CYAN(), 14.0);
+    // Their country's flag, left of the report as SDRoxide has it: the cell
+    // is kept when there is none, so the columns stay in line (decision 105).
+    let cell = egui::Rect::from_min_size(egui::pos2(x.get(), rect.top()), vec2(flags::CELL_W, h));
+    if !r.ours {
+        flags.paint(ui, cell, r.flag, 12.0);
+    }
+    x.set(x.get() + flags::CELL_W);
     let snr_col = match r.d.snr_db {
         s if s >= 0 => theme::GREEN(),
         s if s >= -15 => ink,
@@ -947,7 +963,7 @@ fn row_ui(ui: &mut egui::Ui, r: &ListRow, picked: bool, dx: Option<&str>, me: &s
             act = Some(Act::Queue);
         }
     }
-    let resp = resp.on_hover_ui(|ui| hover(ui, r));
+    let resp = resp.on_hover_ui(|ui| hover(ui, r, flags));
     if act.is_none() {
         if resp.double_clicked() && !r.ours && r.d.from.is_some() {
             act = Some(Act::Reply);
@@ -958,15 +974,19 @@ fn row_ui(ui: &mut egui::Ui, r: &ListRow, picked: bool, dx: Option<&str>, me: &s
     act
 }
 
-fn hover(ui: &mut egui::Ui, r: &ListRow) {
+fn hover(ui: &mut egui::Ui, r: &ListRow, flags: &mut Flags) {
     ui.label(mono(r.d.message.clone()).strong());
     if let Some(c) = &r.country {
-        ui.label(format!(
-            "{c} · {} · CQ zone {} · ITU zone {}",
-            r.continent.unwrap_or("?"),
-            r.cq_zone.map_or("?".into(), |z| z.to_string()),
-            r.itu_zone.map_or("?".into(), |z| z.to_string())
-        ));
+        // The flag beside the country's name, as SDRoxide's card has it.
+        ui.horizontal(|ui| {
+            flags.show(ui, r.flag, 12.0);
+            ui.label(format!(
+                "{c} · {} · CQ zone {} · ITU zone {}",
+                r.continent.unwrap_or("?"),
+                r.cq_zone.map_or("?".into(), |z| z.to_string()),
+                r.itu_zone.map_or("?".into(), |z| z.to_string())
+            ));
+        });
     }
     if let Some(g) = &r.d.grid {
         ui.label(format!("Grid {g}"));
@@ -1370,6 +1390,7 @@ mod tests {
             row: 1,
             rf_hz: 14_075_500.0,
             country: None,
+            flag: "",
             continent: None,
             cq_zone: None,
             itu_zone: None,

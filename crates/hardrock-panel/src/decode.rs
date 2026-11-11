@@ -52,7 +52,7 @@ use crate::scope::{KeyTag, SkimFeed, SkimSpot};
 use crate::skimlog::{self, SkimLog};
 use crate::spots::{self, SpotSettings, Spots, pskreporter, wsprnet};
 use crate::station::{self, Heard, StationSettings};
-use crate::{chrome, slotclock, theme};
+use crate::{chrome, dxcc, slotclock, theme};
 
 /// Every mode the window offers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -396,6 +396,8 @@ pub(crate) struct Decode {
     started_utc: Option<f64>,
     /// Every station heard with a grid.
     pub heard: Heard,
+    /// The rows' flag textures (decision 105).
+    flags: crate::flags::Flags,
     log: DecodeLog,
     spots: Spots,
     /// The rows picked, by id, and the last one clicked.
@@ -2144,14 +2146,20 @@ fn dist_az(r: &Row, heard: &Heard, me: Option<station::LatLon>) -> Option<(f64, 
 
 /// One row as text, in the window's columns.
 fn row_text(r: &Row, fam: Family, heard: &Heard, st: &StationSettings) -> String {
+    format!("{}  {}", hms(r.utc), row_rest(r, fam, heard, st))
+}
+
+/// One row's columns after its UTC: drawn apart from it, so a WSJT row's flag
+/// can go between (decision 105).
+fn row_rest(r: &Row, fam: Family, heard: &Heard, st: &StationSettings) -> String {
     let snr = r.snr.map_or("—".into(), |v| format!("{v:+.0}"));
     let rf = r.rf_hz.map_or("—".into(), |v| format!("{:.6}", v / 1e6));
     if fam == Family::Chat {
         let af = r.audio_hz.map_or("—".into(), |v| format!("{v:.0}"));
-        return format!("{}  {af:>5}  {rf:>11}  {}", hms(r.utc), r.text);
+        return format!("{af:>5}  {rf:>11}  {}", r.text);
     }
     if fam != Family::Wsjt {
-        return format!("{}  {snr:>4}  {rf:>11}  {}", hms(r.utc), r.text);
+        return format!("{snr:>4}  {rf:>11}  {}", r.text);
     }
     let dt = r.dt.map_or("—".into(), |v| format!("{v:+.1}"));
     let af = r.audio_hz.map_or("—".into(), |v| format!("{v:.0}"));
@@ -2161,20 +2169,24 @@ fn row_text(r: &Row, fam: Family, heard: &Heard, st: &StationSettings) -> String
         }
         None => ("—".into(), "—".into()),
     };
-    format!("{}  {snr:>4}  {dt:>5}  {af:>5}  {rf:>11}  {dist:>7}  {az:>3}  {}", hms(r.utc), r.text)
+    format!("{snr:>4}  {dt:>5}  {af:>5}  {rf:>11}  {dist:>7}  {az:>3}  {}", r.text)
 }
 
 /// The header, in the same columns.
 fn header_text(fam: Family, st: &StationSettings) -> String {
+    format!("{:8}  {}", "UTC", header_rest(fam, st))
+}
+
+/// The header's columns after UTC, as [`row_rest`].
+fn header_rest(fam: Family, st: &StationSettings) -> String {
     if fam == Family::Chat {
-        return format!("{:8}  {:>5}  {:>11}  Message", "UTC", "AF Hz", "RF MHz");
+        return format!("{:>5}  {:>11}  Message", "AF Hz", "RF MHz");
     }
     if fam != Family::Wsjt {
-        return format!("{:8}  {:>4}  {:>11}  Message", "UTC", "SNR", "RF MHz");
+        return format!("{:>4}  {:>11}  Message", "SNR", "RF MHz");
     }
     format!(
-        "{:8}  {:>4}  {:>5}  {:>5}  {:>11}  {:>7}  {:>3}  Message",
-        "UTC",
+        "{:>4}  {:>5}  {:>5}  {:>11}  {:>7}  {:>3}  Message",
         "SNR",
         "DT",
         "AF Hz",
@@ -2203,10 +2215,36 @@ fn rows(ui: &mut egui::Ui, d: &mut Decode, fam: Family, st: &StationSettings) {
     if copy && !d.selected.is_empty() {
         ui.ctx().copy_text(copy_text(d, fam, st, true));
     }
-    ui.label(
-        RichText::new(header_text(fam, st)).font(font.clone()).color(theme::CYAN_DIM()).strong(),
-    );
     let line_h = ui.fonts_mut(|f| f.row_height(&font)) + 2.0;
+    // Columns: the UTC, then on a WSJT row its sender's flag, left of the SNR
+    // as SDRoxide has it (decision 105), then the rest as text. The flag's
+    // cell is kept when there is none, so the columns stay in line.
+    let utc_w =
+        ui.painter().layout_no_wrap("00:00:00".into(), font.clone(), theme::TEXT()).size().x;
+    let gap = ui.painter().layout_no_wrap("  ".into(), font.clone(), theme::TEXT()).size().x;
+    let flag_w = if fam == Family::Wsjt { crate::flags::CELL_W } else { 0.0 };
+    let rest_at = 2.0 + utc_w + gap + flag_w;
+    {
+        let w = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, line_h), egui::Sense::hover());
+        let p = ui.painter();
+        let ink = theme::CYAN_DIM();
+        p.text(
+            rect.left_center() + egui::vec2(2.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            "UTC",
+            font.clone(),
+            ink,
+        );
+        let rest = header_rest(fam, st);
+        p.text(
+            rect.left_center() + egui::vec2(rest_at, 0.0),
+            egui::Align2::LEFT_CENTER,
+            rest,
+            font.clone(),
+            ink,
+        );
+    }
     let mut click: Option<(u64, egui::Modifiers)> = None;
     let mut area = egui::ScrollArea::vertical().auto_shrink(false);
     // A line picked from a scope label: scrolled to, a line above it showing.
@@ -2231,15 +2269,38 @@ fn rows(ui: &mut egui::Ui, d: &mut Decode, fam: Family, st: &StationSettings) {
                 ui.painter().rect_filled(rect, 0.0, bg);
             }
             let col = if picked { theme::TEXT_STRONG() } else { theme::TEXT() };
-            ui.painter().text(
+            let p = ui.painter();
+            p.text(
                 rect.left_center() + egui::vec2(2.0, 0.0),
                 egui::Align2::LEFT_CENTER,
-                row_text(r, fam, &d.heard, st),
+                hms(r.utc),
+                font.clone(),
+                col,
+            );
+            let rest = row_rest(r, fam, &d.heard, st);
+            p.text(
+                rect.left_center() + egui::vec2(rest_at, 0.0),
+                egui::Align2::LEFT_CENTER,
+                rest,
                 font.clone(),
                 col,
             );
             if resp.clicked() {
                 click = Some((r.id, ui.input(|i| i.modifiers)));
+            }
+            let flag =
+                if fam == Family::Wsjt { r.call.as_deref().and_then(dxcc::flag_of) } else { None };
+            if let Some((code, name)) = flag {
+                let x = rect.left() + 2.0 + utc_w + gap;
+                let cell = egui::Rect::from_min_size(
+                    egui::pos2(x, rect.top()),
+                    egui::vec2(flag_w, line_h),
+                );
+                let shown = d.flags.paint(ui, cell, code, 12.0);
+                // Hovering the flag names the country.
+                if shown.is_some() && resp.hovered() && ui.rect_contains_pointer(cell) {
+                    resp.on_hover_text(name);
+                }
             }
         }
         if d.rows.is_empty() {

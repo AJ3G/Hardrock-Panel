@@ -698,6 +698,9 @@ For the WSJT modes:
   Each line then shows the distance and the great-circle bearing to the
   station that sent it, from the grid in the message, or the grid it gave
   earlier (a report or RR73 carries none).
+- **Flags.** A WSJT-mode line shows its sender's country flag between the UTC
+  and the SNR (blank when the call's country flies none we ship); hover over
+  the flag for the country's name.
 - **Copying.** Click a line to pick it, Ctrl+click to add or drop one,
   Shift+click for a run; **COPY** (or Ctrl+C) copies the picked lines,
   **COPY ALL** every line, with the column headings. Every decode is also
@@ -850,11 +853,12 @@ QSO queues it first. Click a queued call to drop it.
   when you called CQ. **LOG THIS** logs the contact in hand by hand. With
   SETTINGS → Logbook's "Log a finished QSO without asking" off, the window
   asks first.
-- **The decode list**: country, continent, heading and distance (dimmer when
-  only the country is known), and badges from your log: **DXCC**, **BAND**,
+- **The decode list**: the country's flag left of the SNR, country,
+  continent, heading and distance (dimmer when only the country is known), and badges from your log: **DXCC**, **BAND**,
   **GRID**, **NEW**, **DUPE** (dupes fade). A station calling you has a blue
   band, ▶ and bold text, at the top of its turn; a CQ you can answer is green
   (a directed CQ only when it includes you); your own overs are orange.
+  Hovering a line shows the station's card, the flag beside its country.
 - **TX audio and the scope's bar.** While TX is open the red offset bar on
   SCOPE is where you transmit. **AUTO** picks the clearest gap in your own
   slots before each over and shades the busy parts faintly; **MANUAL** follows
