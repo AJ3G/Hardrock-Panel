@@ -470,8 +470,11 @@ fn unkey<P: Read + Write>(rig: &mut Rig<P>, status: &Mutex<RigStatus>, why: Opti
             warn!("rigcat: unkey: {e:?}");
         }
     }
-    if let Some(w) = &why {
-        info!("rigcat: TUNE stopped: {w}");
+    // Every unkey is logged, with its reason when it has one (AJ3G,
+    // 11 Nov 2026: a TUNE ended with nothing in the log to say why).
+    match &why {
+        Some(w) => info!("rigcat: TUNE stopped: {w}"),
+        None => info!("rigcat: unkeyed as asked"),
     }
     set(status, |s| {
         s.tuning = None;
