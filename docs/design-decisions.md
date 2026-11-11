@@ -942,3 +942,10 @@ AJ3G found that NB and NR wouldn't switch from the panel, though the DUO's own N
 ## 77. WSPR stops for heat only over 155 °F (11 Nov 2026)
 
 The WSPR temperature stop (interlock #12) used the 120 °F (48.8 °C) warning colour, so beacons stopped at 49 °C. AJ3G: "Should not trip until over 155F"; SDRoxide never stopped for heat. A beacon now isn't started, and one going out stops, only over 155 °F (68.3 °C), a step below the HR500's own 70 °C (158 °F) trip. The yellow from 120 °F stays as a warning colour only.
+
+## 78. TUNE rides out the tuner's SWR spikes (11 Nov 2026)
+
+**Why.** AJ3G, 11 Nov 2026: TUNE with the amplifier at PTT OFF stopped on a momentary SWR spike while the HR500's tuner was switching. The carrier dropped, the ELAD tripped, and the tuner then reported "Lo power" (it saw under 0.5 W for over a second), turning its TUNE light red. TUNE's stop took a single radio SWR reading at the warning, even with the amplifier bypassed.
+
+**What.** SDRoxide's rule for a tune (`swr_rails` there), as time here: during TX TUNE and RIG TUNE the SWR limit is doubled (10:1 at most), nothing is judged for the first 5 s, and then the SWR must stay at or over the limit for 0.3 s before it stops the carrier. While the amplifier reports its tuner tuning, the radio's SWR doesn't stop the tune at all, and the amplifier's own SWR in line gets the doubled limit and the same grace; otherwise it stops on one reading as before. Ordinary overs are unchanged. `tune::TuneSwr`; interlock #6 amended (AJ3G to vet).
+

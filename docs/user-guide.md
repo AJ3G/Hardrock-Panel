@@ -192,6 +192,15 @@ the SWR warning in Settings, if the radio drops to receive on a high SWR, and
 if the panel closes or stops responding. The reason is shown after it stops.
 These are safety interlocks #5, #6 and #7.
 
+**SWR while tuning.** A tuner sweeping its relays makes the SWR jump for a
+moment, so TX TUNE and RIG TUNE judge it more loosely than an ordinary over:
+the limit is twice the SWR warning (10:1 at most), the first 5 s are not
+judged at all, and after that the SWR must stay at or over the limit for
+0.3 s to stop it. While the HR500's own tuner says it is tuning, the radio's
+SWR doesn't stop TUNE at all (the amplifier protects itself), and with the
+amplifier in line its SWR is judged the same way. An FT8 or WSPR over still
+stops on the first reading at the warning.
+
 **Clearing a trip.** A trip stops TUNE at once. The HR500 keeps showing the
 trip until it is keyed again and sees normal readings; it has no reset
 (its manual: trip conditions "do not need to be manually reset, all

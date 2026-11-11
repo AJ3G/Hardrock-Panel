@@ -195,6 +195,9 @@ struct App {
     /// The amplifier's last good readings, which an over in progress rides
     /// a short silence on (#6).
     amp_hold: tune::AmpHold,
+    /// TX TUNE's and RIG TUNE's SWR rule (interlock #6): the run of high
+    /// readings it is timing.
+    tune_swr: tune::TuneSwr,
     /// Why the tone wouldn't play, last time.
     tone_error: Option<String>,
     /// Since when the radio has been seen transmitting.
@@ -309,6 +312,7 @@ impl App {
             sounds: audio::output_devices(),
             trip_carried: false,
             amp_hold: tune::AmpHold::default(),
+            tune_swr: tune::TuneSwr::default(),
             tone_asked: None,
             tx_sources: (String::new(), None),
             tone_error: None,
@@ -394,6 +398,9 @@ impl App {
         }
         let now = Instant::now();
         self.amp_hold.note(amp, now);
+        if !tuning.is_some_and(|t| matches!(t.keying, Keying::Audio | Keying::Carrier)) {
+            self.tune_swr.reset();
+        }
         let (Some(link), Some(r), Some(t)) = (&self.rig, rig, tuning) else { return };
         // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): an over in
         // progress is judged by the amplifier's last readings for up to 5 s
@@ -445,8 +452,13 @@ impl App {
         // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): a TUNE in
         // progress is stopped the moment the amplifier trips, leaves the
         // radio's band in line, is driven past its limit (or the Tune slider
-        // is raised past it), or either SWR reaches the warning.
-        let why = tune::tune_must_stop(amp, r, self.saved.swr_warn, watts, self.trip_carried)
+        // is raised past it), or the SWR stays high past the tuner's
+        // sweep (`tune::TuneSwr`: the limit doubled, 5 s to settle, and
+        // never the radio's while the amplifier's tuner is tuning).
+        let keyed_for = now.saturating_duration_since(t.since);
+        let why = self
+            .tune_swr
+            .must_stop(amp, r, self.saved.swr_warn, watts, self.trip_carried, keyed_for, now)
             .or_else(|| {
                 (t.keying == Keying::Audio && !self.tone.playing())
                     .then(|| "the tone stopped playing".to_string())
