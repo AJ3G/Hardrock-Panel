@@ -885,7 +885,22 @@ fn amp_panel_inner(
         Some(th) => tft::screen(ui, &sh, view, th, pop, out),
         None => panel_look(ui, &sh, view, pop, out),
     }
+    // A click the link refused or couldn't confirm, for a few seconds: the
+    // button alone only went back to what it was (AJ3G, 11 Nov 2026).
+    if let Some(why) = notice(st, std::time::Instant::now()) {
+        ui.label(RichText::new(why).size(13.0 * s).strong().color(theme::YELLOW()));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+    }
     false
+}
+
+/// How long a refused click's words stay up.
+const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// The link's word on a refused or unconfirmed click, while it is recent.
+fn notice(st: &AmpStatus, now: std::time::Instant) -> Option<&str> {
+    let recent = st.notice_at.is_some_and(|t| now.saturating_duration_since(t) < NOTICE_FOR);
+    st.notice.as_deref().filter(|_| recent)
 }
 
 /// What every look draws from, worked out once a frame.
@@ -2539,6 +2554,18 @@ mod tests {
             status(AmpReadings { ptt: true, fwd_w: 400.0, drive_w: 6.0, ..Default::default() });
         st.pending = vec![AmpAction::SetAntenna(2)];
         assert!(!keys(&shown(&st)).ant.unwrap().enabled);
+    }
+
+    #[test]
+    fn a_refused_click_is_said_for_a_few_seconds() {
+        let t0 = std::time::Instant::now();
+        let mut st = status(AmpReadings::default());
+        st.notice = Some("Unkey first: the tuner can't switch to BYP with RF on.".into());
+        st.notice_at = Some(t0);
+        assert!(notice(&st, t0 + std::time::Duration::from_secs(2)).is_some());
+        assert_eq!(notice(&st, t0 + NOTICE_FOR), None);
+        st.notice_at = None;
+        assert_eq!(notice(&st, t0), None);
     }
 
     #[test]

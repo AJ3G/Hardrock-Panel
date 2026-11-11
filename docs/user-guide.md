@@ -369,7 +369,12 @@ tuner is bypassed, the drawing shows the bypass relays instead.
   the tuner saw under 0.5 W* (the carrier dropped or was too weak during the
   tune), *SWR above 6:1: too far off for the tuner* or *Power too high for
   the tuner to tune*; hover over it or over TUNE for what to do.
-- **ON / BYP** puts the tuner in line or bypasses it.
+- **ON / BYP** puts the tuner in line or bypasses it. With RF on, the
+  amplifier refuses it (interlock #1), and a yellow line says so for a few
+  seconds: *Unkey first: the tuner can't switch to BYP with RF on.* BYP while
+  the tuner is still tuning (a tune left running after a failure) cancels the
+  tune first, then bypasses; if the tuner still reads in line afterwards, the
+  line says that too.
 
 The tuner only reports step numbers. The values shown (for example "~0.20 µH ·
 step 3") are an estimate that includes the board's own stray inductance and

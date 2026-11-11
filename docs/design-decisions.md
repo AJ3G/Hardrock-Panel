@@ -955,3 +955,11 @@ The WSPR temperature stop (interlock #12) used the 120 °F (48.8 °C) warning co
 
 AJ3G couldn't tell what the tuner's red TUNE light meant ("Lo power"). When the last tune failed, the AMP window now shows a line in plain words under the tuner drawing, whether the tuner is in line or not, and the TUNE key's hover says the same with what to do (`panel.rs`, `atu_failure`): *Lo power: the tuner saw under 0.5 W* (the HR500's `HRTR` `L`: under 0.5 W for over a second), *SWR above 6:1: too far off for the tuner*, *No match under 2:1 found*, *Power too high for the tuner to tune*. The words are the panel's own, not the manual's. TX TUNE at its first-run level (a quarter of menu 34) on the 1W key is about 0.25 W, under what the tuner needs; the drive defaults are unchanged, and the Lo power hover says to key a few watts.
 
+## 80. BYP after a failed tune; refused relay clicks said in words (11 Nov 2026)
+
+**Why.** AJ3G: "When the tune light goes red and I bypass the tuner, the tuner still engages." Two causes: interlock #1 refused the click while RF was on and only logged it (the key just went back), and a tune left running after a failure kept the tuner in line, since BYP sent only `HRTB0;`.
+
+**What.**
+- **The refusal is said** (`hardrock::link`, `refused_words`, `AmpStatus::notice`/`notice_at`; `panel.rs`, `notice`): a click interlock #1 or #4 refuses, or one whose status read goes unanswered, puts a line in yellow at the foot of the AMP window for 6 s, in every look: *Unkey first: the tuner can't switch to BYP with RF on.*, *Unkey first: the antenna relay can't switch with RF on.*, *Lower the drive first: …*, *The amplifier didn't answer, so … wasn't sent.* Interlock #1 itself is unchanged. A refused click never changes what the tuner shows (the drawing follows a click only once it is sent).
+- **BYP cancels a running tune first** (`act`): the link asks the tuner `HRTT;` and only when it answers that it is tuning sends `HRTU;` (which cancels a tune in progress but is also the TUNE button: with no answer, or not tuning, it is not sent, so BYP never starts a tune), waits 100 ms, then `HRTB0;`. ON is unchanged.
+- **Read back:** the tuner is read back 300 ms after ON or BYP, as before; if it still reads the other way, the line says *The tuner still reads in line after BYP.* (or bypassed after ON), and the key goes back to what it reads.

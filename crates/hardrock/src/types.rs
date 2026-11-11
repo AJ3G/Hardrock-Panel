@@ -515,6 +515,12 @@ pub struct AmpStatus {
     /// Nothing that guards the amplifier reads this; the interlocks go by
     /// `readings`.
     pub pending: Vec<AmpAction>,
+    /// A click the link refused or couldn't confirm, in words for the
+    /// operator ("Unkey first: …"), and when (`notice_at`, not serialised).
+    /// The panel shows it for a few seconds.
+    pub notice: Option<String>,
+    #[serde(skip)]
+    pub notice_at: Option<std::time::Instant>,
 }
 
 /// The band names `HRBN` codes stand for, 1 = 10 m … 10 = 160 m.
