@@ -13,7 +13,7 @@
 //! propagation, and its weight halves every half-life (45 minutes unless
 //! set otherwise).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use super::sphere::{V3, angle, dot, slerp, vec_ll};
 use crate::scope::bandplan;
@@ -79,6 +79,26 @@ impl Reception {
     pub(crate) fn band(&self) -> Option<&'static str> {
         bandplan::band_at(self.rf_hz).map(|b| b.name)
     }
+}
+
+/// A mode's name as GLOBE compares them: upper case, without the
+/// submode DECODE's labels carry ("FST4-60" and PSK Reporter's "FST4", or
+/// "ft8" and "FT8", are the same mode).
+pub(crate) fn norm_mode(mode: &str) -> String {
+    let m = mode.trim();
+    let end = m.find(['-', ' ', '/']).unwrap_or(m.len());
+    m[..end].to_ascii_uppercase()
+}
+
+/// A WSJT mode GLOBE can follow: the modes with a decode floor below.
+pub(crate) fn is_wsjt_mode(mode: &str) -> bool {
+    decode_floor(&norm_mode(mode)) != 0.0
+}
+
+/// How precisely a grid places a station: its length, if it is a grid.
+fn grid_precision(grid: &str) -> usize {
+    let g = grid.trim();
+    if crate::station::grid_to_latlon(g).is_some() { g.len() } else { 0 }
 }
 
 /// The lowest report a mode decodes at, dB: what a report is measured from.
@@ -286,6 +306,9 @@ pub(crate) fn heard_floor(recs: &[Reception], qth: LatLon, since: f64) -> Option
 #[derive(Default)]
 pub(crate) struct History {
     recs: VecDeque<Reception>,
+    /// CLEAR's time, Unix seconds: a heard-me report older than this is
+    /// one already wiped, come back with PSK Reporter's next hour.
+    cleared: f64,
 }
 
 /// How long receptions are kept, seconds.
@@ -295,6 +318,9 @@ const KEEP_MAX: usize = 20_000;
 
 impl History {
     pub(crate) fn add(&mut self, r: Reception) {
+        if r.src.reverse() && r.utc < self.cleared {
+            return;
+        }
         // PSK Reporter and the WSPR sites answer with the whole hour each
         // time: one of each.
         if r.src.reverse()
@@ -318,29 +344,68 @@ impl History {
         }
     }
 
+    /// CLEAR (AJ3G, 11 Nov 2026): forget every station heard and every
+    /// report of AJ3G, now; the reports PSK Reporter and the WSPR sites send
+    /// again from before `now` stay out.
+    pub(crate) fn clear(&mut self, now: f64) {
+        self.recs.clear();
+        self.cleared = now;
+    }
+
     pub(crate) fn all(&self) -> Vec<Reception> {
         self.recs.iter().cloned().collect()
     }
 
     /// The latest reception of each station on each band from each source,
-    /// newest first: the HEARD list.
+    /// newest first: the HEARD list. Each station is placed once, where its
+    /// most precise grid from any source puts it (`places`).
     pub(crate) fn latest(&self) -> Vec<Reception> {
+        let places = self.places();
         let mut out: Vec<Reception> = Vec::new();
         for r in self.recs.iter().rev() {
             if !out.iter().any(|x| x.call == r.call && x.band() == r.band() && x.src == r.src) {
-                out.push(r.clone());
+                let mut r = r.clone();
+                if let Some((grid, pos)) = places.get(&r.call.to_ascii_uppercase()) {
+                    r.grid.clone_from(grid);
+                    r.pos = *pos;
+                }
+                out.push(r);
             }
         }
         out
+    }
+
+    /// One place per station (AJ3G, 11 Nov 2026: ZS5KT showed twice, at its
+    /// FT8 grid square's middle and at PSK Reporter's six-character
+    /// locator): the most precise grid any source gave it, the latest of
+    /// those if several are as precise. Keyed by the call in upper case.
+    pub(crate) fn places(&self) -> HashMap<String, (String, LatLon)> {
+        let mut best: HashMap<String, (usize, String, LatLon)> = HashMap::new();
+        // Oldest first, so a later grid as precise wins.
+        for r in &self.recs {
+            let p = grid_precision(&r.grid);
+            let e = best.entry(r.call.to_ascii_uppercase()).or_insert((0, String::new(), r.pos));
+            if p >= e.0 && p > 0 {
+                *e = (p, r.grid.trim().to_string(), r.pos);
+            }
+        }
+        best.into_iter().filter(|(_, v)| v.0 > 0).map(|(k, v)| (k, (v.1, v.2))).collect()
     }
 
     pub(crate) fn len(&self) -> usize {
         self.recs.len()
     }
 
-    /// The latest reception of `call`, from any source.
-    pub(crate) fn last_of(&self, call: &str) -> Option<&Reception> {
-        self.recs.iter().rev().find(|r| r.call.eq_ignore_ascii_case(call))
+    /// Where `call` is: its most precise grid from any source.
+    pub(crate) fn place_of(&self, call: &str) -> Option<(String, LatLon)> {
+        let mut best: Option<(usize, &Reception)> = None;
+        for r in self.recs.iter().filter(|r| r.call.eq_ignore_ascii_case(call)) {
+            let p = grid_precision(&r.grid);
+            if best.is_none_or(|(b, _)| p >= b) {
+                best = Some((p, r));
+            }
+        }
+        best.map(|(_, r)| (r.grid.trim().to_string(), r.pos))
     }
 }
 
@@ -463,5 +528,57 @@ mod tests {
         assert_eq!(l[1].snr, Some(-5.0));
         h.prune(3800.0);
         assert_eq!(h.len(), 2);
+    }
+
+    #[test]
+    fn a_station_heard_both_ways_is_placed_once_at_its_most_precise_grid() {
+        let mut h = History::default();
+        // AJ3G decodes ZS5KT's FT8 (its square), PSK Reporter has its
+        // six-character locator, and a later decode gives the square again.
+        h.add(rec("ZS5KT", "KG50", 14.075, "FT8", -12.0, 100.0));
+        let mut me = rec("ZS5KT", "KG50mb", 14.075, "FT8", -15.0, 150.0);
+        me.src = Source::PskReporter;
+        h.add(me);
+        h.add(rec("ZS5KT", "KG50", 14.075, "FT8", -10.0, 200.0));
+        let l = h.latest();
+        assert_eq!(l.len(), 2);
+        let six = grid_to_latlon("KG50mb").unwrap();
+        for r in &l {
+            assert_eq!(r.pos, six, "{:?}", r.src);
+            assert_eq!(r.grid, "KG50mb");
+        }
+        assert_eq!(h.place_of("zs5kt").unwrap().1, six);
+        // A station known by its square alone stays at the square.
+        h.add(rec("G4XYZ", "IO91", 14.075, "FT8", -6.0, 250.0));
+        assert_eq!(h.place_of("G4XYZ").unwrap().1, grid_to_latlon("IO91").unwrap());
+    }
+
+    #[test]
+    fn clear_wipes_the_hour_and_keeps_old_heard_me_reports_out() {
+        let mut h = History::default();
+        h.add(rec("DL1ABC", "JO62", 14.075, "FT8", -8.0, 100.0));
+        let mut me = rec("K1ABC", "FN42", 14.075, "FT8", -13.0, 120.0);
+        me.src = Source::PskReporter;
+        h.add(me.clone());
+        h.clear(200.0);
+        assert_eq!(h.len(), 0);
+        // PSK Reporter's next fetch sends the same hour again: kept out.
+        h.add(me.clone());
+        assert_eq!(h.len(), 0);
+        // A report from after CLEAR, and a decode, come in.
+        me.utc = 230.0;
+        h.add(me);
+        h.add(rec("DL1ABC", "JO62", 14.075, "FT8", -8.0, 195.0));
+        assert_eq!(h.len(), 2);
+    }
+
+    #[test]
+    fn modes_compare_without_case_or_submode() {
+        assert_eq!(norm_mode("ft8"), "FT8");
+        assert_eq!(norm_mode("FST4-60"), "FST4");
+        assert_eq!(norm_mode("Q65-30A"), "Q65");
+        assert_eq!(norm_mode(" WSPR "), "WSPR");
+        assert!(is_wsjt_mode("FT4") && is_wsjt_mode("Wspr"));
+        assert!(!is_wsjt_mode("SSTV") && !is_wsjt_mode("CW"));
     }
 }

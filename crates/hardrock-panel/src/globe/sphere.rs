@@ -119,6 +119,21 @@ impl Screen {
     }
 }
 
+/// A piece of an arc as drawn: in front of the globe (or beside it), or
+/// behind it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ArcRun {
+    pub front: bool,
+    pub pts: Vec<(f64, f64)>,
+}
+
+/// An arc's pieces, and on the flat map where it is cut at the map's edge.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ArcRuns {
+    pub runs: Vec<ArcRun>,
+    pub cuts: Vec<(f64, f64)>,
+}
+
 /// The view's projection, worked out once a frame.
 pub(crate) struct Projector {
     pub view: View,
@@ -187,7 +202,9 @@ impl Projector {
             Proj::Flat => self.project(v),
             Proj::Globe => {
                 let (x, y, z) = (dot(v, self.e) * k, dot(v, self.n) * k, dot(v, self.o));
-                // Hidden only when it is behind the globe and inside its disk.
+                // Hidden only when it is behind the globe and inside its
+                // disk; a hidden point keeps its place on the screen, for an
+                // arc drawn faint behind the globe.
                 let seen = z > 0.0 || x * x + y * y > 1.0;
                 Screen {
                     x: self.view.cx + x * self.r,
@@ -246,6 +263,65 @@ impl Projector {
         out
     }
 
+    /// An arc lifted off the surface (`lift` is each point's distance from
+    /// the Earth's centre in its radii), as pieces to draw: on the globe a
+    /// piece behind the globe is kept, marked so it is drawn faint, rather
+    /// than dropped (AJ3G, 11 Nov 2026: turn the globe and see the arc
+    /// follow where it goes); on the flat map every piece is in front, and
+    /// where a path runs off one edge and on at the other both pieces are
+    /// taken to the edge and the two points it is cut at are returned.
+    pub(crate) fn arc_runs(&self, pts: &[V3], lift: &dyn Fn(usize) -> f64) -> ArcRuns {
+        let mut out = ArcRuns::default();
+        let mut cur = ArcRun { front: true, pts: Vec::new() };
+        let flat = self.view.proj == Proj::Flat;
+        let mut prev: Option<(f64, f64)> = None;
+        for (i, &v) in pts.iter().enumerate() {
+            let s = self.project_lifted(v, lift(i));
+            let front = s.seen();
+            if flat {
+                let rel = self.rel_lon(ll_of(v).lon);
+                if let Some((py, prel)) = prev
+                    && (rel - prel).abs() > 180.0
+                {
+                    // Across the edge: to the edge on this side, and on
+                    // from the other.
+                    let (edge_a, edge_b) =
+                        if prel > 0.0 { (180.0, -180.0) } else { (-180.0, 180.0) };
+                    let t = (edge_a - prel) / ((edge_a - prel) + (rel - edge_b));
+                    let y = py + t * (s.y - py);
+                    let (xa, xb) = (self.flat_x(edge_a), self.flat_x(edge_b));
+                    cur.pts.push((xa, y));
+                    if cur.pts.len() > 1 {
+                        out.runs.push(std::mem::take(&mut cur));
+                    }
+                    cur = ArcRun { front: true, pts: vec![(xb, y)] };
+                    out.cuts.push((xa, y));
+                    out.cuts.push((xb, y));
+                }
+                prev = Some((s.y, rel));
+                cur.pts.push((s.x, s.y));
+                continue;
+            }
+            if !cur.pts.is_empty() && front != cur.front {
+                // The piece ends here and the next begins here, so the two
+                // join.
+                let last = *cur.pts.last().unwrap();
+                let mid = ((last.0 + s.x) / 2.0, (last.1 + s.y) / 2.0);
+                cur.pts.push(mid);
+                if cur.pts.len() > 1 {
+                    out.runs.push(std::mem::take(&mut cur));
+                }
+                cur = ArcRun { front, pts: vec![mid] };
+            }
+            cur.front = front;
+            cur.pts.push((s.x, s.y));
+        }
+        if cur.pts.len() > 1 {
+            out.runs.push(cur);
+        }
+        out
+    }
+
     /// The view turned by a drag of `dx`, `dy` points.
     pub(crate) fn dragged(&self, dx: f64, dy: f64) -> LatLon {
         let deg_per_pt = match self.view.proj {
@@ -254,7 +330,9 @@ impl Projector {
         };
         let c = self.view.centre;
         LatLon {
-            lat: (c.lat + dy * deg_per_pt).clamp(-85.0, 85.0),
+            // Right over the poles (AJ3G, 11 Nov 2026): the view has no
+            // singularity there, east and north staying a right angle.
+            lat: (c.lat + dy * deg_per_pt).clamp(-90.0, 90.0),
             lon: (c.lon - dx * deg_per_pt + 540.0).rem_euclid(360.0) - 180.0,
         }
     }
@@ -399,5 +477,63 @@ mod tests {
             close(f.dragged(-f.r / 36.0, 0.0).lon, -180.0, 1e-9)
                 || close(f.dragged(-f.r / 36.0, 0.0).lon, 180.0, 1e-9)
         );
+    }
+
+    #[test]
+    fn the_view_turns_right_over_the_pole_without_a_singularity() {
+        let p = view(Proj::Globe, 80.0, -75.0);
+        // A long drag down stops at the pole, not 5° short of it.
+        let c = p.dragged(0.0, 10_000.0);
+        assert!(close(c.lat, 90.0, 1e-9));
+        let top = view(Proj::Globe, 90.0, -75.0);
+        // The pole in the middle, its axes still square and whole.
+        let s = top.project(vec_of(90.0, 0.0));
+        assert!(close(s.x, 400.0, 1e-6) && close(s.y, 300.0, 1e-6) && close(s.z, 1.0, 1e-12));
+        assert!(close(dot(top.e, top.n), 0.0, 1e-12));
+        assert!(close(dot(top.e, top.e), 1.0, 1e-12) && close(dot(top.n, top.n), 1.0, 1e-12));
+        // The centre's meridian runs down the screen from the pole.
+        let m = top.project(vec_of(60.0, -75.0));
+        assert!(close(m.x, 400.0, 1e-6) && m.y > 300.0);
+        // And a point back from the screen lands where it was.
+        let back = top.unproject(430.0, 340.0).unwrap();
+        let again = top.project(vec_ll(back));
+        assert!(close(again.x, 430.0, 1e-6) && close(again.y, 340.0, 1e-6));
+    }
+
+    #[test]
+    fn an_arc_behind_the_globe_is_kept_faint_not_dropped() {
+        let p = view(Proj::Globe, 0.0, 0.0);
+        // From the middle of the view round to the far side, low.
+        let pts = great_circle(vec_of(0.0, 0.0), vec_of(0.0, 170.0), 34);
+        let a = p.arc_runs(&pts, &|_| 1.01);
+        assert!(a.runs.len() >= 2);
+        assert!(a.runs[0].front && !a.runs.last().unwrap().front);
+        // The pieces join.
+        assert_eq!(a.runs[0].pts.last(), a.runs[1].pts.first());
+        assert!(a.cuts.is_empty());
+        // Lifted high, the same path is seen past the limb.
+        let high =
+            p.arc_runs(&pts, &|i| 1.0 + 0.4 * (std::f64::consts::PI * i as f64 / 34.0).sin());
+        let seen: usize = high.runs.iter().filter(|r| r.front).map(|r| r.pts.len()).sum();
+        let low: usize = a.runs.iter().filter(|r| r.front).map(|r| r.pts.len()).sum();
+        assert!(seen > low);
+    }
+
+    #[test]
+    fn a_flat_path_cut_at_the_edge_is_taken_to_it_and_marked_both_sides() {
+        let p = view(Proj::Flat, 0.0, -75.0);
+        // Across 105° E, the map's edge.
+        let pts = great_circle(vec_of(10.0, 95.0), vec_of(10.0, 115.0), 20);
+        let a = p.arc_runs(&pts, &|_| 1.0);
+        assert_eq!(a.runs.len(), 2);
+        assert_eq!(a.cuts.len(), 2);
+        let (right, left) = (p.flat_x(180.0), p.flat_x(-180.0));
+        assert!(close(a.runs[0].pts.last().unwrap().0, right, 1e-9));
+        assert!(close(a.runs[1].pts[0].0, left, 1e-9));
+        // At the same height on both sides.
+        assert!(close(a.cuts[0].1, a.cuts[1].1, 1e-9));
+        // A path that stays on the map is one piece, with no marks.
+        let one = p.arc_runs(&great_circle(vec_of(10.0, -80.0), vec_of(40.0, 0.0), 20), &|_| 1.0);
+        assert_eq!((one.runs.len(), one.cuts.len()), (1, 0));
     }
 }

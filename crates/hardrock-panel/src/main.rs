@@ -1624,6 +1624,16 @@ impl eframe::App for App {
         for r in self.decode.globe_feed.drain(..) {
             self.globe.add(r);
         }
+        // GLOBE shows the mode in use: the TX window's while it is open,
+        // else DECODE's running mode (AJ3G, 11 Nov 2026).
+        self.globe.set_mode(if self.saved.show_tx {
+            Some(match self.saved.tx.mode {
+                tx::TxMode::Ft8 => "FT8",
+                tx::TxMode::Wspr => "WSPR",
+            })
+        } else {
+            self.decode.running_kind().map(|k| k.label())
+        });
         // A line picked in DECODE: that station and its path on GLOBE.
         if let Some((call, hz)) = self.decode.globe_pick.take() {
             self.globe.select_call(&call, hz);
