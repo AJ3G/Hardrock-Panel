@@ -66,6 +66,13 @@ pub(crate) struct RxSettings {
     pub muted: bool,
     /// The panel receiver's noise reduction (`sdr::nr`): 0 off, 1 to 4.
     pub nr: u8,
+    /// NR's slider, 1 to 4: the level NR comes back on at (decision 109).
+    /// While NR is on it is `nr`.
+    pub nr_level: u8,
+    /// The impulse noise blanker on the I/Q (`sdr::nb`, decision 108).
+    pub nb: bool,
+    /// Its threshold, times the average: lower blanks more.
+    pub nb_threshold: f32,
     /// Put the radio in split with VFO B on the receiver, so it transmits
     /// where the panel listens (decision 22).
     pub tx_follows_rx: bool,
@@ -200,6 +207,9 @@ impl Default for RxSettings {
             volume: 0.5,
             muted: false,
             nr: 0,
+            nr_level: 2,
+            nb: false,
+            nb_threshold: sdr::nb::DEFAULT_THRESHOLD,
             tx_follows_rx: true,
             rx_hz: 14_212_500.0,
             centre_hz: 14_200_000.0,
@@ -208,6 +218,32 @@ impl Default for RxSettings {
             dsp: DspSettings::default(),
             slices: Vec::new(),
         }
+    }
+}
+
+impl RxSettings {
+    /// NR's chip (decision 109): off, or back on at the slider's level.
+    pub(crate) fn toggle_nr(&mut self) {
+        self.follow_nr();
+        self.nr = if self.nr > 0 { 0 } else { self.nr_level };
+    }
+
+    /// NR's slider: the level NR runs at while on, and comes back on at.
+    pub(crate) fn set_nr_level(&mut self, level: u8) {
+        self.nr_level = level.clamp(1, 4);
+        if self.nr > 0 {
+            self.nr = self.nr_level;
+        }
+    }
+
+    /// Keep the slider on NR's level while NR is on, however it was set (E1
+    /// sets `nr` itself), and within 1 to 4 whatever a settings file says.
+    pub(crate) fn follow_nr(&mut self) {
+        if self.nr > 0 {
+            self.nr = self.nr.min(4);
+            self.nr_level = self.nr;
+        }
+        self.nr_level = self.nr_level.clamp(1, 4);
     }
 }
 
@@ -426,6 +462,8 @@ pub(crate) struct Rx {
     audio_dev: Option<Option<String>>,
     /// The NR level last sent to the pipeline.
     nr_sent: Option<u8>,
+    /// The noise blanker last sent to the pipeline (`None`: nothing sent).
+    nb_sent: Option<Option<f32>>,
     pub audio_error: Option<String>,
     pub taps: Arc<Taps>,
     /// The receiver, the radio's own Hz, its mode and passband.
@@ -498,6 +536,7 @@ impl Default for Rx {
             audio: None,
             audio_dev: None,
             nr_sent: None,
+            nb_sent: None,
             audio_error: None,
             taps: Arc::new(Taps::default()),
             rx_hz: s.rx_hz,
@@ -704,6 +743,7 @@ impl Rx {
         self.audio = None;
         self.audio_dev = None;
         self.nr_sent = None;
+        self.nb_sent = None;
         self.slices_sent = None;
         self.slice_audio.clear();
         self.pipeline = Some(p);
@@ -1112,6 +1152,11 @@ impl Rx {
         if self.nr_sent != Some(s.nr) {
             p.send(Command::SetNr(s.nr));
             self.nr_sent = Some(s.nr);
+        }
+        let nb = s.nb.then_some(s.nb_threshold);
+        if self.nb_sent != Some(nb) {
+            p.send(Command::SetNb(nb));
+            self.nb_sent = Some(nb);
         }
         if self.audio_dev.as_ref() != Some(&s.audio_out) {
             self.audio_dev = Some(s.audio_out.clone());
@@ -1692,6 +1737,46 @@ mod tests {
         assert_eq!(old.dsp, d);
         let odd: DspSettings = serde_json::from_str("{\"shape\": \"Gaussian\"}").unwrap();
         assert_eq!(odd.shape, Shape::Sharp);
+    }
+
+    #[test]
+    fn nb_and_nrs_slider_are_kept() {
+        let d = RxSettings::default();
+        assert!(!d.nb);
+        assert_eq!(d.nb_threshold, sdr::nb::DEFAULT_THRESHOLD);
+        assert_eq!((d.nr, d.nr_level), (0, 2));
+        let changed = RxSettings { nb: true, nb_threshold: 3.5, nr: 3, nr_level: 3, ..d.clone() };
+        let back: RxSettings =
+            serde_json::from_str(&serde_json::to_string(&changed).unwrap()).unwrap();
+        assert_eq!(back, changed);
+        // A settings file from before them: NB off, NR's level its own.
+        let mut old: RxSettings = serde_json::from_str("{\"nr\": 4}").unwrap();
+        assert!(!old.nb);
+        assert_eq!(old.nb_threshold, sdr::nb::DEFAULT_THRESHOLD);
+        old.follow_nr();
+        assert_eq!(old.nr_level, 4);
+    }
+
+    #[test]
+    fn nrs_chip_and_slider() {
+        let mut s = RxSettings::default();
+        s.set_nr_level(3);
+        assert_eq!((s.nr, s.nr_level), (0, 3), "the slider alone leaves NR off");
+        s.toggle_nr();
+        assert_eq!(s.nr, 3);
+        s.set_nr_level(1);
+        assert_eq!(s.nr, 1, "the slider moves NR while on");
+        s.set_nr_level(9);
+        assert_eq!(s.nr, 4);
+        s.toggle_nr();
+        assert_eq!((s.nr, s.nr_level), (0, 4));
+        // E1 turning NR on at 2 moves the slider there.
+        s.nr = 2;
+        s.follow_nr();
+        assert_eq!(s.nr_level, 2);
+        s.toggle_nr();
+        s.toggle_nr();
+        assert_eq!(s.nr, 2);
     }
 
     fn now(transmitting: bool) -> RadioNow<'static> {

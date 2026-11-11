@@ -225,21 +225,55 @@ fn body(ui: &mut egui::Ui, popped: bool, scope: &mut Scope, a: &mut Args<'_>, ou
             s.muted = !s.muted;
         }
         // NR (AJ3G, 31 Oct 2026): the panel receiver's own noise reduction,
-        // a click for the next level. The DUO's NR (RADIO's E1) works on the
-        // DUO's audio, heard up to 192 kHz; this one on the panel's.
-        let nr_text = if s.nr == 0 { "NR".to_string() } else { format!("NR {}", s.nr) };
-        let r = chrome::chip(ui, s.nr > 0, &nr_text).on_hover_text(
-            "Noise reduction on the panel's receiver: click for OFF, 1, 2, 3, 4. 1 or 2 \
-                 for SSB, 3 or 4 for CW. Right-click: off. Only what you hear: the decoders \
-                 get the audio untouched. The DUO's own NR is on RADIO's E1 knob and works on \
-                 the DUO's audio (192 kHz SPAN)",
+        // a chip for on and off and a slider for its level (decision 109).
+        // The DUO's NR (RADIO's E1) works on the DUO's audio, heard up to
+        // 192 kHz; this one on the panel's.
+        s.follow_nr();
+        let r = chrome::chip(ui, s.nr > 0, "NR").on_hover_text(
+            "Noise reduction on the panel's receiver: click for on or off; the slider sets \
+             its level, 1 (light, for SSB) to 4 (strong, for CW). Only what you hear: the \
+             decoders get the audio untouched. The DUO's own NR is on RADIO's E1 knob and \
+             works on the DUO's audio (192 kHz SPAN)",
         );
         if r.clicked() {
-            s.nr = (s.nr + 1) % 5;
+            s.toggle_nr();
         }
-        if r.secondary_clicked() {
-            s.nr = 0;
+        let mut level = s.nr_level;
+        if ui
+            .add(egui::Slider::new(&mut level, 1..=4).custom_formatter(|v, _| match v as u8 {
+                1 => "1 light".into(),
+                4 => "4 strong".into(),
+                n => n.to_string(),
+            }))
+            .on_hover_text("NR's level: 1 light (SSB) to 4 strong (CW)")
+            .changed()
+        {
+            s.set_nr_level(level);
         }
+        // NB (AJ3G, 11 Nov 2026: "Add NB and slide to scope"): the panel's
+        // impulse blanker on the I/Q (decision 108). Not the DUO's NB, which
+        // is RADIO's.
+        if chrome::chip(ui, s.nb, "NB")
+            .on_hover_text(
+                "Noise blanker on the panel's I/Q: blanks clicks and crackle (ignition, power \
+                 lines) before the scope and every receiver, so the spectrum shows it too. The \
+                 DUO's own NB is on RADIO's E1 knob",
+            )
+            .clicked()
+        {
+            s.nb = !s.nb;
+        }
+        let range = sdr::nb::THRESHOLD_RANGE;
+        ui.add(
+            egui::Slider::new(&mut s.nb_threshold, range)
+                .step_by(0.5)
+                .custom_formatter(|v, _| format!("{v:.1}×"))
+                .text(RichText::new("lower = more").size(11.0).weak()),
+        )
+        .on_hover_text(
+            "NB's threshold: a sample this many times the average level is blanked. Lower \
+             blanks more (2: hard), higher only the biggest spikes (20: light); 5 is SDRoxide's",
+        );
         match (rx.audio_state(), &rx.audio_error) {
             (_, Some(e)) => {
                 ui.label(RichText::new(e).size(11.5).color(theme::ALERT()));

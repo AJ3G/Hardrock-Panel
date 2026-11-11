@@ -464,12 +464,21 @@ name, VB-Cable's *CABLE Input* included, to feed an outside decoder. The
 scope has its volume and **Mute**. Up to 192 kHz the DUO plays its own audio
 too, and the panel sets the DUO's mode and filter to the receiver's; above
 192 kHz the DUO mutes its own audio and the panel's receiver is the one heard.
-**NR**, beside MUTE, is the panel receiver's noise reduction: click for 1, 2,
-3, 4 and back to off (right-click: off). It is an adaptive filter that keeps
+**NR**, beside MUTE, is the panel receiver's noise reduction: click the chip
+for on or off; its slider sets the level, 1 (light) to 4 (strong), and is
+kept between runs. It is an adaptive filter that keeps
 what it can predict, a CW note or a voice, and drops the hiss: 1 or 2 for
 SSB, 3 or 4 for CW. It works on what you hear only; the decoders get the
 audio untouched. The DUO's own NR, on RADIO's E1 knob, works on the DUO's
 audio, which is what you hear at 192 kHz SPAN; turning it also sets this NR.
+**NB**, after NR, is the panel's own noise blanker: click the chip for on or
+off. It blanks clicks and crackle (ignition, power lines) on the I/Q before
+the scope and every receiver, so the spectrum and waterfall show them gone
+too. Its slider is the threshold, how many times the average level a spike
+must reach to be blanked: lower blanks more (2 hard, 20 only the biggest
+spikes, 5 to start). It needs a moment (8192 samples) to learn the level after
+being switched on. On and threshold are kept between runs. The DUO's own NB, on
+RADIO's E1 knob, is separate and unchanged.
 The panel's receiver and its slices go quiet while the radio transmits, and
 for 0.3 s after: the DUO keeps sending I/Q during an over, and it would be
 heard as static.

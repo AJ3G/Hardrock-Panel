@@ -11,6 +11,7 @@ its SDRoxide source path in a header comment:
 | `src/nco.rs`, `src/decim.rs`, `src/fir.rs`, `src/window.rs`, `src/ddc.rs`, `src/simd.rs`, `src/agc.rs` | `crates/sdroxide-dsp/src/` (same names), copied |
 | `src/demod.rs` | `crates/sdroxide-dsp/src/demod.rs`, cut down to SSB/CW, AM and NFM |
 | `src/spectrum.rs` | adapted from `crates/sdroxide-dsp/src/spectrum.rs` |
+| `src/nb.rs` | adapted from `crates/sdroxide-dsp/src/nb.rs`: interleaved I/Q, a settable threshold |
 | `src/types.rs` | `AgcMode` and `MAX_MANUAL_GAIN_DB` from `crates/sdroxide-types` |
 
 The receiver, the spectrum's frame limiter, Welch overlap, averaging, peak

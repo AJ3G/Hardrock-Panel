@@ -26,6 +26,7 @@ use crossbeam_channel::{
 use crate::agc::AgcParams;
 use crate::audio::AudioFeed;
 use crate::ddc::DecimatorKind;
+use crate::nb::NoiseBlanker;
 use crate::passband::FilterShape;
 use crate::receiver::Receiver;
 use crate::source::IqSource;
@@ -68,6 +69,10 @@ pub enum Command {
     SetAgc(AgcMode),
     /// The receiver's noise reduction on its listening audio: 0 off, 1 to 4.
     SetNr(u8),
+    /// The impulse noise blanker on the I/Q, ahead of the spectrum, the I/Q
+    /// tap and every receiver: `None` off, or its threshold (times the
+    /// average; lower blanks more). See [`crate::nb`].
+    SetNb(Option<f32>),
     /// The listening AGC's attack, decay, hang and target.
     SetAgcParams(AgcParams),
     /// The decoders' AGC.
@@ -421,6 +426,7 @@ fn run(
     let mut audio_tap: Option<AudioTap> = None;
     let mut paused = false;
     let mut spectrum_on = true;
+    let mut nb: Option<NoiseBlanker> = None;
 
     let (block_tx, block_rx) = bounded::<IqBlock>(SPECTRUM_QUEUE);
     let (msg_tx, msg_rx) = unbounded::<SpecMsg>();
@@ -454,6 +460,11 @@ fn run(
                         Command::SetPassband(lo, hi) => receiver.set_passband(lo, hi),
                         Command::SetAgc(a) => receiver.set_agc(a),
                         Command::SetNr(n) => receiver.set_nr(n),
+                        Command::SetNb(t) => match (t, nb.as_mut()) {
+                            (None, _) => nb = None,
+                            (Some(t), Some(b)) => b.set_threshold(t),
+                            (Some(t), None) => nb = Some(NoiseBlanker::new(t)),
+                        },
                         Command::SetAgcParams(p) => receiver.set_agc_params(p),
                         Command::SetDecoderAgc(p) => receiver.set_decoder_agc(p),
                         Command::SetGain(g) => receiver.set_gain_db(g),
@@ -526,6 +537,11 @@ fn run(
 
         let n = source.read(&mut buf);
         nonfinite += sanitise(&mut buf[..n]) as u64;
+        // Blanking comes first, at the radio's rate, as in SDRoxide: the
+        // spectrum shows the I/Q blanked, and every receiver hears it so.
+        if let Some(b) = nb.as_mut() {
+            b.process(&mut buf[..n]);
+        }
         if n == 0 {
             if !source.is_alive() {
                 publish(&shared, |s| s.alive = false);
