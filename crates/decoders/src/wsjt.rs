@@ -146,6 +146,18 @@ impl WsjtMode {
         })
     }
 
+    /// Where a slot is decoded, seconds into it, when that is sooner than
+    /// its end: WSPR, whose transmissions end 111.6 s into the two minutes
+    /// ([`Self::signal_end_s`]), at 113 s, leaving 1.4 s for a station that
+    /// starts late, rather than waiting out the last 7 s of silence (AJ3G,
+    /// 11 Nov 2026). `None` for the others: decoded at the slot's end.
+    pub fn decode_at_s(self) -> Option<f64> {
+        match self {
+            WsjtMode::Wspr => Some(113.0),
+            _ => None,
+        }
+    }
+
     /// Where a transmission sent on time ends, seconds into the slot: its
     /// start ([`Self::start_delay_s`], the decoder's DT = 0) plus its length
     /// ([`Self::signal_s`]). FT8 13.14 s, FT4 5.54 s, WSPR 111.59 s.

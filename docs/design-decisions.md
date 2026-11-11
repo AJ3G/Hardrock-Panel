@@ -968,3 +968,7 @@ AJ3G couldn't tell what the tuner's red TUNE light meant ("Lo power"). When the 
 
 - **RADIO** (docked) wouldn't shrink after being made bigger: it claimed all its room with `set_min_size`, and its face, a little bigger than the room while its scale settled, became the size egui keeps a window at least as big as. Now the face is drawn in a child that isn't allocated in the window, clipped to the room, and only the room counts (as the TX window's columns, decision 71).
 - **DECODE** (docked) slid sideways during TX: its width followed its contents. It is drawn the same way, with a minimum of 420 × 320, so it moves and resizes only when dragged.
+
+## 82. WSPR decoded at the beacons' end (11 Nov 2026)
+
+AJ3G: decode WSPR at the end of the transmissions, not of the slot. A WSPR transmission runs from 1 s to 111.6 s of its two minutes, so the decoder's slot recorder now finishes a WSPR slot 113 s in (`WsjtMode::decode_at_s`, `SlotRecorder::with_cut`), leaving 1.4 s for a late start, and the decode comes about 7 s sooner. The slot is still 120 s of samples, silent after the cut, and what is heard from 113 s to 120 s is not kept. DECODE's WSPR and the skimmer's both. Searching for candidates during the slot was not done.

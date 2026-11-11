@@ -641,6 +641,8 @@ what doesn't fit is clipped or scrolls.
   receiver's audio in UTC slots. Each decode shows its UTC, SNR, DT (a
   drifting PC clock shows here), audio frequency and RF frequency. Picking
   the mode puts the receiver on its dial frequency in USB (see above).
+  WSPR is decoded 113 s into its two minutes, as soon as the beacons have
+  ended (they run 1 s to 111.6 s), rather than at the slot's end.
 - **Keyboard**: CW, RTTY (45.45 baud, 170 Hz), PSK31, NAVTEX, Olivia 8/500
   and THOR16, as running text. Set the audio frequency the signal sits at,
   except for CW, which reads whichever tone is strongest between 200 and
