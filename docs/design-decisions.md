@@ -865,3 +865,14 @@ The transmit plan's items 2 and 3 (AJ3G, 10 Nov 2026).
 
 **Not done yet:** occupancy from the scope's own spectrum for AUTO (decodes only for now), a sound for "calling you", REPLY on DECODE's own rows, WSPR's own decodes in the TX list (they are on GLOBE).
 
+## 75. LOG: grids for FILL MISSING and from decodes; picking the ADIF file (11 Nov 2026)
+
+**Why.** AJ3G: "Fill Missing does not add missing grid squares … you should use online resource to fill in the data", and "If its missing and that station is heard again fill the data." With no HamQTH login FILL MISSING ran only cty.dat, which has no grids. And typing a path to import was awkward.
+
+**What.**
+- **FILL MISSING's order for a grid** (`logbook/lookup.rs`, `FillBatch`): QRZ.com XML when switched on with a login, HamQTH when it has a login (the second asked only for a grid the first didn't give), callook.info for a US call (FCC data, no login, `https://callook.info/<CALL>/json`), then with no network the same call's latest grid elsewhere in the log and the grid DECODE heard it send this run (`station::Heard`). A service with a position and no grid gives the 6-character grid it is in. Only the callsign goes to a service (with that service's own login). Each source is paced (QRZ.com 1 s, HamQTH 1.5 s, callook.info 1 s) and each call is asked once per source in a run; a source that fails is left out for the rest of the run and the others go on. Empty fields only, never `/` calls' grids.
+- **The report** in LOG's status line: QSOs filled from cty.dat, grids filled by source, the calls still without one (the first eight), sources left out and why, and, with no QRZ.com or HamQTH login, a pointer to SETTINGS → Logbook.
+- **Heard again:** every 15 s the log's grid-less calls are looked up in DECODE's heard table (FT8 decodes with a grid, WSPR decodes); QSOs with no grid are filled and the file is saved once for all of them, with a note such as "grid FN20 for K1ABC from a decode, 3 QSOs". Hooked in through `logbook::show`, which now takes `&decode.heard`.
+- **FILE's ▾ drop-down** lists the .adi files found when it opens: WSJT-X's `wsjtx_log.adi`, the last eight imports (kept in the settings), the .adi files beside the log (the panel's exports), and those directly in Documents and Downloads, newest first. **BROWSE…** (Windows only, the `rfd` crate with no default features, on its own thread) opens the system's file dialog. Either fills the FILE box.
+
+**Not done:** QRZ.com's free (non-XML) pages are not scraped; the form's LOOKUP still asks only the service chosen in SETTINGS.
