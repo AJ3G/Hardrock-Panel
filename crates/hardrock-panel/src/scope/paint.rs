@@ -413,6 +413,7 @@ fn paint_spectrum(
         paint_skim_spectrum(sc, &p, all, trace, cx);
     }
     paint_offset(sc, &p, all, cx, true);
+    paint_dx_mark(sc, &p, all, cx, true);
 
     // The radio's centre, dashed.
     let xc = x(cx.span.center);
@@ -940,6 +941,30 @@ fn paint_tx_waterfall(
     }
 }
 
+/// The station being worked: a thin line in the trace's colour at its
+/// frequency, its call in a flag at the top of the spectrum, as the offset
+/// bar's but quieter. Nothing to grab.
+fn paint_dx_mark(sc: &Scope, p: &egui::Painter, rect: Rect, cx: &Ctx, spectrum: bool) {
+    let Some((hz, call)) = &sc.dx_mark else { return };
+    let v = cx.view;
+    let xx = v.x_of(*hz, rect.left(), rect.width());
+    if !(rect.left()..=rect.right()).contains(&xx) {
+        return;
+    }
+    let ink_dx = accent();
+    p.vline(xx.round() + 0.5, rect.y_range(), Stroke::new(1.0, ink_dx.gamma_multiply(0.7)));
+    if !spectrum || call.is_empty() {
+        return;
+    }
+    let g = p.layout_no_wrap(call.clone(), mono(10.0), ink_dx);
+    let size = g.size() + vec2(8.0, 4.0);
+    let left = if xx + 4.0 + size.x > rect.right() { xx - 4.0 - size.x } else { xx + 4.0 };
+    let r = Rect::from_min_size(pos2(left, rect.top() + 56.0), size);
+    p.rect_filled(r, 2.0, ground().gamma_multiply(0.85));
+    p.rect_stroke(r, 2.0, Stroke::new(1.0, ink_dx.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+    p.galley(pos2(r.left() + 4.0, r.top() + 2.0), g, ink_dx);
+}
+
 /// The 3D surface: the receding floor, the GPU surface, and the receiver on
 /// its front plane.
 fn paint_surface(
@@ -1346,6 +1371,7 @@ fn paint_waterfall(
     // ticks, so the lines pass behind the labels as the rows scroll (AJ3G).
     paint_skim_waterfall(sc, ui, &p, rect, cx);
     paint_offset(sc, &p, rect, cx, false);
+    paint_dx_mark(sc, &p, rect, cx, false);
 
     // The colour bar, with the levels it runs between.
     let bar = Rect::from_min_max(

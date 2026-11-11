@@ -331,6 +331,8 @@ pub struct Scope {
     tx_shape: Option<txsig::TxShape>,
     tx_rows: VecDeque<txsig::TxRow>,
     held_row_at: f64,
+    /// The station being worked: its dial (radio Hz) and call.
+    dx_mark: Option<(f64, String)>,
     /// The samples the pipeline had read: fewer means a new pipeline.
     samples_seen: u64,
     /// The GPU watchdog's resyncs already told, and a note for the status
@@ -436,6 +438,7 @@ impl Scope {
             tx_shape: None,
             tx_rows: VecDeque::new(),
             held_row_at: f64::NAN,
+            dx_mark: None,
             samples_seen: 0,
             resyncs_told: 0,
             notice: None,
@@ -569,6 +572,14 @@ impl Scope {
     /// colour while the radio is on the air (decision 74).
     pub fn set_tx_signal(&mut self, sig: Option<TxSignal>) {
         self.tx_signal = sig;
+    }
+
+    /// The station being worked, as a thin line at its frequency (the
+    /// radio's own Hz) through the trace and the waterfall, labelled with
+    /// its call; `None` takes it away. Not draggable: it is where the
+    /// station is, not a control.
+    pub fn set_dx_mark(&mut self, mark: Option<(f64, String)>) {
+        self.dx_mark = mark;
     }
 
     /// The busy parts TX AUTO is steering around, radio Hz.
@@ -1310,6 +1321,28 @@ mod tests {
             transmitting,
             on_air: transmitting,
         }
+    }
+
+    #[test]
+    fn the_station_being_worked_is_marked_where_it_is_and_cannot_be_moved() {
+        let mut sc = Scope::new(None, ScopeSettings::default());
+        let rig = ft8_rig(false);
+        let v = view::view(Span { center: 14_100_000.0, width: 192_000.0 * USABLE_SPAN }, None);
+        let hz = 14_075_234.0;
+        sc.set_dx_mark(Some((hz, "K1ABC".into())));
+        // A drag that starts on its line moves the view or nothing, never
+        // the mark.
+        let x = ((hz - v.lo) / (v.hi - v.lo) * 1280.0) as f32;
+        let (a, b) = (egui::pos2(x, 120.0), egui::pos2(x + 40.0, 120.0));
+        frames(
+            &mut sc,
+            rig,
+            vec![press(a, true, false), vec![egui::Event::PointerMoved(b)], press(b, false, false)],
+        );
+        assert_eq!(sc.dx_mark, Some((hz, "K1ABC".to_string())));
+        sc.set_dx_mark(None);
+        frames(&mut sc, rig, vec![vec![]]);
+        assert_eq!(sc.dx_mark, None);
     }
 
     #[test]
