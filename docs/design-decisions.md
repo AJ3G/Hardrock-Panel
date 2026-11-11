@@ -1074,3 +1074,7 @@ AJ3G asked for an indicator as the mouse moves through the waterfall or the spec
 
 AJ3G sent SDRoxide's transcript as the way it makes most sense: a dot and the message on each line, ours in the TX colour and theirs in green, and the contact closed by a boxed "■ QSO with KH6DC complete — logged". The panel's had a UTC and TX/RX on every line and a plain closing line. Now each line is a dot and the message (ours orange, theirs green, notes such as "CT7AUT is working KJ7NO" dimmed with a small dot), the UTC on hover, a run of the same message of ours sent again folded into one line with "×N", and the logged contact in a green box.
 
+## 100. TX IN on USB audio when the radio connects (11 Nov 2026)
+
+At every start AJ3G met "The radio's TX IN (menu 32) is on Auto, so TUNE would send that" and had to press USB AUDIO: the DUO keeps menu 32 across power cycles, and interlock #7 rightly refuses to key on anything but USB audio. SDRoxide asserts its TX input (`TI1;`) when its port opens. The panel now does the same, once each connection, when menu 32 reads anything else (SETTINGS, Radio, "Put TX IN (menu 32) on USB audio when connecting", on by default). Once only, so a change made on the radio afterwards stands until the next connection. Interlock #7 is unchanged: keying still needs USB audio, read again just before the key.
+

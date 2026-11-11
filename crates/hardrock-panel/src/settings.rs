@@ -167,7 +167,7 @@ pub(crate) fn settings_radio_tab(
              and SWR, which fill FWD, RFL and SWR while the amplifier is in OFF (bypass), its \
              dial, which can set the amplifier's band, and its menu settings, under RADIO. It \
              keys the radio only for TX TUNE and RIG TUNE, and changes only menu 34 (the power \
-             buttons) and menu 32 (USB AUDIO), when you press them. Only one program can have \
+             buttons) and menu 32 (USB AUDIO, and once when connecting, below). Only one program can have \
              the port open, so close SDRoxide, FDM-SW2 or a logger using it first.",
         )
         .weak(),
@@ -292,6 +292,13 @@ pub(crate) fn settings_radio_tab(
         );
         ui.end_row();
     });
+    ui.add_space(6.0);
+    chrome::checkbox(ui, &mut cfg.usb_audio_at_connect, "Put TX IN (menu 32) on USB audio when connecting")
+        .on_hover_text(
+            "As SDRoxide does: once each time the panel connects, the radio's TX IN is set to its \
+             USB audio if it reads Auto or the microphone, so TX TUNE and the TX window can key. \
+             Change it on the radio afterwards and the panel leaves it until the next connection.",
+        );
     ui.add_space(8.0);
     let (text, col) = match status {
         None => ("Off".to_string(), theme::TEXT()),

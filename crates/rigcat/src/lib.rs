@@ -63,6 +63,11 @@ pub struct RigConfig {
     /// Send the radio's frequency to the amplifier, so its band follows the
     /// radio between transmissions (interlock #3).
     pub follow_band: bool,
+    /// Put the radio's TX IN (menu 32) on its USB audio once each time the
+    /// port opens, as SDRoxide asserts it (decision 100): the DUO remembers
+    /// it across power cycles, and on Auto or the microphone the panel's
+    /// TUNE and overs are refused (interlock #7).
+    pub usb_audio_at_connect: bool,
 }
 
 impl Default for RigConfig {
@@ -74,6 +79,7 @@ impl Default for RigConfig {
             baud: RigModel::FdmDuo.default_baud(),
             // As in SDRoxide.
             follow_band: true,
+            usb_audio_at_connect: true,
         }
     }
 }

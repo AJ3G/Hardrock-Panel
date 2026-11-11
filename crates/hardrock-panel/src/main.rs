@@ -192,6 +192,8 @@ struct App {
     /// TUNE was started with the amplifier showing a trip, which keying
     /// clears; it doesn't stop that TUNE until it has cleared (#6).
     trip_carried: bool,
+    /// TX IN has been put on USB audio for this connection (decision 100).
+    usb_audio_set: bool,
     /// The amplifier's last good readings, which an over in progress rides
     /// a short silence on (#6).
     amp_hold: tune::AmpHold,
@@ -314,6 +316,7 @@ impl App {
             tone: audio::Tone::default(),
             sounds: audio::output_devices(),
             trip_carried: false,
+            usb_audio_set: false,
             amp_hold: tune::AmpHold::default(),
             tune_swr: tune::TuneSwr::default(),
             stop_logged: None,
@@ -781,6 +784,28 @@ impl App {
     /// Keep the amplifier's band on the radio's, when asked to. The link holds
     /// each change until the amplifier shows no RF (interlock 3); this side
     /// also waits while the radio says it is transmitting.
+    /// Once each connection, the radio's TX IN (menu 32) on its USB audio
+    /// when it reads anything else, as SDRoxide does when its port opens
+    /// (decision 100). Once only, so a change made on the radio afterwards
+    /// stands until the next connection.
+    fn usb_audio_at_connect(&mut self, rig: Option<&RigStatus>) {
+        let Some(r) = rig.filter(|r| r.connected) else {
+            self.usb_audio_set = false;
+            return;
+        };
+        if self.usb_audio_set || !self.saved.rig.usb_audio_at_connect {
+            return;
+        }
+        let Some(input) = r.tx_input.as_deref() else { return };
+        self.usb_audio_set = true;
+        if input != "USB audio"
+            && let Some(link) = &self.rig
+        {
+            tracing::info!("rigcat: TX IN (menu 32) read {input}; set to USB audio on connecting");
+            link.use_usb_audio();
+        }
+    }
+
     fn follow_band(&mut self, amp: &AmpStatus, rig: Option<&RigStatus>, xvtr_hz: i64) {
         let reconnected = amp.connected && !self.amp_was_connected;
         self.amp_was_connected = amp.connected;
@@ -1350,6 +1375,7 @@ impl eframe::App for App {
         let rig = self.rig.as_ref().map(|l| l.status());
         let xvtr = radio::xvtr_hz(ctx);
         self.follow_band(&st, rig.as_ref(), xvtr);
+        self.usb_audio_at_connect(rig.as_ref());
         // The amplifier as it reports itself, before the radio's readings
         // fill it in: what TUNE's interlocks (#6) judge by.
         let amp_raw = st.clone();
