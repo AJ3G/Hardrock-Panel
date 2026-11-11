@@ -814,6 +814,10 @@ impl App {
         // The decoder runs while its window, or TX's, is open.
         self.saved.decode.running = self.show_decode || self.saved.show_tx;
         self.decode.set_view(self.scope.view_hz());
+        // Slots heard while the radio was keyed are our own over coming
+        // back through the I/Q: DECODE drops them (decision 71).
+        let keyed = rig.filter(|r| r.connected).map_or(transmitting, |r| r.transmitting());
+        self.decode.note_keyed(decoders::slot::utc_now(), keyed);
         self.decode.frame(
             &self.saved.decode,
             &self.saved.station,
