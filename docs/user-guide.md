@@ -226,7 +226,7 @@ every setting the radio answers over CAT, with its menu number, its meaning and 
 answer as it came. **POP OUT** moves it into a window of its own, and
 **DOCK** brings it back. Popped out, it grows and shrinks with its window,
 keeping its proportions; docked, drag its side to make it wider and it grows
-the same way. The settings are read when the port opens, when you press
+the same way, and drag it smaller again and it shrinks back. The settings are read when the port opens, when you press
 **READ AGAIN**, and every 10 seconds between transmissions. Menus that have no
 CAT command, such as 37 `CW IN` and 45 keyer speed, can only be read on the
 radio.
