@@ -596,10 +596,10 @@ impl Scope {
         self.tx_signal = sig;
     }
 
-    /// The station being worked, as a thin line at its frequency (the
+    /// The station being worked, as a bold green line at its frequency (the
     /// radio's own Hz) through the trace and the waterfall, labelled with
-    /// its call; `None` takes it away. Not draggable: it is where the
-    /// station is, not a control.
+    /// its call (decision 102); `None` takes it away. Not draggable: it is
+    /// where the station is, not a control.
     pub fn set_dx_mark(&mut self, mark: Option<(f64, String)>) {
         self.dx_mark = mark;
     }

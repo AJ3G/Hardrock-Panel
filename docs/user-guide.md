@@ -403,7 +403,10 @@ brings it back over the panel.
 
 **The mouse cursor:** over the spectrum or the waterfall, a thin line runs
 through both where the mouse is, and a box beside it gives that frequency and
-the level there (in the scale you picked).
+the level there (in the scale you picked). Inside the receiver's passband it
+also gives the audio offset from the dial, the hertz DECODE shows in its AF
+column (*14.097 150 MHz · 1550 Hz · S7*), so you can find a decoded station
+on the scope.
 
 **The noise floor** (*Noise floor* in the scope's settings) is a bold dashed
 line across the spectrum at the band's median level, its reading (*NF … dBm/bin
@@ -564,10 +567,12 @@ the **TX monitor** instead: every sample of the audio the panel is sending (a
 TX window over, or TX TUNE's tone; RIG TUNE as a carrier at the dial),
 analysed as it goes out at the scope's own frame rate and averaging, and
 placed where it lands from the transmit dial (VFO B in split), above it on
-USB and below on LSB. The trace (in the TX colour, orange), the waterfall,
-the 3D view and the zoom all keep moving with only your own signal in them;
-the rest of the span sits at the band's noise floor as last received, and
-full-scale audio sits 30 dB under the top of the dB scale. The top bar reads
+USB and below on LSB. The trace (coloured by level in the waterfall palette
+you picked, as a received signal is), the waterfall, the 3D view and the zoom
+all keep moving with only your own signal in them; only the *TX MONITOR*
+caption is in the TX colour, orange. The rest of the span sits at the band's
+noise floor as last received, and full-scale audio sits 10 dB under the top
+of the dB scale, so your signal fills most of the trace. The top bar reads
 *IQ · TX MONITOR*, and the trace's foot says what is on the air (*FT8 over*,
 *WSPR beacon*, *TX TUNE*, *RIG TUNE*). When another program keys the radio
 the panel doesn't know what it sends, so the band as last received scrolls on
@@ -855,6 +860,14 @@ QSO queues it first. Click a queued call to drop it.
   **GRID**, **NEW**, **DUPE** (dupes fade). A station calling you has a blue
   band, ▶ and bold text, at the top of its turn; a CQ you can answer is green
   (a directed CQ only when it includes you); your own overs are orange.
+- **The station you are working** is marked on SCOPE in green, as boldly as
+  the red offset bar: a line through the spectrum and the waterfall, a green
+  box at the top of the spectrum with the call, its audio offset and its
+  frequency, the call along the waterfall's foot, and its skimmer label in
+  green. Green is the station, red is where you transmit; with the bar on the
+  station both show. The mark is there only while the QSO is in progress: it
+  goes once the contact is logged, given up (watchdog, no reply, Wait CQ
+  timed out, STOP QSO) or after HALT, and comes back when you pick a station.
 - **TX audio and the scope's bar.** While TX is open the red offset bar on
   SCOPE is where you transmit. **AUTO** picks the clearest gap in your own
   slots before each over and shades the busy parts faintly; **MANUAL** follows

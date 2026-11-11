@@ -576,8 +576,9 @@ impl App {
             None => Vec::new(),
         };
         self.scope.set_tx_busy(busy);
-        // The station being worked, in the trace's green where we copy it
-        // (AJ3G, 11 Nov 2026): from the receive dial and their audio offset.
+        // The station being worked, in green where we copy it (decision
+        // 102), only while the QSO is in progress (decision 104): from the
+        // receive dial and their audio offset.
         let dx = self.tx.dx_mark().filter(|_| tx_shown).and_then(|(call, off, _)| {
             let (d, lower) = rx_dial?;
             let off = off as f64;

@@ -28,9 +28,10 @@ use sdr::{Spectrum, SpectrumConfig, SpectrumFrame};
 use super::view::Span;
 
 /// How far below the top of the dB scale full-scale TX audio is drawn, dB:
-/// about as bright as a strong received signal, never clamped to the
-/// ceiling (SDRoxide's `TX_MON_HEADROOM_DB`).
-pub const TX_MON_HEADROOM_DB: f32 = 30.0;
+/// high enough that our signal fills most of the trace's height (AJ3G, 11
+/// Nov 2026; decision 103: SDRoxide's `TX_MON_HEADROOM_DB` of 30 dB left it
+/// low), with room so it is not clamped to the ceiling.
+pub const TX_MON_HEADROOM_DB: f32 = 10.0;
 /// The audio drawn, Hz from the dial: an SSB transmitter passes nothing
 /// above about 3.5 kHz (SDRoxide's `TX_MONITOR_VIEW_HZ`), and a carrier at
 /// the dial is drawn with its skirt.
@@ -337,7 +338,7 @@ mod tests {
         let mut m = TxMonitor::default();
         m.feed(48_000, &tone(1234.0, 1.0, 48_000, 16_384, 0), cfg(16_384));
         let a = m.take().pop().unwrap();
-        // USB: above the dial, full scale 30 dB under the top of the scale.
+        // USB: above the dial, full scale the headroom under the top of the scale.
         let f = rf_frame(&a, lay(14_074_000.0, false, SPAN, 16_384), 1);
         let (hz, db) = peak(&f);
         assert!((hz - 14_075_234.0).abs() < 2.0 * f.bin_width(), "{hz}");
@@ -356,8 +357,9 @@ mod tests {
         let f = rf_frame(&a, lay(14_074_000.0, false, zoom, 4096), 3);
         let (hz, db) = peak(&f);
         assert!((hz - 14_075_234.0).abs() < 1.5, "{hz}");
-        assert!((db + 70.0).abs() < 1.5, "{db}");
-        let lit = f.db.iter().filter(|&&v| v > -70.0 - 20.0).count() as f64 * f.bin_width();
+        assert!((db - (-40.0 - TX_MON_HEADROOM_DB)).abs() < 1.5, "{db}");
+        let lit = f.db.iter().filter(|&&v| v > -40.0 - TX_MON_HEADROOM_DB - 20.0).count() as f64
+            * f.bin_width();
         assert!(lit < 25.0, "{lit} Hz above -20 dB");
     }
 
@@ -373,7 +375,7 @@ mod tests {
         let f = rf_frame(frames.last().unwrap(), lay(7_100_000.0, true, band, 16_384), 1);
         let (hz, db) = peak(&f);
         assert!((hz - 7_100_000.0).abs() < 2.0 * f.bin_width(), "{hz}");
-        assert!((db - (-70.0)).abs() < 1.5, "{db}");
+        assert!((db - (-40.0 - TX_MON_HEADROOM_DB)).abs() < 1.5, "{db}");
     }
 
     #[test]
