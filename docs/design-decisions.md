@@ -938,3 +938,7 @@ AJ3G found that NB and NR wouldn't switch from the panel, though the DUO's own N
 - **On** now sets the level first (the level read, or 5 when it reads 0 or nothing), then the switch: `NK005;` `NB1;`. **Off** sends the switch and then level 0 (`NB0;` `NK000;`), which the CAT reference also calls off. This holds for RADIO's menu switches, the NB/NR annunciators and E1.
 - **Silent settings:** after each full read of the radio's settings, the log has one line, `rigcat: settings read: N read; no answer to …; refused …`. It is written again only when the list changes, so COPY LOG shows which settings the DUO doesn't answer (and so can't be checked after a set).
 - **Not confirmed on the radio yet:** whether the order or the level is what the DUO wanted. If `set NB1; read back NB0;` still shows, another command form is next.
+
+## 77. WSPR stops for heat only over 155 °F (11 Nov 2026)
+
+The WSPR temperature stop (interlock #12) used the 120 °F (48.8 °C) warning colour, so beacons stopped at 49 °C. AJ3G: "Should not trip until over 155F"; SDRoxide never stopped for heat. A beacon now isn't started, and one going out stops, only over 155 °F (68.3 °C), a step below the HR500's own 70 °C (158 °F) trip. The yellow from 120 °F stays as a warning colour only.

@@ -1026,8 +1026,8 @@ fn wspr_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
     ui.label(
         RichText::new(
             "Each beacon keys for 110.6 s with the amplifier in line. Every TUNE check holds for the whole of \
-             it, and none starts (or one going out stops) while the amplifier's temperature is in its \
-             warning range.",
+             it, and none starts (or one going out stops) while the amplifier is over 155 °F (68 °C), \
+             a step below its own 158 °F trip.",
         )
         .size(11.0)
         .color(theme::TEXT()),

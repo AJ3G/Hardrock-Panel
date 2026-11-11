@@ -945,11 +945,50 @@ impl Tx {
     }
 }
 
+/// Where a WSPR beacon stops for the amplifier's heat: over 155 °F, a step
+/// below the HR500's own 70 °C (158 °F) trip. At first this was the 120 °F
+/// warning colour, which stopped beacons at 49 °C, far short of anything
+/// the amplifier minds; SDRoxide never stopped for it (AJ3G, 11 Nov 2026:
+/// "Should not trip until over 155F").
+pub(crate) const WSPR_HOT_C: f32 = (155.0 - 32.0) / 1.8;
+
 /// SAFETY INTERLOCK (docs/safety-interlocks.md, #12): a WSPR beacon keys
-/// the amplifier for 110.6 s, so none starts, and one going out stops,
-/// while its temperature is in the warning range (AJ3G, 10 Nov 2026).
+/// the amplifier for 110.6 s, so none starts, and one going out stops, once
+/// its temperature is over [`WSPR_HOT_C`] (155 °F).
 pub(crate) fn too_hot(amp: &AmpStatus) -> Option<String> {
     let t = amp.readings.filter(|_| amp.connected)?.known_temp_c()?;
-    let warn = amp.model.limits().temp_warn_c;
-    (t >= warn).then(|| format!("The amplifier is at {t:.0} °C, in its warning range (from {warn:.0} °C)."))
+    (t > WSPR_HOT_C).then(|| {
+        format!(
+            "The amplifier is at {t:.0} °C ({:.0} °F), over the 155 °F a beacon stops at.",
+            t * 1.8 + 32.0
+        )
+    })
+}
+
+#[cfg(test)]
+mod hot_tests {
+    use super::*;
+    use hardrock::AmpReadings;
+
+    fn amp(temperature: f32, celsius: bool) -> AmpStatus {
+        AmpStatus {
+            connected: true,
+            readings: Some(AmpReadings { temperature, celsius: Some(celsius), ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_wspr_beacon_stops_only_over_155_f() {
+        // 49 °C (120 °F) is only the warning colour: it once stopped beacons.
+        assert!(too_hot(&amp(49.0, true)).is_none());
+        assert!(too_hot(&amp(65.0, true)).is_none());
+        assert!(too_hot(&amp(155.0, false)).is_none());
+        assert!(too_hot(&amp(156.0, false)).is_some());
+        assert!(too_hot(&amp(69.0, true)).is_some());
+        // Not before the amplifier has said which scale it reads in.
+        let mut a = amp(156.0, false);
+        a.readings.as_mut().unwrap().celsius = None;
+        assert!(too_hot(&a).is_none());
+    }
 }
