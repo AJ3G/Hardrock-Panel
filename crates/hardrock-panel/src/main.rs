@@ -1936,6 +1936,11 @@ fn tx_sources(rig: Option<&RigStatus>, amp: &AmpStatus) -> String {
             }
             if a.fwd_w >= 1.0 {
                 v.push(format!("amp FWD {:.0} W", a.fwd_w));
+                // The heat a WSPR beacon is judged by (interlock #12), in
+                // whole °F so the line is written once a degree.
+                if let Some(c) = a.known_temp_c() {
+                    v.push(format!("amp {:.0} °F", c * 1.8 + 32.0));
+                }
             }
         }
     }
