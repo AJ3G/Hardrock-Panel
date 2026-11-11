@@ -32,6 +32,8 @@ pub(crate) struct Ctx<'a> {
     /// The planned drive at this mode's level, W, and the radio's band.
     pub watts: Option<f32>,
     pub band: Option<&'static str>,
+    /// The radio, for the drive beside each LEVEL.
+    pub rig: Option<&'a rigcat::RigStatus>,
 }
 
 pub(crate) fn window(
@@ -79,6 +81,7 @@ pub(crate) fn window(
             // Within the screen, below the top bar: its room would otherwise
             // grow with what it holds.
             .max_height((ctx.content_rect().height() - 80.0).max(360.0))
+            .max_width((ctx.content_rect().width() - 20.0).max(640.0))
             .show(ctx, |ui| {
                 chrome::window_body_bg(ui);
                 body(ui, false, tx, s, &c, &mut out);
@@ -124,10 +127,11 @@ fn body(ui: &mut egui::Ui, popped: bool, tx: &mut Tx, s: &mut TxSettings, c: &Ct
             )
             .clicked()
         {
-            tx.enabled = !tx.enabled;
-            tx.note = None;
-            if tx.enabled && s.mode == TxMode::Ft8 {
-                tx.qso.reset_watchdog();
+            if tx.enabled {
+                tx.enabled = false;
+                tx.note = None;
+            } else {
+                tx.enable(s);
             }
         }
         if chrome::chip(ui, false, "HALT TX").on_hover_text("Unkey now, and turn ENABLE TX off").clicked() {
@@ -185,27 +189,46 @@ fn body(ui: &mut egui::Ui, popped: bool, tx: &mut Tx, s: &mut TxSettings, c: &Ct
         ui.label(RichText::new(n).size(11.5).color(theme::YELLOW()));
     }
     ui.add_space(4.0);
-    let foot = 4.0;
-    let h = (ui.available_height() - foot).max(200.0);
-    let w = ui.available_width();
-    let left_w = (w * 0.56).max(320.0).min(w - 300.0);
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui(vec2(left_w, h), |ui| {
-            ui.set_min_size(vec2(left_w, h));
-            ui.vertical(|ui| decode_list(ui, tx, s, c, out));
+    // The two columns share what is left of the window, each scrolling
+    // its own. Nothing in them asks for more room than it is given, so the
+    // window resizes freely both ways (AJ3G, 11 Nov 2026: made smaller, it
+    // grew back).
+    let area = ui.available_rect_before_wrap();
+    let area = egui::Rect::from_min_size(area.min, area.size().max(vec2(0.0, 0.0)));
+    let gap = 13.0;
+    let left_w = ((area.width() - gap) * 0.56).max(0.0);
+    let left = egui::Rect::from_min_size(area.min, vec2(left_w, area.height()));
+    let right = egui::Rect::from_min_max(egui::pos2(left.right() + gap, area.top()), area.max);
+    column(ui, left, |ui| decode_list(ui, tx, s, c, out));
+    let x = left.right() + gap / 2.0;
+    ui.painter().vline(x, area.y_range(), ui.visuals().widgets.noninteractive.bg_stroke);
+    column(ui, right, |ui| {
+        let col_h = ui.available_height();
+        let id = egui::Id::new("tx-right-rest");
+        let o = egui::ScrollArea::vertical().id_salt("tx-right").auto_shrink([false, false]).show(ui, |ui| match s.mode {
+            TxMode::Ft8 => {
+                let rest = ui.ctx().data(|d| d.get_temp::<f32>(id)).unwrap_or(col_h);
+                qso_panel(ui, tx, s, c, (col_h - rest).max(0.0))
+            }
+            TxMode::Wspr => {
+                wspr_panel(ui, tx, s, c);
+                0.0
+            }
         });
-        ui.separator();
-        ui.allocate_ui(vec2(ui.available_width(), h), |ui| {
-            ui.vertical(|ui| {
-                egui::ScrollArea::vertical().id_salt("tx-right").auto_shrink([false, false]).show(
-                    ui,
-                    |ui| match s.mode {
-                        TxMode::Ft8 => qso_panel(ui, tx, s, c),
-                        TxMode::Wspr => wspr_panel(ui, tx, s, c),
-                    },
-                );
-            });
-        });
+        // What the panel holds besides the transcript, for next frame's
+        // share of the room.
+        let rest = o.content_size.y - o.inner;
+        ui.ctx().data_mut(|d| d.insert_temp(id, rest));
+    });
+    ui.advance_cursor_after_rect(area);
+}
+
+/// A column of the window in `rect`, clipped to it.
+fn column(ui: &mut egui::Ui, rect: egui::Rect, add: impl FnOnce(&mut egui::Ui)) {
+    let b = egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min));
+    ui.scope_builder(b, |ui| {
+        ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+        add(ui)
     });
 }
 
@@ -310,7 +333,9 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
     let me_call = c.station.call().unwrap_or_default();
     let dx = tx.qso.dx_call().map(str::to_string);
     let mut act: Option<(usize, Act)> = None;
-    egui::ScrollArea::vertical().id_salt("tx-decodes").auto_shrink([false, false]).show(ui, |ui| {
+    let foot = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
+    let list_h = (ui.available_height() - foot).max(0.0);
+    egui::ScrollArea::vertical().id_salt("tx-decodes").auto_shrink([false, false]).max_height(list_h).show(ui, |ui| {
         for (t, mut idx) in turns {
             let rows = &tx.rows;
             idx.retain(|&i| {
@@ -347,7 +372,7 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
         }
     });
     ui.label(
-        RichText::new("Double-click = REPLY · Shift+click sets TX audio only · + queues")
+        RichText::new("Double-click = REPLY (turns ENABLE TX on) · Shift+click sets TX audio only · + queues")
             .size(10.5)
             .color(theme::CYAN_DIM()),
     );
@@ -370,6 +395,9 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
         }
         Act::Reply => {
             tx.reply(s, &r, c.now);
+            if s.mode == TxMode::Ft8 {
+                tx.enable(s);
+            }
             tx.picked = Some(r.row);
             if s.freq == FreqMode::Manual {
                 s.audio_hz = r.d.audio_hz.round();
@@ -549,7 +577,9 @@ fn hover(ui: &mut egui::Ui, r: &ListRow) {
     }
 }
 
-fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
+/// The FT8 QSO panel. `spare` is the room the column has beyond what the
+/// panel needs, for the transcript; returns the transcript's height.
+fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, spare: f32) -> f32 {
     // The station in hand.
     ui.horizontal(|ui| {
         ui.label(RichText::new("QSO").strong().color(theme::TEXT_STRONG()));
@@ -593,24 +623,43 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
     }
     ui.add_space(4.0);
     caption(ui, "TRANSCRIPT");
+    // The whole QSO, kept at its newest line; as tall as dragged (16 lines
+    // to start), or as the window's room allows (AJ3G, 11 Nov 2026).
+    let row_h = ui.fonts_mut(|f| f.row_height(&egui::FontId::monospace(12.0))) + ui.spacing().item_spacing.y;
+    let min_h = 3.0 * row_h;
+    let shown_h = s.transcript_h.max(spare).max(min_h);
     egui::Frame::new().fill(theme::INPUT_BG()).inner_margin(6).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
-        let lines = tx.qso.transcript();
-        for l in lines.iter().rev().take(10).collect::<Vec<_>>().into_iter().rev() {
-            let t = crate::decode::hms(l.utc as f64).replace(':', "");
-            let (tag, col) = if l.note {
-                ("  ", theme::CYAN_DIM())
-            } else if l.tx {
-                ("TX", tx_ink())
-            } else {
-                ("RX", theme::GREEN())
-            };
-            let col = if l.done { theme::TEXT_STRONG() } else { col };
-            ui.label(mono(format!("{t} {tag} {}", l.text)).color(col));
-        }
+        egui::ScrollArea::vertical()
+            .id_salt("tx-transcript")
+            .stick_to_bottom(true)
+            .auto_shrink([false, false])
+            .max_height(shown_h)
+            .show(ui, |ui| {
+                for l in tx.qso.transcript() {
+                    let t = crate::decode::hms(l.utc as f64).replace(':', "");
+                    let (tag, col) = if l.note {
+                        ("  ", theme::CYAN_DIM())
+                    } else if l.tx {
+                        ("TX", tx_ink())
+                    } else {
+                        ("RX", theme::GREEN())
+                    };
+                    let col = if l.done { theme::TEXT_STRONG() } else { col };
+                    ui.label(mono(format!("{t} {tag} {}", l.text)).color(col));
+                }
+            });
         let next = tx.hand.clone().or_else(|| tx.qso.plan_tx());
         ui.label(mono(format!("next: {}", next.unwrap_or_else(|| "nothing".into()))).color(theme::CYAN_DIM()));
     });
+    // Its grip: drag to make it taller or shorter.
+    let (grip, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 7.0), Sense::drag());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text("Drag to size the transcript");
+    let ink = if resp.hovered() || resp.dragged() { theme::TEXT_STRONG() } else { theme::LINE() };
+    ui.painter().hline(grip.center().x - 18.0..=grip.center().x + 18.0, grip.center().y, egui::Stroke::new(2.0, ink));
+    if resp.dragged() {
+        s.transcript_h = (shown_h + resp.drag_delta().y).clamp(min_h, 4000.0);
+    }
     ui.add_space(4.0);
     // Tx1 to Tx6, with Next and Now.
     ui.horizontal(|ui| {
@@ -664,8 +713,12 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
     }
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
-        if chrome::chip(ui, tx.qso.step() == crate::tx::qso::Step::CallingCq, "CALL CQ").clicked() {
+        if chrome::chip(ui, tx.qso.step() == crate::tx::qso::Step::CallingCq, "CALL CQ")
+            .on_hover_text("Call CQ from your next slot: turns ENABLE TX on")
+            .clicked()
+        {
             tx.call_cq(s);
+            tx.enable(s);
         }
         if chrome::chip(ui, false, "Generate Std Msgs").clicked() {
             tx.generate(s);
@@ -720,6 +773,7 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
             40.0,
             egui::Slider::new(&mut s.ft8_level, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
         );
+        drive(ui, c, s.ft8_level);
     });
     // The queue.
     ui.horizontal_wrapped(|ui| {
@@ -753,6 +807,19 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
             }
         });
     }
+    shown_h
+}
+
+/// The drive a LEVEL gives, beside its slider: "≈ 2.5 W", or "— W" before
+/// the radio's power step is read (AJ3G, 11 Nov 2026).
+fn drive(ui: &mut egui::Ui, c: &Ctx<'_>, level: f32) {
+    let w = c.rig.and_then(|r| crate::tune::planned_watts(r, rigcat::Keying::Data, level));
+    ui.label(mono(drive_text(w)).color(theme::TEXT()))
+        .on_hover_text("The radio's power setting times this level: what the radio puts out into the amplifier");
+}
+
+fn drive_text(w: Option<f32>) -> String {
+    w.map_or("— W".into(), |w| format!("≈ {w:.1} W"))
 }
 
 fn wspr_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
@@ -810,6 +877,7 @@ fn wspr_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
             40.0,
             egui::Slider::new(&mut s.wspr_level, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
         );
+        drive(ui, c, s.wspr_level);
     });
     ui.add_space(6.0);
     ui.label(
@@ -863,5 +931,11 @@ mod tests {
         let g = slot_groups(&rows);
         assert_eq!(g.iter().map(|t| t.0).collect::<Vec<_>>(), vec![45, 30, 15]);
         assert_eq!(g[1].1, vec![0, 2]);
+    }
+
+    #[test]
+    fn the_drive_reads_in_watts_or_a_dash() {
+        assert_eq!(drive_text(Some(2.5)), "≈ 2.5 W");
+        assert_eq!(drive_text(None), "— W");
     }
 }

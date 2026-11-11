@@ -108,6 +108,8 @@ pub(crate) struct TxSettings {
     /// Ask before logging, rather than logging at once.
     pub prompt_log: bool,
     pub sort: Sort,
+    /// The transcript's height as last dragged, px.
+    pub transcript_h: f32,
     pub cq_only: bool,
     pub new_only: bool,
 }
@@ -137,6 +139,7 @@ impl Default for TxSettings {
             wspr_audio_hz: 1500.0,
             prompt_log: false,
             sort: Sort::Time,
+            transcript_h: 250.0,
             cq_only: false,
             new_only: false,
         }
@@ -407,6 +410,18 @@ impl Tx {
         self.qso.start_qso(&call, r.d.grid.clone(), r.d.snr_db, wait, now as i64);
         self.hand = None;
         self.generate(s);
+    }
+
+    /// ENABLE TX on, as its button turns it on: the operator is here, so
+    /// the watchdog starts over. REPLY and CALL CQ do this too in FT8
+    /// (AJ3G, 11 Nov 2026); every interlock still decides whether an over
+    /// keys.
+    pub(crate) fn enable(&mut self, s: &TxSettings) {
+        self.enabled = true;
+        self.note = None;
+        if s.mode == TxMode::Ft8 {
+            self.qso.reset_watchdog();
+        }
     }
 
     /// + on a station: queue it.

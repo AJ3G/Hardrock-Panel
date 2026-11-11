@@ -583,6 +583,7 @@ impl App {
                 blocked,
                 watts,
                 band,
+                rig,
             },
         );
         if let Some(p) = o.pop {
