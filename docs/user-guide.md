@@ -401,6 +401,10 @@ the 3D FFT), the band plan and the waterfall from the radio's I/Q, with the
 panel's own receiver in it. **POP OUT** puts it in a window of its own; **DOCK**
 brings it back over the panel.
 
+**The mouse cursor:** over the spectrum or the waterfall, a thin line runs
+through both where the mouse is, and a box beside it gives that frequency and
+the level there (in the scale you picked).
+
 **The noise floor** (*Noise floor* in the scope's settings) is a bold dashed
 line across the spectrum at the band's median level, its reading (*NF … dBm/bin
 · RBW …*) at the right edge on a dark box so it stays legible over the trace.

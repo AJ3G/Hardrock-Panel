@@ -153,9 +153,61 @@ pub(super) fn tft(
     pointer_on(sc, ui, &spec_resp, spec_plot, cx, out);
     let wf_resp = ui.interact(wf_plot, ui.id().with("scope-wf"), Sense::click_and_drag());
     pointer_on(sc, ui, &wf_resp, wf_plot, cx, out);
+    paint_hover_cursor(sc, ui, spec_plot, wf_plot, cx);
 
     top_bar(sc, ui, tbar, cx, snap);
     status_bars(sc, ui, status, diag, cx, snap);
+}
+
+/// The mouse cursor over the spectrum or the waterfall (decision 98): a thin
+/// line through both at its frequency, and beside it a readout of that
+/// frequency and the strongest level within a column of it (AJ3G, 11 Nov
+/// 2026). Not over a transmission's held picture, whose levels aren't the
+/// band's.
+fn paint_hover_cursor(sc: &Scope, ui: &egui::Ui, spec: Rect, wf: Rect, cx: &Ctx) {
+    let Some(pos) = ui.ctx().pointer_hover_pos() else { return };
+    if !(spec.contains(pos) || wf.contains(pos)) || spec.width() < 1.0 {
+        return;
+    }
+    let v = cx.view;
+    let hz = v.f_at(pos.x, spec.left(), spec.width());
+    let px_hz = (v.hi - v.lo) / spec.width() as f64;
+    let both = spec.union(wf);
+    let p = ui.painter_at(both);
+    let xx = pos.x.round() + 0.5;
+    let line = Stroke::new(1.0, ink().gamma_multiply(0.6));
+    p.vline(xx, spec.y_range(), line);
+    p.vline(xx, wf.y_range(), line);
+    let mut text = format!("{} MHz", crate::tx::mhz_cell(cx.map.shown(hz)));
+    if !sc.held
+        && let Some(f) = sc.shown()
+        && let Some(pk) = hover_level(f, hz, px_hz)
+    {
+        text.push_str(&format!(" · {}", level_text(pk, sc.settings.scale)));
+    }
+    let g = p.layout_no_wrap(text, mono(10.5), ink());
+    let pad = vec2(5.0, 3.0);
+    let size = g.size() + pad * 2.0;
+    // Up and to the right of the pointer, flipped at the edges.
+    let mut x = pos.x + 10.0;
+    if x + size.x > both.right() - 2.0 {
+        x = pos.x - 10.0 - size.x;
+    }
+    let mut y = pos.y - 10.0 - size.y;
+    if y < both.top() + 2.0 {
+        y = pos.y + 14.0;
+    }
+    let r = Rect::from_min_size(pos2(x, y), size);
+    p.rect_filled(r, 2.0, Color32::from_black_alpha(210));
+    p.rect_stroke(r, 2.0, Stroke::new(1.0, ink().gamma_multiply(0.5)), egui::StrokeKind::Inside);
+    p.galley(r.min + pad, g, ink());
+}
+
+/// The strongest level within a drawn column either side of `hz`, so the
+/// readout catches a narrow signal the pointer is a pixel off.
+fn hover_level(f: &sdr::SpectrumFrame, hz: f64, px_hz: f64) -> Option<f32> {
+    let half = px_hz.max(f.bin_width() * 0.5);
+    f.peak_in(hz - half, hz + half).map(|p| p.dbm)
 }
 
 fn split_gutter(r: Rect) -> (Rect, Rect) {

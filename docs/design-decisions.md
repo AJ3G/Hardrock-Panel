@@ -1066,3 +1066,7 @@ A band change cleared HEARD with the FT8 list. Now WSPR's reports are kept acros
 
 AJ3G's transcript with CT7AUT showed `064230 TX CT7AUT AJ3G FM18` above `064230 RX AJ3G CT7AUT +00`: the over keyed at the slot's start, a few milliseconds before DECODE finished the slot in which CT7AUT had answered, so the grid went out a second time and the QSO lost a cycle (CT7AUT moved on). An FT8 over now picks its message only once DECODE has finished the slot before (`sched::slot_decoded`), waiting up to 1 s (`DECODE_WAIT_S`) for it, then going with what it has. Its audio still starts at 0.5 s when it can; started later, the whole message goes out a little after now (`sched::ft8_start_s`, a later DT, at most about 2.1 s) rather than losing its first symbols, which the old late start cut off.
 
+## 98. SCOPE: a cursor where the mouse is (11 Nov 2026)
+
+AJ3G asked for an indicator as the mouse moves through the waterfall or the spectrum. A thin line now runs through both at the pointer's frequency, with a small boxed readout beside the pointer: the frequency to the hertz (as the scope shows it, transverter and calibration included) and the strongest level within a drawn column either side, in the scale chosen (S-units, dBm or both). The box flips to the other side at the edges. No level is read while a transmission's picture is held, since those levels aren't the band's.
+
