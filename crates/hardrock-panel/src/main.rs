@@ -467,6 +467,7 @@ impl App {
         let heard = self.heard_hz(rig, xvtr);
         let band = heard.map_or("", |f| logbook::adif_band(f as f64));
         let feed = std::mem::take(&mut self.decode.tx_feed);
+        self.tx.take_wspr(std::mem::take(&mut self.decode.wspr_feed), self.saved.station.pos());
         let rx_dial = self.rx.active().then(|| (self.rx.rx_hz, self.rx.mode.is_lower()));
         let bar_off = match (self.scope.bar_hz(), rx_dial) {
             (Some(b), Some((d, lower))) => Some(if lower { d - b } else { b - d }),
@@ -583,6 +584,8 @@ impl App {
                 blocked,
                 watts,
                 band,
+                rig,
+                heard_me: self.globe.heard_me(),
             },
         );
         if let Some(p) = o.pop {
@@ -814,6 +817,10 @@ impl App {
         // The decoder runs while its window, or TX's, is open.
         self.saved.decode.running = self.show_decode || self.saved.show_tx;
         self.decode.set_view(self.scope.view_hz());
+        // Slots heard while the radio was keyed are our own over coming
+        // back through the I/Q: DECODE drops them (decision 71).
+        let keyed = rig.filter(|r| r.connected).map_or(transmitting, |r| r.transmitting());
+        self.decode.note_keyed(decoders::slot::utc_now(), keyed);
         self.decode.frame(
             &self.saved.decode,
             &self.saved.station,

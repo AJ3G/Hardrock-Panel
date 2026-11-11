@@ -435,6 +435,14 @@ pub(crate) struct Decode {
     /// Each FT8 slot's decodes, for TX's sequencer and decode list: taken
     /// (drained) by TX each frame, and capped when nothing takes them.
     pub(crate) tx_feed: Vec<TxHeard>,
+    /// Each WSPR slot's decodes, for the TX window's WSPR list: taken as
+    /// `tx_feed` is.
+    pub(crate) wspr_feed: Vec<WsprHeard>,
+    /// When the radio was keyed, so a slot heard while we transmitted is
+    /// dropped (decision 71).
+    keyed: KeyedLog,
+    /// The last slot dropped for that, for the slot line.
+    keyed_drop: Option<i64>,
 }
 
 /// One FT8 decode as TX reads it.
@@ -448,6 +456,21 @@ pub(crate) struct TxHeard {
     /// Its true RF, Hz.
     pub rf_hz: f64,
     pub row: u64,
+}
+
+/// One WSPR decode as TX's WSPR list reads it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WsprHeard {
+    pub slot_utc: i64,
+    pub snr_db: f32,
+    pub drift_hz: f32,
+    pub audio_hz: f32,
+    pub call: String,
+    /// Empty for a compound call (Type 2).
+    pub grid: String,
+    pub dbm: i32,
+    /// Its true RF, Hz.
+    pub rf_hz: f64,
 }
 
 /// A station for GLOBE, if its grid is known.
@@ -505,6 +528,49 @@ impl DialLog {
         let at_start = self.0.iter().rev().find(|&&(t, _)| t <= t0).or(self.0.front())?.1;
         let moved = self.0.iter().any(|&(t, d)| t > t0 && t < t1 && d != at_start);
         (!moved).then_some(at_start)
+    }
+}
+
+/// When the radio was keyed, over the last few minutes: (from, to) UTC s,
+/// oldest first, the last one open (`None`) while it is keyed still.
+///
+/// The DUO's I/Q keeps flowing while it transmits, so the decoders hear
+/// our own over at +25 dB: AJ3G saw his "UN7GBX AJ3G -18" decoded back in
+/// the slot he sent it, flagged NEW with a REPLY button (11 Nov 2026). A
+/// slot the radio was keyed in for more than [`KEYED_DROP_S`] is dropped
+/// whole: nothing else in it was heard properly either.
+#[derive(Default)]
+struct KeyedLog(VecDeque<(f64, Option<f64>)>);
+
+/// Keyed this long in a slot drops it, s: the sequencer's unkey and a
+/// rig poll's lag may overlap a slot's edge by a little.
+const KEYED_DROP_S: f64 = 1.0;
+
+impl KeyedLog {
+    /// The radio is keyed, or not, at `utc`.
+    fn note(&mut self, utc: f64, keyed: bool) {
+        match self.0.back_mut() {
+            Some((_, end)) if end.is_none() => {
+                if !keyed {
+                    *end = Some(utc);
+                }
+            }
+            _ if keyed => self.0.push_back((utc, None)),
+            _ => {}
+        }
+        while self.0.front().is_some_and(|&(_, e)| e.is_some_and(|e| e < utc - 600.0)) {
+            self.0.pop_front();
+        }
+    }
+
+    /// How long the radio was keyed between `t0` and `t1`, s.
+    fn overlap(&self, t0: f64, t1: f64) -> f64 {
+        self.0.iter().map(|&(a, b)| (b.unwrap_or(f64::INFINITY).min(t1) - a.max(t0)).max(0.0)).sum()
+    }
+
+    /// Whether a slot from `t0` lasting `len` s was transmitted over.
+    fn spoils(&self, t0: f64, len: f64) -> bool {
+        self.overlap(t0, t0 + len) > KEYED_DROP_S
     }
 }
 
@@ -832,6 +898,10 @@ impl Decode {
         for w in &self.wide {
             let wsjt = Some(w.mode());
             for r in w.results() {
+                // Our own over, heard back (decision 71).
+                if self.keyed.spoils(r.slot.slot_utc as f64, w.mode().period_s()) {
+                    continue;
+                }
                 // Skimmed WSPR goes to WSPRnet as DECODE's own does, a slot
                 // for each dial it was heard on, when the SPOTS box's WSPRnet
                 // is ticked (AJ3G, 8 Nov 2026: "every two minutes or so if
@@ -932,7 +1002,14 @@ impl Decode {
         slots_of(*kind, self.started_utc?)
     }
 
+    /// Whether the radio is keyed now (from the rig's status, each frame):
+    /// slots it was keyed in are dropped.
+    pub(crate) fn note_keyed(&mut self, utc: f64, keyed: bool) {
+        self.keyed.note(utc, keyed);
+    }
+
     fn clear(&mut self) {
+        self.keyed_drop = None;
         self.rows.clear();
         self.text.clear();
         self.image = None;
@@ -1101,6 +1178,17 @@ impl Decode {
                     // On the dial it was heard on; heard across a retune,
                     // half one place and half another, it is dropped.
                     let t0 = slot.slot_utc as f64;
+                    if self.keyed.spoils(t0, mode.period_s()) {
+                        if !slot.live {
+                            tracing::info!(
+                                "{} slot {} dropped: the radio was transmitting",
+                                mode.label(),
+                                hms(t0)
+                            );
+                            self.keyed_drop = Some(slot.slot_utc);
+                        }
+                        continue;
+                    }
                     match self.dials.during(t0, t0 + mode.period_s()) {
                         Some(dial_hz) => {
                             self.wsjt_slot(&slot, mode, Where { dial_hz, ..at }, wsjtx)
@@ -1282,15 +1370,30 @@ impl Decode {
                 &d.message,
             ));
             match (&d.wspr, mode) {
-                (Some(w), WsjtMode::Wspr) => wspr.push(wsprnet::Spot {
-                    call: w.callsign.clone(),
-                    grid: w.grid.clone(),
-                    snr_db: d.snr_db.round() as i32,
-                    dt_s: d.dt_s,
-                    drift_hz: w.drift_hz.round() as i32,
-                    freq_hz: rf,
-                    power_dbm: w.power_dbm,
-                }),
+                (Some(w), WsjtMode::Wspr) => {
+                    wspr.push(wsprnet::Spot {
+                        call: w.callsign.clone(),
+                        grid: w.grid.clone(),
+                        snr_db: d.snr_db.round() as i32,
+                        dt_s: d.dt_s,
+                        drift_hz: w.drift_hz.round() as i32,
+                        freq_hz: rf,
+                        power_dbm: w.power_dbm,
+                    });
+                    if self.wspr_feed.len() >= 2_000 {
+                        self.wspr_feed.drain(..1_000);
+                    }
+                    self.wspr_feed.push(WsprHeard {
+                        slot_utc: d.slot_utc,
+                        snr_db: d.snr_db,
+                        drift_hz: w.drift_hz,
+                        audio_hz: d.audio_hz,
+                        call: w.callsign.clone(),
+                        grid: w.grid.clone(),
+                        dbm: w.power_dbm,
+                        rf_hz: rf,
+                    });
+                }
                 (_, WsjtMode::Ft8 | WsjtMode::Ft4) => {
                     if let Some(c) = &call {
                         let known = self.heard.get(c).map(|h| h.grid.clone());
@@ -1956,8 +2059,14 @@ fn body(
         let dials: Vec<String> = w.dials().iter().map(|&h| format!("{:.3}", h / 1e6)).collect();
         line.push_str(&format!(" · skimming {} {} MHz too", w.mode().label(), dials.join(", ")));
     }
-    if let Some((slot, n, ms)) = d.last_slot {
-        line.push_str(&format!(" · slot {} : {n} decoded in {ms} ms", hms(slot as f64)));
+    match (d.last_slot, d.keyed_drop) {
+        (last, Some(k)) if last.is_none_or(|(slot, ..)| k > slot) => {
+            line.push_str(&format!(" · slot {} : transmitting · decodes dropped", hms(k as f64)));
+        }
+        (Some((slot, n, ms)), _) => {
+            line.push_str(&format!(" · slot {} : {n} decoded in {ms} ms", hms(slot as f64)));
+        }
+        _ => {}
     }
     if wsjtx_on && s.kind.family() == Family::Wsjt {
         line.push_str(" · sent as WSJT-X UDP");
@@ -2303,6 +2412,36 @@ mod tests {
             assert_eq!(slots_of(k, t), None, "{k:?}");
         }
         assert_eq!(slots_of(Kind::Hfdl, t), None);
+    }
+
+    #[test]
+    fn a_slot_the_radio_was_keyed_in_is_spoiled_and_one_it_only_touched_is_not() {
+        let mut k = KeyedLog::default();
+        let t0 = 1_800_000_015.0;
+        // Our over: keyed from 0.4 s into the slot to 13.3 s.
+        k.note(t0 - 5.0, false);
+        k.note(t0 + 0.4, true);
+        k.note(t0 + 6.0, true);
+        k.note(t0 + 13.3, false);
+        assert!((k.overlap(t0, t0 + 15.0) - 12.9).abs() < 1e-3);
+        assert!(k.spoils(t0, 15.0));
+        // The slots either side are clean.
+        assert!(!k.spoils(t0 - 15.0, 15.0));
+        assert!(!k.spoils(t0 + 15.0, 15.0));
+        // A WSPR slot holding it is spoiled too.
+        assert!(k.spoils(t0 - 15.0, 120.0));
+        // Unkeyed late, 0.8 s into the next slot: that slot is kept.
+        k.note(t0 + 30.0, true);
+        k.note(t0 + 45.8, false);
+        assert!(!k.spoils(t0 + 45.0, 15.0));
+        assert!(k.spoils(t0 + 30.0, 15.0));
+        // Keyed still: the open span counts up to the slot's end.
+        k.note(t0 + 60.5, true);
+        assert!(k.spoils(t0 + 60.0, 15.0));
+        // Old spans are forgotten.
+        k.note(t0 + 61.0, false);
+        k.note(t0 + 1000.0, false);
+        assert!(k.0.is_empty());
     }
 
     #[test]

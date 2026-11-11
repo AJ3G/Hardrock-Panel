@@ -7,7 +7,9 @@ use eframe::egui::{self, Color32, RichText, Sense, vec2};
 use rigcat::RigLink;
 
 use super::{FreqMode, ListRow, Sort, Tx, TxMode, TxSettings, sched, wave};
-use crate::station::StationSettings;
+use crate::globe::field::Reception;
+use crate::globe::wspr::WsprReport;
+use crate::station::{self, StationSettings};
 use crate::{chrome, theme};
 
 /// What the window asks of the panel.
@@ -32,6 +34,11 @@ pub(crate) struct Ctx<'a> {
     /// The planned drive at this mode's level, W, and the radio's band.
     pub watts: Option<f32>,
     pub band: Option<&'static str>,
+    /// The radio, for the drive beside each LEVEL.
+    pub rig: Option<&'a rigcat::RigStatus>,
+    /// Who heard the station, as GLOBE fetched it: PSK Reporter's reports
+    /// and WSPR HEARD ME's.
+    pub heard_me: (&'a [Reception], &'a [WsprReport]),
 }
 
 pub(crate) fn window(
@@ -79,6 +86,7 @@ pub(crate) fn window(
             // Within the screen, below the top bar: its room would otherwise
             // grow with what it holds.
             .max_height((ctx.content_rect().height() - 80.0).max(360.0))
+            .max_width((ctx.content_rect().width() - 20.0).max(640.0))
             .show(ctx, |ui| {
                 chrome::window_body_bg(ui);
                 body(ui, false, tx, s, &c, &mut out);
@@ -124,10 +132,11 @@ fn body(ui: &mut egui::Ui, popped: bool, tx: &mut Tx, s: &mut TxSettings, c: &Ct
             )
             .clicked()
         {
-            tx.enabled = !tx.enabled;
-            tx.note = None;
-            if tx.enabled && s.mode == TxMode::Ft8 {
-                tx.qso.reset_watchdog();
+            if tx.enabled {
+                tx.enabled = false;
+                tx.note = None;
+            } else {
+                tx.enable(s);
             }
         }
         if chrome::chip(ui, false, "HALT TX").on_hover_text("Unkey now, and turn ENABLE TX off").clicked() {
@@ -185,27 +194,46 @@ fn body(ui: &mut egui::Ui, popped: bool, tx: &mut Tx, s: &mut TxSettings, c: &Ct
         ui.label(RichText::new(n).size(11.5).color(theme::YELLOW()));
     }
     ui.add_space(4.0);
-    let foot = 4.0;
-    let h = (ui.available_height() - foot).max(200.0);
-    let w = ui.available_width();
-    let left_w = (w * 0.56).max(320.0).min(w - 300.0);
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui(vec2(left_w, h), |ui| {
-            ui.set_min_size(vec2(left_w, h));
-            ui.vertical(|ui| decode_list(ui, tx, s, c, out));
+    // The two columns share what is left of the window, each scrolling
+    // its own. Nothing in them asks for more room than it is given, so the
+    // window resizes freely both ways (AJ3G, 11 Nov 2026: made smaller, it
+    // grew back).
+    let area = ui.available_rect_before_wrap();
+    let area = egui::Rect::from_min_size(area.min, area.size().max(vec2(0.0, 0.0)));
+    let gap = 13.0;
+    let left_w = ((area.width() - gap) * 0.56).max(0.0);
+    let left = egui::Rect::from_min_size(area.min, vec2(left_w, area.height()));
+    let right = egui::Rect::from_min_max(egui::pos2(left.right() + gap, area.top()), area.max);
+    column(ui, left, |ui| decode_list(ui, tx, s, c, out));
+    let x = left.right() + gap / 2.0;
+    ui.painter().vline(x, area.y_range(), ui.visuals().widgets.noninteractive.bg_stroke);
+    column(ui, right, |ui| {
+        let col_h = ui.available_height();
+        let id = egui::Id::new("tx-right-rest");
+        let o = egui::ScrollArea::vertical().id_salt("tx-right").auto_shrink([false, false]).show(ui, |ui| match s.mode {
+            TxMode::Ft8 => {
+                let rest = ui.ctx().data(|d| d.get_temp::<f32>(id)).unwrap_or(col_h);
+                qso_panel(ui, tx, s, c, (col_h - rest).max(0.0))
+            }
+            TxMode::Wspr => {
+                wspr_panel(ui, tx, s, c);
+                0.0
+            }
         });
-        ui.separator();
-        ui.allocate_ui(vec2(ui.available_width(), h), |ui| {
-            ui.vertical(|ui| {
-                egui::ScrollArea::vertical().id_salt("tx-right").auto_shrink([false, false]).show(
-                    ui,
-                    |ui| match s.mode {
-                        TxMode::Ft8 => qso_panel(ui, tx, s, c),
-                        TxMode::Wspr => wspr_panel(ui, tx, s, c),
-                    },
-                );
-            });
-        });
+        // What the panel holds besides the transcript, for next frame's
+        // share of the room.
+        let rest = o.content_size.y - o.inner;
+        ui.ctx().data_mut(|d| d.insert_temp(id, rest));
+    });
+    ui.advance_cursor_after_rect(area);
+}
+
+/// A column of the window in `rect`, clipped to it.
+fn column(ui: &mut egui::Ui, rect: egui::Rect, add: impl FnOnce(&mut egui::Ui)) {
+    let b = egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min));
+    ui.scope_builder(b, |ui| {
+        ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+        add(ui)
     });
 }
 
@@ -279,6 +307,10 @@ fn slot_bar(ui: &mut egui::Ui, tx: &Tx, s: &TxSettings, c: &Ctx<'_>) {
 }
 
 fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, out: &mut WindowOut) {
+    if s.mode == TxMode::Wspr {
+        wspr_list(ui, tx, c);
+        return;
+    }
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("DECODES").strong().color(theme::TEXT_STRONG()));
         ui.add_space(8.0);
@@ -298,26 +330,13 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
             tx.rows.clear();
         }
     });
-    if s.mode == TxMode::Wspr {
-        ui.label(
-            RichText::new("WSPR's decodes are in DECODE and on GLOBE; who heard you is GLOBE's WSPR HEARD ME.")
-                .size(11.5)
-                .color(theme::TEXT()),
-        );
-        return;
-    }
-    // Turns, newest first; within each, calling-you rows pinned to the top.
-    let mut turns: Vec<(i64, Vec<usize>)> = Vec::new();
-    for (i, r) in tx.rows.iter().enumerate() {
-        match turns.last_mut() {
-            Some((t, v)) if *t == r.d.slot_utc => v.push(i),
-            _ => turns.push((r.d.slot_utc, vec![i])),
-        }
-    }
+    let turns = slot_groups(&tx.rows);
     let me_call = c.station.call().unwrap_or_default();
     let dx = tx.qso.dx_call().map(str::to_string);
     let mut act: Option<(usize, Act)> = None;
-    egui::ScrollArea::vertical().id_salt("tx-decodes").auto_shrink([false, false]).show(ui, |ui| {
+    let foot = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
+    let list_h = (ui.available_height() - foot).max(0.0);
+    egui::ScrollArea::vertical().id_salt("tx-decodes").auto_shrink([false, false]).max_height(list_h).show(ui, |ui| {
         for (t, mut idx) in turns {
             let rows = &tx.rows;
             idx.retain(|&i| {
@@ -336,7 +355,7 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
                 }),
                 Sort::Country => idx.sort_by(|&a, &b| rows[a].country.cmp(&rows[b].country)),
             }
-            idx.sort_by_key(|&i| !rows[i].to_me);
+            idx.sort_by_key(|&i| (!rows[i].ours, !rows[i].to_me));
             let even = sched::is_even(t, sched::FT8_PERIOD);
             ui.label(
                 RichText::new(format!("{} · {} · {} decodes", crate::decode::hms(t as f64), if even { "EVEN" } else { "ODD" }, idx.len()))
@@ -354,7 +373,7 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
         }
     });
     ui.label(
-        RichText::new("Double-click = REPLY · Shift+click sets TX audio only · + queues")
+        RichText::new("Double-click = REPLY (turns ENABLE TX on) · Shift+click sets TX audio only · + queues")
             .size(10.5)
             .color(theme::CYAN_DIM()),
     );
@@ -377,6 +396,9 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
         }
         Act::Reply => {
             tx.reply(s, &r, c.now);
+            if s.mode == TxMode::Ft8 {
+                tx.enable(s);
+            }
             tx.picked = Some(r.row);
             if s.freq == FreqMode::Manual {
                 s.audio_hz = r.d.audio_hz.round();
@@ -384,6 +406,153 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
         }
         Act::Queue => tx.queue(&r),
     }
+}
+
+/// The list's turns, newest slot first, one for each slot however late its
+/// decodes came (a slot's that finish after the next one's made a second
+/// heading for it: AJ3G, 11 Nov 2026), each with its rows' indexes.
+fn slot_groups(rows: &std::collections::VecDeque<ListRow>) -> Vec<(i64, Vec<usize>)> {
+    let mut by_slot: std::collections::BTreeMap<i64, Vec<usize>> = Default::default();
+    for (i, r) in rows.iter().enumerate() {
+        by_slot.entry(r.d.slot_utc).or_default().push(i);
+    }
+    by_slot.into_iter().rev().collect()
+}
+
+/// A report of our beacon, from wspr.live, WSPRnet or PSK Reporter.
+#[derive(Debug, Clone, PartialEq)]
+struct HeardMe {
+    utc: f64,
+    call: String,
+    snr: Option<f32>,
+    km: Option<f64>,
+    rf_hz: f64,
+    site: &'static str,
+}
+
+/// The reports of our WSPR beacon since `since`, newest first: one per
+/// receiver per 2 min cycle, the WSPR sites' before PSK Reporter's.
+fn heard_me(
+    pskr: &[Reception],
+    wspr: &[WsprReport],
+    me: Option<station::LatLon>,
+    since: f64,
+) -> Vec<HeardMe> {
+    let km = |r: &Reception| me.map(|p| station::distance_km(p, r.pos));
+    let mut v: Vec<HeardMe> = wspr
+        .iter()
+        .map(|w| HeardMe { utc: w.rec.utc, call: w.rec.call.clone(), snr: w.rec.snr, km: w.km.or_else(|| km(&w.rec)), rf_hz: w.rec.rf_hz, site: w.site })
+        .chain(pskr.iter().filter(|r| r.mode.eq_ignore_ascii_case("WSPR")).map(|r| HeardMe {
+            utc: r.utc,
+            call: r.call.clone(),
+            snr: r.snr,
+            km: km(r),
+            rf_hz: r.rf_hz,
+            site: "PSK Reporter",
+        }))
+        .filter(|m| m.utc >= since)
+        .collect();
+    let cycle = |t: f64| sched::slot_start(t, sched::WSPR_PERIOD);
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|m| seen.insert((m.call.clone(), cycle(m.utc))));
+    v.sort_by(|a, b| b.utc.total_cmp(&a.utc));
+    v
+}
+
+/// WSPR's list (AJ3G, 11 Nov 2026): who our decoder heard, and who heard
+/// our beacon, newest 2 min cycle first. Nothing to REPLY to.
+fn wspr_list(ui: &mut egui::Ui, tx: &mut Tx, c: &Ctx<'_>) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("WSPR").strong().color(theme::TEXT_STRONG()));
+        if chrome::chip(ui, false, "CLEAR").clicked() {
+            tx.wspr_rows.clear();
+            tx.wspr_cleared = c.now;
+        }
+    });
+    let me = heard_me(c.heard_me.0, c.heard_me.1, c.station.pos(), tx.wspr_cleared);
+    let head = |ui: &mut egui::Ui, t: &str| ui.label(RichText::new(t).size(10.5).color(theme::CYAN_DIM()));
+    let cycle_head = |ui: &mut egui::Ui, t: i64, n: usize| {
+        ui.label(RichText::new(format!("{} · {n}", crate::decode::hms(t as f64))).size(10.5).color(theme::CYAN_DIM()));
+    };
+    let row_h = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
+    let half = ((ui.available_height() - 4.0 * row_h) / 2.0).max(row_h);
+
+    caption(ui, "HEARD");
+    head(ui, "UTC   SNR DRIFT CALL       GRID   DBM     KM  BRG   HZ");
+    egui::ScrollArea::vertical().id_salt("tx-wspr-heard").auto_shrink([false, false]).max_height(half).show(ui, |ui| {
+        let mut i = 0;
+        while i < tx.wspr_rows.len() {
+            let t = tx.wspr_rows[i].h.slot_utc;
+            let n = tx.wspr_rows.iter().skip(i).take_while(|r| r.h.slot_utc == t).count();
+            cycle_head(ui, t, n);
+            for r in tx.wspr_rows.iter().skip(i).take(n) {
+                ui.label(mono(wspr_heard_line(r)).color(theme::TEXT()));
+            }
+            i += n;
+        }
+        if tx.wspr_rows.is_empty() {
+            ui.label(RichText::new("Nothing heard yet: DECODE runs WSPR while this window is open.").size(11.5).color(theme::TEXT()));
+        }
+    });
+
+    caption(ui, "HEARD ME");
+    head(ui, "UTC   CALL        SNR     KM  MHZ         FROM");
+    egui::ScrollArea::vertical().id_salt("tx-wspr-me").auto_shrink([false, false]).show(ui, |ui| {
+        let cycle = |t: f64| sched::slot_start(t, sched::WSPR_PERIOD);
+        let mut i = 0;
+        while i < me.len() {
+            let t = cycle(me[i].utc);
+            let n = me.iter().skip(i).take_while(|m| cycle(m.utc) == t).count();
+            cycle_head(ui, t, n);
+            for m in me.iter().skip(i).take(n) {
+                ui.label(mono(heard_me_line(m)).color(theme::TEXT()));
+            }
+            i += n;
+        }
+        if me.is_empty() {
+            ui.label(
+                RichText::new(
+                    "No reports of your beacon yet. GLOBE fetches them while it is open: from wspr.live or \
+                     WSPRnet with its WSPR HEARD ME on, and from PSK Reporter with its PSK REPORTER on. The \
+                     sites take a few minutes.",
+                )
+                .size(11.5)
+                .color(theme::TEXT()),
+            );
+        }
+    });
+}
+
+fn wspr_heard_line(r: &super::WsprRow) -> String {
+    let h = &r.h;
+    let t = crate::decode::hms(h.slot_utc as f64).replace(':', "");
+    let (km, brg) = match r.path {
+        Some((b, km)) => (format!("{km:5.0}"), format!("{b:3.0}°")),
+        None => ("    –".into(), "  –".into()),
+    };
+    format!(
+        "{} {:+4.0} {:+5.0} {:<10} {:<6} {:>3} {km} {brg} {:4.0}",
+        t.get(..4).unwrap_or(&t),
+        h.snr_db,
+        h.drift_hz,
+        h.call,
+        if h.grid.is_empty() { "–" } else { &h.grid },
+        h.dbm,
+        h.audio_hz
+    )
+}
+
+fn heard_me_line(m: &HeardMe) -> String {
+    let t = crate::decode::hms(m.utc).replace(':', "");
+    format!(
+        "{} {:<10} {:>4} {:>6} {:<11.6} {}",
+        t.get(..4).unwrap_or(&t),
+        m.call,
+        m.snr.map_or("–".into(), |s| format!("{s:+.0}")),
+        m.km.map_or("–".into(), |k| format!("{k:.0}")),
+        m.rf_hz / 1e6,
+        m.site
+    )
 }
 
 enum Act {
@@ -545,7 +714,9 @@ fn hover(ui: &mut egui::Ui, r: &ListRow) {
     }
 }
 
-fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
+/// The FT8 QSO panel. `spare` is the room the column has beyond what the
+/// panel needs, for the transcript; returns the transcript's height.
+fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, spare: f32) -> f32 {
     // The station in hand.
     ui.horizontal(|ui| {
         ui.label(RichText::new("QSO").strong().color(theme::TEXT_STRONG()));
@@ -557,6 +728,11 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
                 ui.label(RichText::new(call).monospace().size(20.0).color(theme::TEXT_STRONG()));
                 if let Some(g) = tx.qso.dx_grid() {
                     ui.label(mono(g));
+                }
+                // Where we copy them: the offset alone (AJ3G, 11 Nov 2026).
+                if let Some((_, hz, _)) = tx.dx_mark() {
+                    ui.label(mono(format!("{hz:.0} Hz")))
+                        .on_hover_text("The audio offset you copy them at, from their latest decode");
                 }
             });
             let (rcvd, sent) = tx.qso.reports();
@@ -584,24 +760,43 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
     }
     ui.add_space(4.0);
     caption(ui, "TRANSCRIPT");
+    // The whole QSO, kept at its newest line; as tall as dragged (16 lines
+    // to start), or as the window's room allows (AJ3G, 11 Nov 2026).
+    let row_h = ui.fonts_mut(|f| f.row_height(&egui::FontId::monospace(12.0))) + ui.spacing().item_spacing.y;
+    let min_h = 3.0 * row_h;
+    let shown_h = s.transcript_h.max(spare).max(min_h);
     egui::Frame::new().fill(theme::INPUT_BG()).inner_margin(6).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
-        let lines = tx.qso.transcript();
-        for l in lines.iter().rev().take(10).collect::<Vec<_>>().into_iter().rev() {
-            let t = crate::decode::hms(l.utc as f64).replace(':', "");
-            let (tag, col) = if l.note {
-                ("  ", theme::CYAN_DIM())
-            } else if l.tx {
-                ("TX", tx_ink())
-            } else {
-                ("RX", theme::GREEN())
-            };
-            let col = if l.done { theme::TEXT_STRONG() } else { col };
-            ui.label(mono(format!("{t} {tag} {}", l.text)).color(col));
-        }
+        egui::ScrollArea::vertical()
+            .id_salt("tx-transcript")
+            .stick_to_bottom(true)
+            .auto_shrink([false, false])
+            .max_height(shown_h)
+            .show(ui, |ui| {
+                for l in tx.qso.transcript() {
+                    let t = crate::decode::hms(l.utc as f64).replace(':', "");
+                    let (tag, col) = if l.note {
+                        ("  ", theme::CYAN_DIM())
+                    } else if l.tx {
+                        ("TX", tx_ink())
+                    } else {
+                        ("RX", theme::GREEN())
+                    };
+                    let col = if l.done { theme::TEXT_STRONG() } else { col };
+                    ui.label(mono(format!("{t} {tag} {}", l.text)).color(col));
+                }
+            });
         let next = tx.hand.clone().or_else(|| tx.qso.plan_tx());
         ui.label(mono(format!("next: {}", next.unwrap_or_else(|| "nothing".into()))).color(theme::CYAN_DIM()));
     });
+    // Its grip: drag to make it taller or shorter.
+    let (grip, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 7.0), Sense::drag());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text("Drag to size the transcript");
+    let ink = if resp.hovered() || resp.dragged() { theme::TEXT_STRONG() } else { theme::LINE() };
+    ui.painter().hline(grip.center().x - 18.0..=grip.center().x + 18.0, grip.center().y, egui::Stroke::new(2.0, ink));
+    if resp.dragged() {
+        s.transcript_h = (shown_h + resp.drag_delta().y).clamp(min_h, 4000.0);
+    }
     ui.add_space(4.0);
     // Tx1 to Tx6, with Next and Now.
     ui.horizontal(|ui| {
@@ -655,8 +850,12 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
     }
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
-        if chrome::chip(ui, tx.qso.step() == crate::tx::qso::Step::CallingCq, "CALL CQ").clicked() {
+        if chrome::chip(ui, tx.qso.step() == crate::tx::qso::Step::CallingCq, "CALL CQ")
+            .on_hover_text("Call CQ from your next slot: turns ENABLE TX on")
+            .clicked()
+        {
             tx.call_cq(s);
+            tx.enable(s);
         }
         if chrome::chip(ui, false, "Generate Std Msgs").clicked() {
             tx.generate(s);
@@ -665,6 +864,12 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
             (&mut s.skip_tx1, "Skip Tx1", "Answer a CQ with the report, not the grid"),
             (&mut s.auto_seq, "Auto Seq", "Send the right reply to what you hear, through to the log"),
             (&mut s.call_first, "Call 1st", "Answer the first (strongest new) caller to your CQ by itself"),
+            (
+                &mut s.call_after_rr73,
+                "Call after RR73",
+                "Waiting for a station working someone else: call them as soon as they send that station \
+                 RR73, RRR or 73, rather than wait for their next CQ",
+            ),
             (&mut s.tx_even, "TX even/1st", "Call CQ in the even slots (:00, :30)"),
         ] {
             if chrome::chip(ui, *v, l).on_hover_text(tip).clicked() {
@@ -705,6 +910,7 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
             40.0,
             egui::Slider::new(&mut s.ft8_level, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
         );
+        drive(ui, c, s.ft8_level);
     });
     // The queue.
     ui.horizontal_wrapped(|ui| {
@@ -738,6 +944,19 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
             }
         });
     }
+    shown_h
+}
+
+/// The drive a LEVEL gives, beside its slider: "≈ 2.5 W", or "— W" before
+/// the radio's power step is read (AJ3G, 11 Nov 2026).
+fn drive(ui: &mut egui::Ui, c: &Ctx<'_>, level: f32) {
+    let w = c.rig.and_then(|r| crate::tune::planned_watts(r, rigcat::Keying::Data, level));
+    ui.label(mono(drive_text(w)).color(theme::TEXT()))
+        .on_hover_text("The radio's power setting times this level: what the radio puts out into the amplifier");
+}
+
+fn drive_text(w: Option<f32>) -> String {
+    w.map_or("— W".into(), |w| format!("≈ {w:.1} W"))
 }
 
 fn wspr_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
@@ -745,7 +964,14 @@ fn wspr_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
     let call = c.station.call().unwrap_or_default();
     let grid: String = c.station.grid().unwrap_or_default().chars().take(4).collect();
     let ok = wave::Message::wspr(&call, &grid, s.wspr_dbm, 1500.0).is_some();
-    ui.label(mono(format!("{call} {grid} {}", s.wspr_dbm)).color(if ok { theme::TEXT_STRONG() } else { theme::YELLOW() }));
+    ui.horizontal(|ui| {
+        ui.label(mono(format!("{call} {grid} {}", s.wspr_dbm)).color(if ok { theme::TEXT_STRONG() } else { theme::YELLOW() }));
+        // The offset the beacon goes (or last went) out on.
+        if let Some(hz) = tx.wspr_offset(s) {
+            ui.label(mono(format!("{hz:.0} Hz")))
+                .on_hover_text("The audio offset of the beacon on the air, or of the last one with ROAM on");
+        }
+    });
     if !ok {
         ui.label(
             RichText::new("Type 1 only: a plain callsign and a 4-character grid. A compound call can't be sent.")
@@ -788,6 +1014,7 @@ fn wspr_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
             40.0,
             egui::Slider::new(&mut s.wspr_level, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
         );
+        drive(ui, c, s.wspr_level);
     });
     ui.add_space(6.0);
     ui.label(
@@ -801,5 +1028,103 @@ fn wspr_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
     );
     if let Some((text, _, hz, end)) = tx.over() {
         ui.label(mono(format!("On the air: {text} at {hz:.0} Hz, {:.0} s left", (end - c.now).max(0.0))).color(tx_ink()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tx::msg;
+
+    pub(crate) fn row(text: &str, slot: i64, ours: bool) -> ListRow {
+        ListRow {
+            d: msg::parse(text, slot, -10, 0.1, 1500.0),
+            row: 1,
+            rf_hz: 14_075_500.0,
+            country: None,
+            continent: None,
+            cq_zone: None,
+            itu_zone: None,
+            path: None,
+            badges: Default::default(),
+            to_me: false,
+            cq_ok: false,
+            ours,
+        }
+    }
+
+    #[test]
+    fn a_slot_whose_decodes_come_late_keeps_one_heading() {
+        // Newest first, as the list holds them: slot 30's decodes, then
+        // our over in slot 45, then slot 30's late ones, then slot 15's.
+        let rows: std::collections::VecDeque<ListRow> = [
+            row("CQ K1ABC FN42", 30, false),
+            row("UN7GBX AJ3G -18", 45, true),
+            row("CQ W9XYZ EN52", 30, false),
+            row("CQ JA1ABC PM95", 15, false),
+        ]
+        .into_iter()
+        .collect();
+        let g = slot_groups(&rows);
+        assert_eq!(g.iter().map(|t| t.0).collect::<Vec<_>>(), vec![45, 30, 15]);
+        assert_eq!(g[1].1, vec![0, 2]);
+    }
+
+    #[test]
+    fn heard_me_keeps_one_report_per_receiver_per_cycle_newest_first() {
+        let rec = |call: &str, utc: f64, mode: &str| Reception {
+            call: call.into(),
+            grid: "IO91".into(),
+            pos: station::grid_to_latlon("IO91").unwrap(),
+            rf_hz: 14_097_071.0,
+            mode: mode.into(),
+            snr: Some(-22.0),
+            utc,
+            src: crate::globe::field::Source::PskReporter,
+            row: None,
+            from: None,
+        };
+        let w = |call: &str, utc: f64| WsprReport {
+            rec: rec(call, utc, "WSPR"),
+            drift_hz: Some(0.0),
+            power_dbm: Some(37.0),
+            km: Some(5900.0),
+            site: "wspr.live",
+        };
+        let t = 1_800_000_000.0;
+        let wspr = [w("G4XYZ", t), w("DL1ABC", t + 120.0)];
+        let pskr = [rec("G4XYZ", t + 30.0, "WSPR"), rec("K1ABC", t + 30.0, "FT8"), rec("VK2XX", t + 1.0, "WSPR")];
+        let v = heard_me(&pskr, &wspr, None, 0.0);
+        let calls: Vec<_> = v.iter().map(|m| (m.call.as_str(), m.site)).collect();
+        assert_eq!(calls, vec![("DL1ABC", "wspr.live"), ("VK2XX", "PSK Reporter"), ("G4XYZ", "wspr.live")]);
+        // CLEAR hides what came before it.
+        assert_eq!(heard_me(&pskr, &wspr, None, t + 60.0).len(), 1);
+    }
+
+    #[test]
+    fn a_wspr_line_holds_its_columns() {
+        let r = crate::tx::WsprRow {
+            h: crate::decode::WsprHeard {
+                slot_utc: 1_800_000_000 - 1_800_000_000 % 120,
+                snr_db: -18.0,
+                drift_hz: 1.0,
+                audio_hz: 1503.0,
+                call: "K1ABC".into(),
+                grid: "FN42".into(),
+                dbm: 37,
+                rf_hz: 14_097_103.0,
+            },
+            path: Some((45.0, 1234.0)),
+        };
+        let l = wspr_heard_line(&r);
+        for part in ["-18", "+1", "K1ABC", "FN42", "37", "1234", "45°", "1503"] {
+            assert!(l.contains(part), "{part} in {l}");
+        }
+    }
+
+    #[test]
+    fn the_drive_reads_in_watts_or_a_dash() {
+        assert_eq!(drive_text(Some(2.5)), "≈ 2.5 W");
+        assert_eq!(drive_text(None), "— W");
     }
 }

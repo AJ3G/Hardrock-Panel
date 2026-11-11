@@ -309,6 +309,13 @@ const BUILD_EVERY_S: f64 = 15.0;
 const PAINT_EVERY_S: f64 = 3.0;
 
 impl Globe {
+    /// Who heard the station, as last fetched: PSK Reporter's reports
+    /// (every mode) and WSPR HEARD ME's of the beacon. For the TX window's
+    /// WSPR list.
+    pub(crate) fn heard_me(&self) -> (&[Reception], &[WsprReport]) {
+        (&self.got.heard_me, &self.got.wspr_heard)
+    }
+
     /// A station heard (or, from PSK Reporter, hearing AJ3G).
     pub(crate) fn add(&mut self, r: Reception) {
         if r.src == Source::Decode && r.band().is_some() {

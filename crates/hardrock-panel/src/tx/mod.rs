@@ -26,7 +26,7 @@ use rigcat::{Keying, RigLink, RigStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::audio;
-use crate::decode::TxHeard;
+use crate::decode::{TxHeard, WsprHeard};
 use crate::station::{self, StationSettings};
 use crate::tune;
 
@@ -89,6 +89,8 @@ pub(crate) struct TxSettings {
     pub auto_seq: bool,
     pub call_first: bool,
     pub skip_tx1: bool,
+    /// In Wait CQ, call the station as soon as they sign off with another.
+    pub call_after_rr73: bool,
     /// Tx4 sends RRR rather than RR73.
     pub rrr: bool,
     /// The CQ template: "CQ {MYCALL} {MYGRID}", or "CQ DX {MYCALL} {MYGRID}".
@@ -106,6 +108,8 @@ pub(crate) struct TxSettings {
     /// Ask before logging, rather than logging at once.
     pub prompt_log: bool,
     pub sort: Sort,
+    /// The transcript's height as last dragged, px.
+    pub transcript_h: f32,
     pub cq_only: bool,
     pub new_only: bool,
 }
@@ -123,6 +127,7 @@ impl Default for TxSettings {
             auto_seq: true,
             call_first: true,
             skip_tx1: false,
+            call_after_rr73: true,
             rrr: false,
             cq: "CQ {MYCALL} {MYGRID}".into(),
             macros: vec!["TNX 73 GL".into(), "QRZ?".into(), "TU 73".into()],
@@ -134,6 +139,7 @@ impl Default for TxSettings {
             wspr_audio_hz: 1500.0,
             prompt_log: false,
             sort: Sort::Time,
+            transcript_h: 250.0,
             cq_only: false,
             new_only: false,
         }
@@ -181,6 +187,14 @@ pub(crate) struct ListRow {
     pub cq_ok: bool,
     /// We sent it (our own over, in the list as WSJT-X shows it).
     pub ours: bool,
+}
+
+/// A row of the TX window's WSPR list: a station our WSPR decoder heard.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WsprRow {
+    pub h: WsprHeard,
+    /// Heading, °, and distance, km, from our grid to theirs.
+    pub path: Option<(f64, f64)>,
 }
 
 /// An over on the air, or about to be.
@@ -246,6 +260,11 @@ pub(crate) struct Tx {
     /// The slot an over last went in, so a slot is used once.
     sent_slot: Option<i64>,
     pub rows: VecDeque<ListRow>,
+    /// WSPR's list: the stations heard, newest first.
+    pub wspr_rows: VecDeque<WsprRow>,
+    /// CLEAR in WSPR: reports of our beacon from before it are not shown,
+    /// UTC s.
+    pub wspr_cleared: f64,
     /// (slot, audio Hz) of signals heard, for AUTO.
     heard: VecDeque<(i64, f32)>,
     /// Which slots each station was heard in: even or odd.
@@ -270,12 +289,16 @@ pub(crate) struct Tx {
     logged: VecDeque<(qso::Logged, f64)>,
     /// The row picked in the list.
     pub picked: Option<u64>,
-    /// The WSPR offset this beacon went at.
+    /// The WSPR offset this beacon went at, and whether one has gone.
     wspr_hz: f32,
+    wspr_sent: bool,
     /// Seed for ROAM.
     roam: u64,
     /// The dial (radio Hz) the list belongs to: a band change clears it.
     list_dial: Option<f64>,
+    /// The station worked, where we last copied them: call, audio Hz and
+    /// RF Hz (0 when unknown), from each of their decodes.
+    dx_seen: Option<(String, f32, f64)>,
 }
 
 impl Default for Tx {
@@ -289,6 +312,8 @@ impl Default for Tx {
             over: None,
             sent_slot: None,
             rows: VecDeque::new(),
+            wspr_rows: VecDeque::new(),
+            wspr_cleared: 0.0,
             heard: VecDeque::new(),
             parity: HashMap::new(),
             tx_even: false,
@@ -302,8 +327,10 @@ impl Default for Tx {
             logged: VecDeque::new(),
             picked: None,
             wspr_hz: 1500.0,
+            wspr_sent: false,
             roam: 0x9e37_79b9_7f4a_7c15,
             list_dial: None,
+            dx_seen: None,
         }
     }
 }
@@ -327,6 +354,24 @@ impl Tx {
         self.over.as_ref().map(|o| o.mode)
     }
 
+    /// The station worked and where we copy them: call, audio offset Hz
+    /// and RF Hz, from their latest decode; for the QSO box and the
+    /// scope's mark (AJ3G, 11 Nov 2026).
+    pub(crate) fn dx_mark(&self) -> Option<(String, f32, f64)> {
+        let call = self.qso.dx_call()?;
+        self.dx_seen.clone().filter(|(c, ..)| c == call)
+    }
+
+    /// The offset our WSPR beacon goes out on: the one on the air, else the
+    /// one set, else (ROAM) the last one sent.
+    pub(crate) fn wspr_offset(&self, s: &TxSettings) -> Option<f32> {
+        match self.over.as_ref().filter(|o| o.mode == TxMode::Wspr) {
+            Some(o) => Some(o.audio_hz),
+            None if !s.wspr_roam => Some(s.wspr_audio_hz),
+            None => self.wspr_sent.then_some(self.wspr_hz),
+        }
+    }
+
     /// A finished contact for the log, with the dial it was on (radio Hz).
     pub(crate) fn take_logged(&mut self) -> Option<(qso::Logged, f64)> {
         self.logged.pop_front()
@@ -343,6 +388,7 @@ impl Tx {
         c.max_tx_repeats = s.max_calls;
         c.skip_tx1 = s.skip_tx1;
         c.call_first = s.call_first;
+        c.call_after_73 = s.call_after_rr73;
     }
 
     /// Generate Std Msgs: the six lines for the station in hand.
@@ -374,10 +420,23 @@ impl Tx {
             return;
         }
         self.tx_even = !sched::is_even(r.d.slot_utc, sched::FT8_PERIOD);
+        self.dx_seen = Some((call.clone(), r.d.audio_hz, r.rf_hz));
         self.report = r.d.snr_db;
         self.qso.start_qso(&call, r.d.grid.clone(), r.d.snr_db, wait, now as i64);
         self.hand = None;
         self.generate(s);
+    }
+
+    /// ENABLE TX on, as its button turns it on: the operator is here, so
+    /// the watchdog starts over. REPLY and CALL CQ do this too in FT8
+    /// (AJ3G, 11 Nov 2026); every interlock still decides whether an over
+    /// keys.
+    pub(crate) fn enable(&mut self, s: &TxSettings) {
+        self.enabled = true;
+        self.note = None;
+        if s.mode == TxMode::Ft8 {
+            self.qso.reset_watchdog();
+        }
     }
 
     /// + on a station: queue it.
@@ -568,6 +627,7 @@ impl Tx {
             {
                 self.tx_even = self.parity.get(&q.call).map_or(s.tx_even, |even| !even);
                 self.report = q.snr_db;
+                self.dx_seen = Some((q.call.clone(), q.audio_hz, 0.0));
                 self.qso.start_qso(&q.call, q.grid.clone(), q.snr_db, q.wait_for_cq, now as i64);
                 self.generate(s);
             }
@@ -629,6 +689,15 @@ impl Tx {
         out
     }
 
+    /// The WSPR decodes since last frame, into the WSPR list.
+    pub(crate) fn take_wspr(&mut self, feed: Vec<WsprHeard>, me: Option<station::LatLon>) {
+        for h in feed {
+            let path = me.zip(station::grid_to_latlon(&h.grid)).map(|(a, b)| (station::bearing_deg(a, b), station::distance_km(a, b)));
+            self.wspr_rows.push_front(WsprRow { h, path });
+        }
+        self.wspr_rows.truncate(ROWS);
+    }
+
     /// The FT8 decodes since last frame: into the sequencer and the list.
     fn take_feed(
         &mut self,
@@ -644,6 +713,7 @@ impl Tx {
             if self.list_dial.is_some_and(|d| (d - dial).abs() > 5_000.0) {
                 self.rows.clear();
                 self.heard.clear();
+                self.wspr_rows.clear();
             }
             self.list_dial = Some(dial);
         }
@@ -696,6 +766,7 @@ impl Tx {
             decodes.push(d);
         }
         self.rows.truncate(ROWS);
+        self.note_dx_seen();
         let newest = self.heard.back().map_or(0, |h| h.0);
         while self.heard.front().is_some_and(|h| h.0 < newest - 120) {
             self.heard.pop_front();
@@ -704,6 +775,8 @@ impl Tx {
         self.dt = dts.get(dts.len() / 2).copied();
         if s.auto_seq && s.mode == TxMode::Ft8 && self.qso.on_rx(&decodes, env.now as i64) {
             self.take_completed(s.prompt_log);
+            // A station that answered our CQ is now the one worked.
+            self.note_dx_seen();
             if let Some(c) = self.qso.dx_call().map(str::to_string)
                 && self.lines[0].split_whitespace().next() != Some(c.as_str())
             {
@@ -712,6 +785,15 @@ impl Tx {
                 }
                 self.generate(s);
             }
+        }
+    }
+
+    /// Where the station worked was last copied, from the list's newest
+    /// decode of theirs.
+    fn note_dx_seen(&mut self) {
+        let Some(call) = self.qso.dx_call() else { return };
+        if let Some(r) = self.rows.iter().find(|r| !r.ours && r.d.from.as_deref() == Some(call)) {
+            self.dx_seen = Some((call.to_string(), r.d.audio_hz, r.rf_hz));
         }
     }
 
@@ -752,6 +834,7 @@ impl Tx {
                 } else {
                     self.wspr_hz = s.wspr_audio_hz;
                 }
+                self.wspr_sent = true;
                 let m = wave::Message::wspr(me, &grid, s.wspr_dbm, self.wspr_hz).ok_or_else(|| {
                     "WSPR Type 1 needs a plain call, a 4-character grid and one of its power levels."
                         .to_string()

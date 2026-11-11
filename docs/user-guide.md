@@ -761,19 +761,37 @@ it is on another mode). Use a dummy load for your first overs.
   audio, USB or LSB, the amplifier ready and on band, drive within 8 W in
   line. The checks keep running while you transmit, as for TUNE.
 - **LEVEL** is each mode's drive, a share of the radio's power setting, as
-  the Tune slider is.
+  the Tune slider is; beside it, the drive that gives (*≈ 2.5 W*, or *— W*
+  until the radio's power setting has been read).
 - The slot bar is cyan while you listen and magenta while you transmit, with
   a mark where the over ends. **DT** is your clock against the stations you
   hear; past 0.5 s it turns amber, and Windows' time wants syncing.
+- The window sizes freely: drag its corner either way. The decode list and
+  the QSO panel share it, each scrolling its own.
+- While the radio is keyed the panel's decoders hear your own signal, so
+  every slot you transmitted in is dropped, in DECODE, on GLOBE and in the TX
+  list; DECODE's slot line says *transmitting · decodes dropped*.
 
 **FT8.** Double-click a row (or **REPLY**) to answer that station, in the slot
-opposite theirs; **CALL CQ** to call in your TX even/1st slot. With **Auto Seq**
+opposite theirs; **CALL CQ** to call in your TX even/1st slot. Both turn
+ENABLE TX on (and start the watchdog over), so the over goes in your next
+slot if every check passes. With **Auto Seq**
 the panel sends the right reply to what it hears, through to the log, and you
 can always send a line again: the round button beside a line sends it next,
 the **TxN** button now (mid-over, the rest of that over becomes it), as in
 WSJT-X. **Generate Std Msgs** rebuilds the six lines; Tx5's arrow picks one of
 your saved free-text lines. **+** on a row queues the station; REPLY during a
 QSO queues it first. Click a queued call to drop it.
+
+- Beside the station's call, the audio offset you copy them at (*1737 Hz*),
+  from their latest decode.
+- The **TRANSCRIPT** holds the whole QSO and stays at its newest line; drag
+  the grip under it to make it taller or shorter (it remembers), and a taller
+  window gives it the extra room.
+- **Call after RR73** (on to start): when the station you picked is working
+  someone else, the panel waits; with this on, it calls them in your next
+  slot as soon as they send that station RR73, RRR or 73, rather than waiting
+  for their next CQ. The transcript says so.
 
 - A QSO is logged once both calls and reports have gone over and one side has
   confirmed: their RR73, RRR or 73 after your R+report, or your RR73 going out
@@ -800,7 +818,12 @@ be what you really radiate. **ROAM** picks a new offset between 1 400 and
 1 600 Hz each time. Only a plain call and a 4-character grid can be sent. A
 beacon keys for 110.6 s with the amplifier in line; none starts while the
 amplifier's temperature is in its warning range, and one going out stops if it
-gets there. Who heard you is on GLOBE (WSPR HEARD ME).
+gets there. Beside your message, the offset the beacon goes (or last went) out
+on. The list on the left has two parts, newest 2 minute cycle first:
+**HEARD**, the stations your WSPR decoder heard (UTC, SNR, drift, call, grid,
+dBm, distance, heading, audio offset), and **HEARD ME**, the reports of your
+beacon from wspr.live or WSPRnet (GLOBE's WSPR HEARD ME) and PSK Reporter,
+fetched while GLOBE is open. **CLEAR** empties both.
 
 ## The log
 
