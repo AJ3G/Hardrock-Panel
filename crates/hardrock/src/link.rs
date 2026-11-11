@@ -5,6 +5,7 @@
 //! Every round trip to the amplifier blocks for tens of milliseconds, which a
 //! window redrawing sixty times a second cannot spare.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -47,8 +48,15 @@ const TEMP_STALE: Duration = Duration::from_secs(15);
 const SCALE_SETTLE: Duration = Duration::from_secs(3);
 /// How often a band change held back by interlock #3 is tried again.
 const BAND_RETRY: Duration = Duration::from_millis(500);
-/// Missed answers in a row before the link is called lost and reopened.
+/// Missed status answers in a row before the link is called lost and
+/// reopened: about 3.2 s, with another read (as unanswered) between each.
 const MISSES: u32 = 4;
+/// While transmitting, how long the link waits with no answer to a status
+/// read before calling it lost (see [`link_lost`]). The HR500 often leaves
+/// queries unanswered while keyed: four in a row (two or three seconds)
+/// dropped the link mid-over, and the panel unkeyed the over with it (AJ3G,
+/// 11 Nov 2026: "amplifier is not connected" was cutting his QSOs and CQs).
+const TX_GRACE: Duration = Duration::from_secs(5);
 /// Longest wait between tries at reopening the port. Trying is cheap and
 /// disturbs nothing, and a USB lead plugged back in should be picked up within
 /// seconds (AJ3G, 18 Oct: at 30 s it took minutes).
@@ -185,10 +193,27 @@ enum Msg {
     Frequency(u64),
 }
 
+/// Whether the link should call the amplifier lost and reopen the port:
+/// `misses` status reads unanswered in a row, the last answer at
+/// `last_answer`.
+///
+/// SAFETY INTERLOCK (docs/safety-interlocks.md, #6): at rest the link is
+/// lost after [`MISSES`] unanswered reads, as always. While transmitting (the
+/// panel says the radio is keyed, or the last answer showed the amplifier
+/// keyed) the amplifier often leaves its queries unanswered, so it is lost
+/// only once [`TX_GRACE`] has also passed with no answer. Meanwhile the last
+/// readings stay in the snapshot with their age (`readings_at`), and the
+/// panel judges by that age, never taking a held reading as live.
+fn link_lost(misses: u32, last_answer: Instant, now: Instant, transmitting: bool) -> bool {
+    misses >= MISSES && (!transmitting || now.saturating_duration_since(last_answer) >= TX_GRACE)
+}
+
 /// A running link to the amplifier. Dropping it closes the port.
 pub struct AmpLink {
     tx: Option<Sender<Msg>>,
     status: Arc<Mutex<AmpStatus>>,
+    /// The radio is keyed, as the panel last said (see [`link_lost`]).
+    radio_keyed: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -201,9 +226,20 @@ impl AmpLink {
             ..AmpStatus::default()
         }));
         let st = status.clone();
-        let thread =
-            thread::Builder::new().name("hardrock".into()).spawn(move || worker(cfg, rx, st)).ok();
-        AmpLink { tx: Some(tx), status, thread }
+        let radio_keyed = Arc::new(AtomicBool::new(false));
+        let keyed = radio_keyed.clone();
+        let thread = thread::Builder::new()
+            .name("hardrock".into())
+            .spawn(move || worker(cfg, rx, st, keyed))
+            .ok();
+        AmpLink { tx: Some(tx), status, radio_keyed, thread }
+    }
+
+    /// Tell the link whether the radio is transmitting, every frame: while
+    /// it is, unanswered reads are given [`TX_GRACE`] before the link is
+    /// called lost (see [`link_lost`]).
+    pub fn set_transmitting(&self, keyed: bool) {
+        self.radio_keyed.store(keyed, Ordering::Relaxed);
     }
 
     /// The latest snapshot.
@@ -314,7 +350,12 @@ fn in_use(path: &str) -> String {
     )
 }
 
-fn worker(cfg: AmpConfig, rx: Receiver<Msg>, status: Arc<Mutex<AmpStatus>>) {
+fn worker(
+    cfg: AmpConfig,
+    rx: Receiver<Msg>,
+    status: Arc<Mutex<AmpStatus>>,
+    radio_keyed: Arc<AtomicBool>,
+) {
     if cfg.serial.path.trim().is_empty() {
         set(&status, |s| s.error = Some("No serial port chosen".into()));
         // Nothing to do but wait to be dropped.
@@ -333,12 +374,13 @@ fn worker(cfg: AmpConfig, rx: Receiver<Msg>, status: Arc<Mutex<AmpStatus>>) {
                     s.connected = true;
                     s.error = None;
                 });
-                if !run(amp, &rx, &status, cfg.model.limits()) {
+                if !run(amp, &rx, &status, cfg.model.limits(), &radio_keyed) {
                     return;
                 }
                 set(&status, |s| {
                     s.connected = false;
                     s.readings = None;
+                    s.readings_at = None;
                     s.atu = None;
                     s.pending.clear();
                     s.error = Some("The amplifier stopped answering".into());
@@ -477,11 +519,15 @@ fn run<P: std::io::Read + std::io::Write>(
     rx: &Receiver<Msg>,
     status: &Mutex<AmpStatus>,
     limits: AmpLimits,
+    radio_keyed: &AtomicBool,
 ) -> bool {
     let has_atu = matches!(amp.query(&Command::AtuPresent), Ok(Response::AtuPresent(true)));
     set(status, |s| s.atu = has_atu.then(AtuReadout::default));
     let mut celsius: Option<bool> = None;
     let mut misses = 0;
+    // When the amplifier last answered a status read (it answered the pings
+    // that opened the port).
+    let mut last_answer = Instant::now();
     let mut next_status = Instant::now();
     let mut next_atu = Instant::now();
     let mut next_temp = Instant::now();
@@ -666,6 +712,7 @@ fn run<P: std::io::Read + std::io::Write>(
                 match amp.status() {
                     Ok(s) => {
                         misses = 0;
+                        last_answer = Instant::now();
                         clear =
                             Some(Clear { at: Instant::now(), rf: rf_in(&s), drive_w: s.drive_w });
                         let r = AmpReadings {
@@ -725,6 +772,7 @@ fn run<P: std::io::Read + std::io::Write>(
                         let tx_light = s.lights().map(|l| l.tx);
                         set(status, |st| {
                             st.readings = Some(r);
+                            st.readings_at = Some(last_answer);
                             st.alerts = alerts;
                             st.transmitting = tx_light;
                         });
@@ -742,8 +790,16 @@ fn run<P: std::io::Read + std::io::Write>(
                     Err(e) => {
                         misses += 1;
                         debug!("hardrock: status: {e}");
-                        if misses >= MISSES {
+                        let keyed = radio_keyed.load(Ordering::Relaxed) || was_keyed;
+                        if link_lost(misses, last_answer, Instant::now(), keyed) {
                             return true;
+                        }
+                        if misses == MISSES && keyed {
+                            info!(
+                                "hardrock: no answer while transmitting; the link is held for up \
+                                 to {} s",
+                                TX_GRACE.as_secs()
+                            );
                         }
                     }
                 }
@@ -974,6 +1030,8 @@ mod tests {
         band: u8,
         /// The antenna relay ignores its command.
         stuck: bool,
+        /// Nothing is answered at all.
+        silent: bool,
     }
 
     impl SimPort {
@@ -992,6 +1050,7 @@ mod tests {
                 drive: 0,
                 band: 7,
                 stuck: false,
+                silent: false,
             })))
         }
 
@@ -1044,7 +1103,7 @@ mod tests {
             }
             if let Some(a) = self.answer(cmd) {
                 self.queries += 1;
-                if !(self.skip)(cmd, self.queries) {
+                if !self.silent && !(self.skip)(cmd, self.queries) {
                     self.replies.push_back((now + self.latency, a.into_bytes()));
                 }
             }
@@ -1110,7 +1169,8 @@ mod tests {
             let (p, st) = (port.clone(), status.clone());
             let thread = thread::spawn(move || {
                 let amp = Amp::new(p).with_timeout(Duration::from_millis(400));
-                run(amp, &rx, &st, crate::types::AmpModel::Hr500.limits());
+                let keyed = AtomicBool::new(false);
+                run(amp, &rx, &st, crate::types::AmpModel::Hr500.limits(), &keyed);
             });
             SimLink { port, tx: Some(tx), status, thread: Some(thread) }
         }
@@ -1352,6 +1412,73 @@ mod tests {
         assert_eq!(next_read(t, Some(Read::Status), t, [(Read::Temp, true)]), Some(Read::Temp));
         // Nothing due: wait.
         assert_eq!(next_read(t, Some(Read::Status), later, [(Read::Temp, false)]), None);
+    }
+
+    #[test]
+    fn transmitting_the_link_waits_five_seconds_before_it_is_lost() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        // At rest: four misses, whatever the time.
+        assert!(!link_lost(3, t0, at(1200), false));
+        assert!(link_lost(4, t0, at(1600), false));
+        // Transmitting: four misses are not enough until 5 s have passed
+        // since the last answer.
+        assert!(!link_lost(4, t0, at(1600), true));
+        assert!(!link_lost(12, t0, at(4900), true));
+        assert!(link_lost(13, t0, at(5000), true));
+        // An answer resets it: the misses count from zero again.
+        assert!(!link_lost(0, t0, at(9000), true));
+        // Once the transmission ends, the old rule applies at once.
+        assert!(link_lost(13, t0, at(4900), false));
+    }
+
+    /// Run a link on an amplifier that stops answering after `quiet_after`,
+    /// the radio keyed or not, and give how long after the silence began
+    /// the link was given up, and the readings and their age just before.
+    fn time_to_lost(keyed: bool) -> (Duration, Option<AmpStatus>) {
+        let port = SimPort::new(Duration::from_millis(25), answers_all);
+        let status = Arc::new(Mutex::new(AmpStatus::default()));
+        let radio_keyed = Arc::new(AtomicBool::new(keyed));
+        let (_tx, rx) = bounded::<Msg>(16);
+        let (p, st, k) = (port.clone(), status.clone(), radio_keyed.clone());
+        let done = Arc::new(Mutex::new(None));
+        let d = done.clone();
+        thread::spawn(move || {
+            let amp = Amp::new(p).with_timeout(Duration::from_millis(400));
+            run(amp, &rx, &st, crate::types::AmpModel::Hr500.limits(), &k);
+            *d.lock().unwrap() = Some(Instant::now());
+        });
+        thread::sleep(Duration::from_millis(600));
+        port.sim().silent = true;
+        let quiet = Instant::now();
+        let mut held = None;
+        loop {
+            if let Some(t) = *done.lock().unwrap() {
+                return (t.duration_since(quiet), held);
+            }
+            assert!(quiet.elapsed() < Duration::from_secs(10), "never given up");
+            held = Some(status.lock().unwrap().clone());
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn unanswered_reads_drop_the_link_at_rest_but_not_mid_transmission() {
+        let ((rest, _), (keyed, held)) = thread::scope(|s| {
+            let a = s.spawn(|| time_to_lost(false));
+            let b = s.spawn(|| time_to_lost(true));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        // Four status reads of 400 ms, with another read (each as
+        // unanswered) between each: about 3.2 s, as before.
+        assert!(rest < Duration::from_millis(3700), "{rest:?}");
+        assert!(keyed >= TX_GRACE - Duration::from_millis(300), "{keyed:?}");
+        assert!(keyed < TX_GRACE + Duration::from_millis(1500), "{keyed:?}");
+        // Until then the last readings were kept, with their true age.
+        let held = held.unwrap();
+        assert!(held.readings.is_some());
+        let age = held.readings_at.unwrap().elapsed();
+        assert!(age >= TX_GRACE - Duration::from_millis(400), "{age:?}");
     }
 
     #[test]

@@ -493,6 +493,13 @@ pub struct AmpStatus {
     /// Why it is not connected, when it is not.
     pub error: Option<String>,
     pub readings: Option<AmpReadings>,
+    /// When the amplifier last answered a status read: how old `readings`
+    /// are. While transmitting the link keeps the last readings for a few
+    /// seconds of unanswered reads (interlock #6), so a reading may be
+    /// held rather than live. `None` when it isn't known (the default, and
+    /// across serialisation), which is taken as live.
+    #[serde(skip)]
+    pub readings_at: Option<std::time::Instant>,
     /// The status indicators as the amplifier would be showing them.
     pub alerts: AmpAlerts,
     /// `None` when no tuner is fitted.
