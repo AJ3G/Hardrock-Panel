@@ -113,8 +113,9 @@ pub(crate) struct GlobeSettings {
     /// Ask PSK Reporter for everyone's reports on GLOBE's band (31 Oct
     /// 2026, AJ3G: copies "under band conditions", as SDRoxide reads them).
     pub pskr_band: bool,
-    /// WSPR HEARD ME: ask wspr.live (else WSPRnet) who heard the station's
-    /// WSPR (off until turned on, as PSK REPORTER is).
+    /// WSPR HEARD ME (its chip ASK WSPRNET + WSPR.LIVE): ask both sites who
+    /// heard the station's WSPR (off until turned on, as PSK REPORTER is;
+    /// turned on by itself when the panel goes to WSPR, decision 93).
     pub wspr_heard: bool,
     pub proj: Proj,
     /// How long PROP's evidence takes to halve, minutes.
@@ -126,6 +127,11 @@ pub(crate) struct GlobeSettings {
     pub heard_view: HeardView,
     /// Every mode's stations, not only the mode in use (AJ3G, 11 Nov 2026).
     pub all_modes: bool,
+    /// GLOBE MODES' extras (decision 94): other modes whose stations show
+    /// too, as `field::norm_mode` has them, beside the mode in use.
+    pub extra_modes: Vec<String>,
+    /// The extras' paths drawn too; off, only the mode in use has paths.
+    pub extra_paths: bool,
 }
 
 /// I HEARD · HEARD ME · BOTH (AJ3G, 11 Nov 2026): the stations AJ3G
@@ -174,6 +180,8 @@ impl Default for GlobeSettings {
             popped: false,
             heard_view: HeardView::Both,
             all_modes: false,
+            extra_modes: Vec::new(),
+            extra_paths: false,
         }
     }
 }
@@ -251,6 +259,18 @@ pub(crate) struct Globe {
     qso_fly: bool,
     /// The mode in use (`set_mode`), as `field::norm_mode` has it.
     mode: Option<String>,
+    /// WSPR HEARD ME's one list: WSPRnet's, wspr.live's and PSK Reporter's
+    /// WSPR reports merged (`wspr::merge`), for the map and the TX window.
+    wspr_merged: Vec<WsprReport>,
+    /// What `wspr_merged` and the history were last filled from: the fetch's
+    /// serial and whether WSPR HEARD ME was on.
+    pulled: Option<(u64, bool)>,
+    /// The panel is beaconing WSPR (`set_beacon`): WSPR HEARD ME every cycle.
+    beacon: bool,
+    /// The panel has just gone to WSPR: WSPR HEARD ME is to be turned on.
+    wspr_entered: bool,
+    /// The station whose HEARD ME pop-up is open (decision 95), upper case.
+    popup: Option<String>,
 }
 
 impl Default for Globe {
@@ -283,6 +303,11 @@ impl Default for Globe {
             strobe: None,
             qso_fly: false,
             mode: None,
+            wspr_merged: Vec::new(),
+            pulled: None,
+            beacon: false,
+            wspr_entered: false,
+            popup: None,
         }
     }
 }
@@ -310,10 +335,18 @@ const PAINT_EVERY_S: f64 = 3.0;
 
 impl Globe {
     /// Who heard the station, as last fetched: PSK Reporter's reports
-    /// (every mode) and WSPR HEARD ME's of the beacon. For the TX window's
-    /// WSPR list.
+    /// (every mode) and WSPR HEARD ME's of the beacon, WSPRnet's, wspr.live's
+    /// and PSK Reporter's merged. For the TX window's WSPR list. Fetched
+    /// with GLOBE shut too (decision 93).
     pub(crate) fn heard_me(&self) -> (&[Reception], &[WsprReport]) {
-        (&self.got.heard_me, &self.got.wspr_heard)
+        (&self.got.heard_me, &self.wspr_merged)
+    }
+
+    /// Whether the panel is beaconing WSPR now (the TX window open in WSPR
+    /// with TX enabled): WSPR HEARD ME is then asked every 2 minutes rather
+    /// than every 5. Cheap to call every frame.
+    pub(crate) fn set_beacon(&mut self, on: bool) {
+        self.beacon = on;
     }
 
     /// A station heard (or, from PSK Reporter, hearing AJ3G).
@@ -333,6 +366,10 @@ impl Globe {
     pub(crate) fn set_mode(&mut self, mode: Option<&str>) {
         let m = mode.filter(|m| field::is_wsjt_mode(m)).map(field::norm_mode);
         if m != self.mode {
+            // Gone to WSPR: who heard the beacon is wanted (decision 93).
+            if m.as_deref() == Some("WSPR") {
+                self.wspr_entered = true;
+            }
             self.mode = m;
         }
     }
@@ -342,6 +379,7 @@ impl Globe {
     fn clear(&mut self, now: f64) {
         self.history.clear(now);
         self.sel = None;
+        self.popup = None;
         self.built = None;
     }
 
@@ -351,8 +389,33 @@ impl Globe {
         s.source_on(r.src)
             && s.heard_view.shows(r.src)
             && (s.all_modes
-                || r.mode.trim().is_empty()
-                || self.mode.as_ref().is_none_or(|m| field::norm_mode(&r.mode) == *m))
+                || self.in_use(r)
+                || s.extra_modes.iter().any(|m| *m == field::norm_mode(&r.mode)))
+    }
+
+    /// `r` is of the mode in use (or no WSJT mode is in use, or it names
+    /// none): drawn in the usual colours, with its path.
+    fn in_use(&self, r: &Reception) -> bool {
+        r.mode.trim().is_empty()
+            || self.mode.as_ref().is_none_or(|m| field::norm_mode(&r.mode) == *m)
+    }
+
+    /// The modes of the stations heard this hour, but the mode in use, for
+    /// GLOBE MODES' extras: (mode, stations), commonest first.
+    fn other_modes(&self) -> Vec<(String, usize)> {
+        let mut v: Vec<(String, Vec<String>)> = Vec::new();
+        for r in self.history.latest().iter().filter(|r| !self.in_use(r)) {
+            let m = field::norm_mode(&r.mode);
+            let call = r.call.to_ascii_uppercase();
+            match v.iter_mut().find(|x| x.0 == m) {
+                Some(x) if !x.1.contains(&call) => x.1.push(call),
+                Some(_) => {}
+                None => v.push((m, vec![call])),
+            }
+        }
+        let mut v: Vec<(String, usize)> = v.into_iter().map(|(m, c)| (m, c.len())).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v
     }
 
     /// A line picked in DECODE (AJ3G, 8 Nov 2026: "when I select a station
@@ -483,14 +546,33 @@ impl Globe {
         self.playing || self.spin || self.fly.is_some()
     }
 
-    /// The window is closed: stop fetching.
-    pub(crate) fn idle(&mut self) {
-        if self.fetcher.take().is_some() {
-            tracing::info!("globe: closed, fetching stopped");
+    /// The window is closed (decision 93): the reports of the station go on
+    /// being fetched while PSK REPORTER or WSPR HEARD ME is on, for the TX
+    /// window's HEARD ME and so the map is current when it opens; the rest
+    /// waits. With both off nothing is fetched.
+    pub(crate) fn idle(&mut self, s: &mut GlobeSettings, st: &StationSettings) {
+        self.turn_on_wspr(s);
+        if !(s.pskr || s.wspr_heard) {
+            if self.fetcher.take().is_some() {
+                tracing::info!("globe: closed, fetching stopped");
+            }
+            return;
+        }
+        self.fetch(s, st, false);
+        self.pull(s);
+        self.history.prune(decoders::slot::utc_now());
+    }
+
+    /// The panel has gone to WSPR: WSPR HEARD ME on.
+    fn turn_on_wspr(&mut self, s: &mut GlobeSettings) {
+        if std::mem::take(&mut self.wspr_entered) && !s.wspr_heard {
+            s.wspr_heard = true;
+            tracing::info!("globe: WSPR mode, WSPR HEARD ME turned on");
         }
     }
 
-    fn step(&mut self, s: &GlobeSettings, st: &StationSettings, now: f64) {
+    /// Tell the fetcher what to fetch, starting it if need be.
+    fn fetch(&mut self, s: &GlobeSettings, st: &StationSettings, open: bool) {
         let edges = bandplan::HAM_BANDS
             .iter()
             .find(|b| b.name == band_static(&s.band))
@@ -499,26 +581,57 @@ impl Globe {
             qth: st.pos(),
             call: st.call(),
             pskr: s.pskr,
-            clouds: s.clouds,
-            pskr_band: edges.filter(|_| s.pskr_band),
+            clouds: s.clouds && open,
+            pskr_band: edges.filter(|_| s.pskr_band && open),
             wspr: s.wspr_heard,
+            wspr_fast: self.beacon,
+            open,
         };
         match &self.fetcher {
             Some(f) => f.set_ask(ask),
             None => self.fetcher = Some(Fetcher::start(ask)),
         }
+    }
+
+    /// Take what the fetcher has brought: WSPR HEARD ME's sites and PSK
+    /// Reporter's WSPR receptions merged into one list, and the reports of
+    /// the station into the history. A PSK Reporter WSPR reception goes in
+    /// as WSPR HEARD ME's while that is on, so a station is one report.
+    fn pull(&mut self, s: &GlobeSettings) {
         if let Some(f) = &self.fetcher
             && let Ok(d) = f.data.lock()
             && d.serial != self.got.serial
         {
             self.got = d.clone();
-            for r in &self.got.heard_me {
+        }
+        let now = Some((self.got.serial, s.wspr_heard));
+        if self.pulled == now {
+            return;
+        }
+        self.pulled = now;
+        let none: &[WsprReport] = &[];
+        let (net, live) = if s.wspr_heard {
+            (&self.got.wsprnet[..], &self.got.wspr_live[..])
+        } else {
+            (none, none)
+        };
+        self.wspr_merged = wspr::merge(net, live, &self.got.heard_me);
+        for r in &self.got.heard_me {
+            if !(s.wspr_heard && field::norm_mode(&r.mode) == "WSPR") {
                 self.history.add(r.clone());
             }
-            for w in &self.got.wspr_heard {
+        }
+        if s.wspr_heard {
+            for w in &self.wspr_merged {
                 self.history.add(w.rec.clone());
             }
         }
+    }
+
+    fn step(&mut self, s: &mut GlobeSettings, st: &StationSettings, now: f64) {
+        self.turn_on_wspr(s);
+        self.fetch(s, st, true);
+        self.pull(s);
         self.history.prune(now);
         let Some(qth) = st.pos() else { return };
         if !self.placed {
@@ -725,7 +838,7 @@ pub(crate) fn window(
             });
     }
     if !*open {
-        g.idle();
+        g.idle(s, st);
     }
     out
 }
@@ -950,9 +1063,12 @@ fn toolbar(ui: &mut egui::Ui, g: &mut Globe, s: &mut GlobeSettings) {
             ),
             (
                 &mut s.wspr_heard,
-                "WSPR HEARD ME",
-                "Asks wspr.live (WSPRnet's database; WSPRnet itself if that is down) every \
-                 5 minutes who heard your WSPR in the last hour. Only your callsign is sent",
+                "ASK WSPRNET + WSPR.LIVE",
+                "WSPR HEARD ME: asks wsprnet.org and wspr.live (WSPRnet's database) who heard \
+                 your WSPR in the last hour, every 2 minutes while you beacon WSPR, else every 5, \
+                 with GLOBE shut too. The two answers and PSK Reporter's WSPR reports are merged, \
+                 one per station per cycle; WSPRnet's wins. Turned on by itself when you go to \
+                 WSPR. Only your callsign is sent",
             ),
             (
                 &mut s.pskr_band,
@@ -990,11 +1106,12 @@ fn show_row(ui: &mut egui::Ui, g: &mut Globe, s: &mut GlobeSettings) {
                 HeardView::HeardMe,
                 "HEARD ME",
                 format!(
-                    "The stations that heard you (PSK Reporter, WSPR HEARD ME){}",
+                    "The stations that heard you (PSK Reporter, WSPRnet, wspr.live){}",
                     if fetching_me {
                         ""
                     } else {
-                        ". Turn on PSK REPORTER or WSPR HEARD ME under SOURCES to fetch them"
+                        ". Turn on PSK REPORTER or ASK WSPRNET + WSPR.LIVE under SOURCES to \
+                         fetch them"
                     }
                 ),
             ),
@@ -1005,27 +1122,7 @@ fn show_row(ui: &mut egui::Ui, g: &mut Globe, s: &mut GlobeSettings) {
             }
         }
         ui.add_space(10.0);
-        ui.label(caps("MODE"));
-        let now_mode = match &g.mode {
-            Some(m) => format!("{m} ONLY"),
-            None => "MODE IN USE".to_string(),
-        };
-        let tip = match &g.mode {
-            Some(m) => format!(
-                "Only the {m} stations: the mode the TX window sends, or DECODE runs. The \
-                 others are hidden, not forgotten"
-            ),
-            None => "No WSJT mode is running (TX shut, DECODE stopped): every mode shows".into(),
-        };
-        if chrome::chip(ui, !s.all_modes, now_mode).on_hover_text(tip).clicked() {
-            s.all_modes = false;
-        }
-        if chrome::chip(ui, s.all_modes, "ALL MODES")
-            .on_hover_text("Every mode's stations")
-            .clicked()
-        {
-            s.all_modes = true;
-        }
+        modes_menu(ui, g, s);
         ui.add_space(10.0);
         if chrome::chip(ui, false, "CLEAR")
             .on_hover_text(
@@ -1037,6 +1134,107 @@ fn show_row(ui: &mut egui::Ui, g: &mut Globe, s: &mut GlobeSettings) {
             g.clear(decoders::slot::utc_now());
         }
     });
+}
+
+/// What GLOBE MODES' key says: the mode in use and what else shows.
+fn modes_summary(mode: Option<&str>, s: &GlobeSettings) -> String {
+    let Some(m) = mode else { return "EVERY MODE".into() };
+    let extras: Vec<&str> = s.extra_modes.iter().map(String::as_str).filter(|x| *x != m).collect();
+    match (s.all_modes, extras.len()) {
+        (true, _) => format!("{m} + ALL"),
+        (false, 0) => m.to_string(),
+        (false, 1 | 2) => format!("{m} + {}", extras.join(", ")),
+        (false, n) => format!("{m} + {n}"),
+    }
+}
+
+/// GLOBE MODES ▾ (decision 94): the mode the panel is on, always shown and
+/// locked on; extra modes decoded this hour to tick, each in its colour;
+/// ALL MODES; the extras' paths; CLEAR EXTRAS.
+fn modes_menu(ui: &mut egui::Ui, g: &Globe, s: &mut GlobeSettings) {
+    let text = format!("GLOBE MODES: {} ▾", modes_summary(g.mode.as_deref(), s));
+    let btn = chrome::chip(ui, s.all_modes || !s.extra_modes.is_empty(), text).on_hover_text(
+        "The mode the panel is on always shows, in the usual colours with its paths. Tick other \
+         modes heard this hour to show their stations too, each mode in its own colour",
+    );
+    let others = g.other_modes();
+    chrome::menu_popup(ui, &btn, |ui| {
+        chrome::menu_caption(ui, "In use");
+        match &g.mode {
+            Some(m) => {
+                ui.add_enabled_ui(false, |ui| {
+                    chrome::checkbox(ui, &mut true, format!("{m}: the mode the panel is on"));
+                });
+            }
+            None => {
+                ui.label(
+                    RichText::new(
+                        "No WSJT mode running (TX shut, DECODE stopped): every mode shows",
+                    )
+                    .size(11.0)
+                    .color(theme::TEXT()),
+                );
+                return;
+            }
+        }
+        chrome::menu_caption(ui, "Extras");
+        let mut listed: Vec<(String, usize)> = others.clone();
+        for m in &s.extra_modes {
+            if !listed.iter().any(|x| x.0 == *m) && Some(m) != g.mode.as_ref() {
+                listed.push((m.clone(), 0));
+            }
+        }
+        if listed.is_empty() {
+            ui.label(
+                RichText::new("No other mode heard this hour").size(11.0).color(theme::TEXT()),
+            );
+        }
+        for (m, n) in &listed {
+            let mut on = s.all_modes || s.extra_modes.contains(m);
+            let c = mode_colour(m);
+            let label =
+                RichText::new(format!("● {m} · {n} station{}", if *n == 1 { "" } else { "s" }))
+                    .color(rgb(c));
+            let r =
+                ui.add_enabled_ui(!s.all_modes, |ui| chrome::checkbox(ui, &mut on, label)).inner;
+            if r.changed() {
+                if on {
+                    s.extra_modes.push(m.clone());
+                } else {
+                    s.extra_modes.retain(|x| x != m);
+                }
+            }
+        }
+        ui.separator();
+        chrome::checkbox(ui, &mut s.all_modes, "ALL MODES").on_hover_text("Every mode's stations");
+        chrome::checkbox(ui, &mut s.extra_paths, "Paths for the extras too")
+            .on_hover_text("Off, only the mode in use has paths; the extras are dots");
+        if chrome::chip(ui, false, "CLEAR EXTRAS")
+            .on_hover_text("Back to the mode in use alone")
+            .clicked()
+        {
+            s.extra_modes.clear();
+            s.all_modes = false;
+            s.extra_paths = false;
+        }
+    });
+}
+
+/// The colour an extra mode's stations are drawn in (decision 94). None is
+/// yellow or red (warnings only), orange (our own TX) or the cyan of the
+/// mode in use; a mode not listed is silver.
+fn mode_colour(mode: &str) -> [u8; 3] {
+    match mode {
+        "FT8" => [0x5b, 0x9d, 0xff],
+        "FT4" => [0xb4, 0x8c, 0xff],
+        "WSPR" => [0xff, 0x7a, 0xc8],
+        "JT65" => [0x2f, 0xbf, 0x9f],
+        "JT9" => [0x8f, 0x9c, 0xff],
+        "Q65" => [0xe0, 0xa8, 0xff],
+        "FST4" | "FST4W" => [0x9e, 0xc8, 0xff],
+        "MSK144" => [0xf0, 0xf0, 0xff],
+        _ => [0xc9, 0xd3, 0xde],
+    }
 }
 
 /// The SUN row: the Sun live, or moved up to 12 hours either way by hand or
@@ -1171,10 +1369,11 @@ fn wspr_of<'a>(g: &'a Globe, r: &Reception) -> Option<&'a WsprReport> {
     if r.src != Source::WsprHeard {
         return None;
     }
-    g.got
-        .wspr_heard
-        .iter()
-        .find(|w| w.rec.call == r.call && w.rec.utc == r.utc && w.rec.rf_hz == r.rf_hz)
+    g.wspr_merged.iter().find(|w| {
+        w.rec.call.eq_ignore_ascii_case(&r.call)
+            && wspr::cycle(w.rec.utc) == wspr::cycle(r.utc)
+            && w.rec.band() == r.band()
+    })
 }
 
 /// Who heard whom, in words: for a station that heard AJ3G, its report and
@@ -1219,9 +1418,6 @@ fn arc_lift(km: f64) -> f64 {
     0.08 + 0.32 * (km / 20_015.0)
 }
 
-/// How much of an arc's light is left behind the globe.
-const BEHIND: f32 = 0.22;
-
 /// How a path is drawn: a wide, translucent glow and a thin, brighter core
 /// over it (AJ3G, 11 Nov 2026: "3D somewhat translucent arcs", "a lighter
 /// more translucent color").
@@ -1245,9 +1441,17 @@ fn rgba(c: [u8; 3], a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(c[0], c[1], c[2], (255.0 * a.clamp(0.0, 1.0)) as u8)
 }
 
-/// Draw the arc through `pts`, lifted by `lift`: what is behind the globe
-/// faint, and on the flat map a small ring where the path leaves one edge
-/// and comes back at the other, so it reads as one path.
+/// The pieces of an arc that are drawn: only those in front of the globe or
+/// lifted past its limb. The globe is solid (decision 96): nothing behind it
+/// shows through.
+fn drawn_runs(a: &sphere::ArcRuns) -> impl Iterator<Item = &sphere::ArcRun> {
+    a.runs.iter().filter(|r| r.front)
+}
+
+/// Draw the arc through `pts`, lifted by `lift`: only what can be seen (the
+/// part behind the globe is not drawn), and on the flat map a small ring
+/// where the path leaves one edge and comes back at the other, so it reads
+/// as one path.
 fn draw_arc(
     painter: &egui::Painter,
     p: &Projector,
@@ -1256,14 +1460,13 @@ fn draw_arc(
     st: &ArcStyle,
 ) {
     let a = p.arc_runs(pts, lift);
-    for run in &a.runs {
-        let k = if run.front { 1.0 } else { BEHIND };
+    for run in drawn_runs(&a) {
         let v: Vec<Pos2> = run.pts.iter().map(|&(x, y)| Pos2::new(x as f32, y as f32)).collect();
         painter.add(egui::Shape::line(
             v.clone(),
-            Stroke::new(st.glow_w, rgba(st.glow, 0.16 * st.alpha * k)),
+            Stroke::new(st.glow_w, rgba(st.glow, 0.16 * st.alpha)),
         ));
-        let core = Stroke::new(st.core_w, rgba(st.core, 0.8 * st.alpha * k));
+        let core = Stroke::new(st.core_w, rgba(st.core, 0.8 * st.alpha));
         if st.dashed {
             painter.add(egui::Shape::dashed_line(&v, core, 4.0, 4.0));
         } else {
@@ -1274,19 +1477,6 @@ fn draw_arc(
         let at = Pos2::new(x as f32, y as f32);
         painter.circle_filled(at, 3.2, rgba(st.glow, 0.3 * st.alpha));
         painter.circle_stroke(at, 3.2, Stroke::new(1.2, rgba(st.core, 0.9 * st.alpha)));
-    }
-}
-
-/// A faint ring where a path ends behind the globe, so its far end is
-/// still found as the globe turns.
-fn hidden_end(painter: &egui::Painter, p: &Projector, v: V3, col: Color32) {
-    let sp = p.project(v);
-    if p.view.proj == Proj::Globe && !sp.seen() {
-        painter.circle_stroke(
-            Pos2::new(sp.x as f32, sp.y as f32),
-            4.0,
-            Stroke::new(1.4, col.gamma_multiply(BEHIND)),
-        );
     }
 }
 
@@ -1565,7 +1755,9 @@ fn map(
             // ways is one path, not two laid over each other.
             let sel_call = sel.as_ref().map(|r| r.call.to_ascii_uppercase());
             let mut calls: Vec<(String, &Reception, bool, bool)> = Vec::new();
-            for r in shown {
+            // Only the mode in use has paths, unless the extras' are asked for
+            // (decision 94).
+            for r in shown.iter().filter(|r| s.extra_paths || g.in_use(r)) {
                 let k = r.call.to_ascii_uppercase();
                 if sel_call.as_ref() == Some(&k) {
                     continue;
@@ -1634,16 +1826,16 @@ fn map(
                     dashed: false,
                 };
                 draw_arc(&painter, &p, &pts, &lift, &style);
-                hidden_end(&painter, &p, vec_ll(r.pos), INK);
             }
         }
         if s.stations {
             let mut best: Option<(f32, Reception)> = None;
             let click = resp.clicked().then(|| resp.interact_pointer_pos()).flatten();
             // A station heard both ways is one dot with the ring round it,
-            // under one label.
+            // under one label; a station heard in several modes is one dot
+            // (decision 94), the mode in use's if it was heard in that.
             let mut named: Vec<&str> = Vec::new();
-            for r in shown {
+            for r in one_mark_each(g, shown) {
                 let sp = p.project(vec_ll(r.pos));
                 if !sp.seen() {
                     continue;
@@ -1653,6 +1845,8 @@ fn map(
                 let selected = is_sel(g, r);
                 let c = r.band().map(picture::band_colour).unwrap_or([0xc9, 0xd3, 0xde]);
                 let a = (255.0 * (1.0 - 0.55 * (age / 45.0).min(1.0))) as u8;
+                // An extra mode's station is in its mode's colour.
+                let extra = (!g.in_use(r)).then(|| mode_colour(&field::norm_mode(&r.mode)));
                 if Mark::of(r.src) == Mark::HeardMe {
                     // A hollow ring, a size up from the dot, so a station
                     // that is both shows both.
@@ -1665,19 +1859,17 @@ fn map(
                     let ring = if selected {
                         INK
                     } else {
-                        Color32::from_rgba_unmultiplied(
-                            TX_COLOUR.r(),
-                            TX_COLOUR.g(),
-                            TX_COLOUR.b(),
-                            a,
-                        )
+                        let t = extra.unwrap_or([TX_COLOUR.r(), TX_COLOUR.g(), TX_COLOUR.b()]);
+                        Color32::from_rgba_unmultiplied(t[0], t[1], t[2], a)
                     };
                     painter.circle_stroke(at, rad, Stroke::new(1.6, ring));
                 } else if selected {
                     painter.circle_filled(at, 6.0, Color32::from_rgb(0x0b, 0x0c, 0x0d));
                     painter.circle_stroke(at, 6.0, Stroke::new(2.0, INK));
                 } else {
-                    let col = if s.all_bands {
+                    let col = if let Some(e) = extra {
+                        Color32::from_rgba_unmultiplied(e[0], e[1], e[2], a)
+                    } else if s.all_bands {
                         Color32::from_rgba_unmultiplied(c[0], c[1], c[2], a)
                     } else {
                         let d = DECODE_CYAN;
@@ -1710,6 +1902,10 @@ fn map(
             }
             if let Some((_, r)) = best {
                 g.sel = Some((r.call.clone(), r.band(), r.src));
+                // A station that heard AJ3G opens its pop-up, in place of any
+                // other (decision 95); another station shuts it. A click on
+                // the bare map, or a turn, leaves it.
+                g.popup = g.heard_me_by(&r.call).then(|| r.call.to_ascii_uppercase());
             }
         }
         // The FT8 strobe: the QSO's arc, and a pulse running along it. Only
@@ -1740,7 +1936,6 @@ fn map(
                 dashed: false,
             };
             draw_arc(&painter, &p, &pts, &lift, &style);
-            hidden_end(&painter, &p, dv, col);
             // The DX's end, when no station mark is there for it.
             if !s.stations || !shown.iter().any(|r| r.call.eq_ignore_ascii_case(&call)) {
                 let sp = p.project(dv);
@@ -1766,19 +1961,21 @@ fn map(
                     let f = strobe_along(dir, k);
                     let v = strobe_point(qv, dv, dir, k);
                     let sp = p.project_lifted(v, 1.0 + h * (std::f64::consts::PI * f).sin());
-                    // Behind the globe the pulse runs on, faint.
-                    let k = if sp.seen() { 1.0 } else { BEHIND };
+                    // Behind the globe the pulse is hidden (decision 96).
+                    if !sp.seen() {
+                        continue;
+                    }
                     let at = pos(sp.x, sp.y);
                     if j == 0 {
-                        painter.circle_filled(at, 9.0, col.gamma_multiply(0.25 * k));
-                        painter.circle_filled(at, 5.0, col.gamma_multiply(k));
-                        painter.circle_filled(at, 2.4, Color32::WHITE.gamma_multiply(k));
+                        painter.circle_filled(at, 9.0, col.gamma_multiply(0.25));
+                        painter.circle_filled(at, 5.0, col);
+                        painter.circle_filled(at, 2.4, Color32::WHITE);
                     } else {
                         let fade = 1.0 - j as f32 / STROBE_TAIL as f32;
                         painter.circle_filled(
                             at,
                             1.0 + 3.0 * fade,
-                            col.gamma_multiply(0.85 * fade * k),
+                            col.gamma_multiply(0.85 * fade),
                         );
                     }
                 }
@@ -1844,6 +2041,198 @@ fn map(
         }
     });
     legend(&painter, rect, g, s);
+    heard_me_popup(ui, rect, g, st, now);
+}
+
+/// The stations' marks, one a station each way (decision 94): of a station
+/// heard in several modes or on several bands, the picked reception, else
+/// the mode in use's, else the newest (`shown` is newest first).
+fn one_mark_each<'a>(g: &Globe, shown: &'a [Reception]) -> Vec<&'a Reception> {
+    let rank = |r: &Reception| (!is_sel(g, r), !g.in_use(r));
+    let mut order: Vec<&Reception> = shown.iter().collect();
+    // A stable sort: the newest first within each rank.
+    order.sort_by_key(|r| rank(r));
+    let mut seen: Vec<(String, Mark)> = Vec::new();
+    order
+        .into_iter()
+        .filter(|r| {
+            let k = (r.call.to_ascii_uppercase(), Mark::of(r.src));
+            let first = !seen.contains(&k);
+            if first {
+                seen.push(k);
+            }
+            first
+        })
+        .collect()
+}
+
+/// A station's HEARD ME pop-up, as it is drawn (decision 95).
+#[derive(Debug)]
+struct PopupInfo {
+    call: String,
+    grid: String,
+    country: Option<String>,
+    km: Option<f64>,
+    /// Short and long path, degrees.
+    bearing: Option<(f64, f64)>,
+    /// Its latest report of AJ3G, and the WSPR figures with it.
+    latest: Reception,
+    wspr: Option<WsprReport>,
+    /// The sites the latest report came from.
+    source: &'static str,
+    /// Every report of AJ3G from it this hour, newest first.
+    reports: Vec<(Reception, Option<WsprReport>)>,
+    /// AJ3G's own decodes of it this hour, newest first.
+    decodes: Vec<Reception>,
+}
+
+impl Globe {
+    /// Whether `call` heard AJ3G this hour (PSK Reporter, WSPR HEARD ME).
+    fn heard_me_by(&self, call: &str) -> bool {
+        self.history.all().iter().any(|r| r.src.reverse() && r.call.eq_ignore_ascii_case(call))
+    }
+
+    /// What `call`'s pop-up shows; `None` when it heard nothing of AJ3G
+    /// this hour (or was cleared).
+    fn popup_info(&self, call: &str, qth: Option<LatLon>) -> Option<PopupInfo> {
+        let all = self.history.all();
+        let mut reports: Vec<(Reception, Option<WsprReport>)> = all
+            .iter()
+            .filter(|r| r.src.reverse() && r.call.eq_ignore_ascii_case(call))
+            .map(|r| (r.clone(), wspr_of(self, r).cloned()))
+            .collect();
+        reports.sort_by(|a, b| b.0.utc.total_cmp(&a.0.utc));
+        let (latest, wspr) = reports.first().cloned()?;
+        let mut decodes: Vec<Reception> = all
+            .into_iter()
+            .filter(|r| !r.src.reverse() && r.src != Source::PskBand)
+            .filter(|r| r.call.eq_ignore_ascii_case(call))
+            .collect();
+        decodes.sort_by(|a, b| b.utc.total_cmp(&a.utc));
+        let (grid, pos) = self.history.place_of(call).unwrap_or((latest.grid.clone(), latest.pos));
+        let path = qth.map(|q| crate::dxcc::path(q, pos));
+        Some(PopupInfo {
+            call: latest.call.to_ascii_uppercase(),
+            grid,
+            country: crate::dxcc::lookup(call).map(|e| e.name),
+            km: path.as_ref().map(|p| p.km),
+            bearing: path.as_ref().map(|p| (p.short_deg, p.long_deg)),
+            source: wspr.as_ref().map_or(latest.src.label_site(), |w| w.site),
+            latest,
+            wspr,
+            reports,
+            decodes,
+        })
+    }
+}
+
+/// Unix seconds as HH:MM UTC.
+fn hhmm(utc: f64) -> String {
+    let (_, _, _, h, m, _) = crate::decodelog::civil(utc as i64);
+    format!("{h:02}:{m:02}")
+}
+
+/// The pop-up of a station that heard AJ3G (decision 95), over the map's
+/// top right. One at a time; ✕ shuts it.
+fn heard_me_popup(ui: &egui::Ui, rect: Rect, g: &mut Globe, st: &StationSettings, now: f64) {
+    let Some(call) = g.popup.clone() else { return };
+    let Some(info) = g.popup_info(&call, st.pos()) else {
+        g.popup = None;
+        return;
+    };
+    let mut shut = false;
+    egui::Area::new(egui::Id::new("globe-heard-me-popup"))
+        .order(egui::Order::Foreground)
+        .pivot(egui::Align2::RIGHT_TOP)
+        .fixed_pos(rect.right_top() + Vec2::new(-10.0, 40.0))
+        .constrain_to(rect)
+        .show(ui.ctx(), |ui| {
+            chrome::window_frame().show(ui, |ui| {
+                chrome::window_body_bg(ui);
+                ui.set_width(330.0);
+                popup_body(ui, &info, st, now, &mut shut);
+            });
+        });
+    if shut {
+        g.popup = None;
+    }
+}
+
+fn popup_body(ui: &mut egui::Ui, i: &PopupInfo, st: &StationSettings, now: f64, shut: &mut bool) {
+    let r = &i.latest;
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(&i.call).monospace().size(18.0).strong().color(theme::TEXT_STRONG()),
+        );
+        ui.label(RichText::new(&i.grid).monospace().size(12.0).color(theme::TEXT()));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if chrome::chip(ui, false, "✕").on_hover_text("Close").clicked() {
+                *shut = true;
+            }
+        });
+    });
+    ui.label(RichText::new("heard you").size(11.0).color(theme::TEXT()));
+    let dash = || "—".to_string();
+    row(ui, "COUNTRY", val(i.country.clone().unwrap_or_else(dash)));
+    row(
+        ui,
+        "DISTANCE",
+        val(i.km.map_or_else(dash, |k| {
+            format!("{:.0} {}", st.dist_unit.of_km(k), st.dist_unit.label())
+        })),
+    );
+    row(
+        ui,
+        "BEARING",
+        val(i.bearing.map_or_else(dash, |(sp, lp)| {
+            format!("SP {:03.0}° · LP {:03.0}°", sp.round() % 360.0, lp.round() % 360.0)
+        })),
+    );
+    row(ui, "SPOT UTC", val(format!("{} ({} ago)", hhmm(r.utc), age_text(now, r.utc))));
+    row(ui, "BAND", val(format!("{} · {}", band_label(r.band()), r.mode)));
+    row(ui, "FREQUENCY", val(format!("{:.6} MHz", r.rf_hz / 1e6)));
+    row(ui, "SNR", val(r.snr.map_or_else(dash, |v| format!("{v:+.0} dB"))));
+    let w = i.wspr.as_ref();
+    row(ui, "DRIFT", val(w.and_then(|w| w.drift_hz).map_or_else(dash, |d| format!("{d:+.0} Hz"))));
+    row(ui, "POWER", val(w.and_then(|w| w.power_dbm).map_or_else(dash, |p| format!("{p:.0} dBm"))));
+    row(ui, "SOURCE", val(i.source));
+    ui.separator();
+    ui.label(caps("ITS REPORTS OF YOU · 60 MIN"));
+    let mono = |t: String| RichText::new(t).monospace().size(10.5).color(theme::TEXT());
+    ui.label(mono(format!(
+        "{:<6}{:>4} {:<11}{:>4}{:>6} {}",
+        "UTC", "BAND", "MHZ", "SNR", "DRIFT", "FROM"
+    )));
+    egui::ScrollArea::vertical().id_salt("globe-popup-reports").max_height(110.0).show(ui, |ui| {
+        for (r, w) in &i.reports {
+            ui.label(mono(format!(
+                "{:<6}{:>4} {:<11.6}{:>4}{:>6} {}",
+                hhmm(r.utc),
+                band_label(r.band()),
+                r.rf_hz / 1e6,
+                r.snr.map_or("—".into(), |v| format!("{v:+.0}")),
+                w.as_ref().and_then(|w| w.drift_hz).map_or("—".into(), |d| format!("{d:+.0}")),
+                w.as_ref().map_or(r.src.label_site(), |w| w.site),
+            )));
+        }
+    });
+    ui.separator();
+    ui.label(caps("YOUR DECODES OF IT · 60 MIN"));
+    if i.decodes.is_empty() {
+        ui.label(
+            RichText::new("You haven't decoded it this hour.").size(11.0).color(theme::TEXT()),
+        );
+    }
+    for d in i.decodes.iter().take(8) {
+        ui.label(mono(format!(
+            "{:<6}{:>4} {:<6}{:>4}  {}",
+            hhmm(d.utc),
+            band_label(d.band()),
+            truncate(&d.mode, 6),
+            d.snr.map_or("—".into(), |v| format!("{v:+.0}")),
+            d.src.label(),
+        )));
+    }
 }
 
 /// The legend under the map: which mark is which, and the strobe's two
@@ -1883,6 +2272,16 @@ fn marks_legend(painter: &egui::Painter, rect: Rect, g: &Globe, s: &GlobeSetting
     }
     if s.all_bands {
         word(painter, &mut x, "paths in their band's colour", INK_DIM);
+    }
+    // GLOBE MODES' extras on the map, each in its colour (decision 94).
+    if g.mode.is_some() {
+        for (m, _) in g.other_modes() {
+            if s.all_modes || s.extra_modes.contains(&m) {
+                painter.circle_filled(Pos2::new(x + 4.0, y), 3.5, rgb(mode_colour(&m)));
+                x += 12.0;
+                word(painter, &mut x, &m, INK_DIM);
+            }
+        }
     }
     if let Some(sb) = &g.strobe
         && g.strobe_pos().is_some()
@@ -2790,7 +3189,7 @@ mod tests {
         let s = GlobeSettings { wspr_heard: true, ..GlobeSettings::default() };
         g.add(heard("G4XYZ", "IO91", 14_097_100.0, Source::Decode));
         let me = heard("G4XYZ", "IO91", 14_097_071.0, Source::WsprHeard);
-        g.got.wspr_heard.push(WsprReport {
+        g.wspr_merged.push(WsprReport {
             rec: me.clone(),
             drift_hz: Some(-1.0),
             power_dbm: Some(37.0),
@@ -2970,6 +3369,146 @@ mod tests {
         g.add(heard("JA1ABC", "PM95", 14_075_400.0, Source::Decode));
         g.set_qso(Some(("JA1ABC".into(), Some("PM95tq".into()), StrobeDir::Tx)));
         assert_eq!(g.strobe_pos(), grid_to_latlon("PM95tq"));
+    }
+
+    #[test]
+    fn going_to_wspr_turns_wspr_heard_me_on_once() {
+        let mut g = Globe::default();
+        let mut s = GlobeSettings::default();
+        assert!(!s.wspr_heard);
+        g.set_mode(Some("FT8"));
+        g.turn_on_wspr(&mut s);
+        assert!(!s.wspr_heard);
+        g.set_mode(Some("WSPR"));
+        g.turn_on_wspr(&mut s);
+        assert!(s.wspr_heard);
+        // Turned off by hand in WSPR, it stays off.
+        s.wspr_heard = false;
+        g.set_mode(Some("WSPR"));
+        g.turn_on_wspr(&mut s);
+        assert!(!s.wspr_heard);
+    }
+
+    #[test]
+    fn heard_me_from_every_site_is_one_report_a_station_on_the_map_and_for_tx() {
+        let mut g = Globe::default();
+        let s = GlobeSettings { pskr: true, wspr_heard: true, ..GlobeSettings::default() };
+        let t = wspr::cycle(decoders::slot::utc_now() - 300.0);
+        let w = |call: &str, site: &'static str, snr: f32| WsprReport {
+            rec: Reception {
+                utc: t,
+                snr: Some(snr),
+                ..heard(call, "IO91wm", 14_097_071.0, Source::WsprHeard)
+            },
+            drift_hz: Some(0.0),
+            power_dbm: Some(37.0),
+            km: None,
+            site,
+        };
+        g.got.wsprnet = vec![w("G4XYZ", "WSPRnet", -22.0)];
+        g.got.wspr_live = vec![w("G4XYZ", "wspr.live", -21.0), w("EA1AB", "wspr.live", -25.0)];
+        g.got.heard_me = vec![
+            Reception {
+                utc: t + 40.0,
+                ..heard("G4XYZ", "IO91", 14_097_070.0, Source::PskReporter)
+            },
+            Reception {
+                utc: t,
+                mode: "FT8".into(),
+                ..heard("K1ABC", "FN42", 14_075_000.0, Source::PskReporter)
+            },
+        ];
+        g.got.serial = 1;
+        g.pull(&s);
+        let (pskr, merged) = g.heard_me();
+        assert_eq!(pskr.len(), 2);
+        assert_eq!(merged.len(), 2);
+        let g4 = merged.iter().find(|m| m.rec.call == "G4XYZ").unwrap();
+        assert_eq!((g4.site, g4.rec.snr), ("WSPRnet + live + PSKR", Some(-22.0)));
+        // On the map: G4XYZ once (as WSPR), EA1AB, and K1ABC's FT8 report.
+        let all = g.history.all();
+        assert_eq!(all.len(), 3, "{all:#?}");
+        assert_eq!(all.iter().filter(|r| r.call == "G4XYZ").count(), 1);
+        // Pulled again, nothing doubles.
+        g.pulled = None;
+        g.pull(&s);
+        assert_eq!(g.history.all().len(), 3);
+        // Its pop-up.
+        let qth = grid_to_latlon("FN20");
+        let i = g.popup_info("g4xyz", qth).unwrap();
+        assert_eq!((i.call.as_str(), i.source), ("G4XYZ", "WSPRnet + live + PSKR"));
+        assert_eq!(i.country.as_deref(), Some("England"));
+        assert!(i.km.unwrap() > 5000.0 && i.bearing.is_some());
+        assert_eq!(i.wspr.as_ref().and_then(|w| w.power_dbm), Some(37.0));
+        assert_eq!(i.reports.len(), 1);
+        assert!(i.decodes.is_empty());
+        // AJ3G decoded it too.
+        g.add(Reception {
+            mode: "WSPR".into(),
+            ..heard("G4XYZ", "IO91wm", 14_097_050.0, Source::Decode)
+        });
+        assert_eq!(g.popup_info("G4XYZ", qth).unwrap().decodes.len(), 1);
+        assert!(g.heard_me_by("G4XYZ") && !g.heard_me_by("DL1ABC"));
+        assert!(g.popup_info("DL1ABC", qth).is_none());
+    }
+
+    #[test]
+    fn extra_modes_show_beside_the_mode_in_use_one_dot_a_station() {
+        let mut g = Globe::default();
+        let mut s = GlobeSettings { all_bands: true, ..GlobeSettings::default() };
+        let mut ft8 = heard("DL1ABC", "JO62", 14_075_400.0, Source::Decode);
+        ft8.mode = "FT8".into();
+        let mut ft4 = heard("DL1ABC", "JO62", 14_081_000.0, Source::Decode);
+        ft4.mode = "FT4".into();
+        let mut wspr = heard("G4XYZ", "IO91", 14_097_100.0, Source::Decode);
+        wspr.mode = "WSPR".into();
+        for r in [ft8, ft4, wspr] {
+            g.add(r);
+        }
+        g.set_mode(Some("FT8"));
+        assert_eq!(g.shown(&s).len(), 1);
+        assert_eq!(g.other_modes(), [("FT4".to_string(), 1), ("WSPR".to_string(), 1)]);
+        s.extra_modes = vec!["FT4".into()];
+        let shown = g.shown(&s);
+        assert_eq!(shown.len(), 2);
+        // DL1ABC heard in FT8 and FT4 is one dot, the FT8 one.
+        let marks = one_mark_each(&g, &shown);
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].mode, "FT8");
+        assert_eq!(modes_summary(Some("FT8"), &s), "FT8 + FT4");
+        s.all_modes = true;
+        assert_eq!(g.shown(&s).len(), 3);
+        assert_eq!(modes_summary(Some("FT8"), &s), "FT8 + ALL");
+        assert_eq!(modes_summary(None, &s), "EVERY MODE");
+        // No extra is drawn yellow, red, orange or in the mode in use's cyan.
+        for m in ["FT8", "FT4", "WSPR", "JT65", "JT9", "Q65", "FST4", "MSK144", "CW"] {
+            let [r, gg, b] = mode_colour(m);
+            let warm = r > 0xd0 && gg > 0x60 && b < 0x80;
+            assert!(!warm && [r, gg, b] != DECODE_CYAN, "{m}");
+        }
+    }
+
+    #[test]
+    fn nothing_behind_the_globe_is_drawn_but_a_lifted_arc_past_the_limb_is() {
+        let p = Projector::new(View {
+            proj: Proj::Globe,
+            centre: LatLon { lat: 0.0, lon: 0.0 },
+            zoom: 1.0,
+            cx: 400.0,
+            cy: 300.0,
+            w: 800.0,
+            h: 600.0,
+        });
+        // From the middle round to the far side, close to the ground.
+        let pts = great_circle(vec_of(0.0, 0.0), vec_of(0.0, 170.0), 34);
+        let low = p.arc_runs(&pts, &|_| 1.01);
+        assert!(low.runs.iter().any(|r| !r.front));
+        assert!(drawn_runs(&low).all(|r| r.front));
+        let n = |a: &sphere::ArcRuns| drawn_runs(a).map(|r| r.pts.len()).sum::<usize>();
+        // Lifted high, more is seen: where it rises over the limb.
+        let high =
+            p.arc_runs(&pts, &|i| 1.0 + 0.4 * (std::f64::consts::PI * i as f64 / 34.0).sin());
+        assert!(n(&high) > n(&low));
     }
 
     #[test]

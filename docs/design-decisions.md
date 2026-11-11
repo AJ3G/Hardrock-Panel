@@ -1003,3 +1003,32 @@ In WSPR, turning ENABLE TX off (its button, HALT TX, an over stopped by an inter
 ## 92. TX: WSPR's lists show the band the panel is on (11 Nov 2026)
 
 A band change cleared HEARD with the FT8 list. Now WSPR's reports are kept across band changes (up to 400), and HEARD and HEARD ME show only those on the band of the true RF the panel listens on (transverter included); the heading says the band and how many are kept from other bands. When the band isn't known both show everything. CLEAR still empties both on every band. The FT8 list is still cleared on a band change.
+## 93. GLOBE: who heard AJ3G, from WSPRnet and wspr.live both, merged (11 Nov 2026)
+
+**Why.** AJ3G saw spots of his beacon on wsprnet.org that never reached the panel: GLOBE asked wspr.live and fell back to WSPRnet only when wspr.live failed, and the mirror can lag WSPRnet or miss a spot.
+
+**What.**
+- **Both sites every poll** (`globe/fetch.rs`, `fetch_wspr`): WSPRnet's spot search (the SDRoxide-ported path) and wspr.live's ClickHouse query, each logged with its count (`globe: WSPRnet: 3 reports of AJ3G`) or its error, and each with its own footer status (WSPRNET, WSPR.LIVE). A site that fails keeps its last answer. PSK Reporter's fetch is logged with its count too.
+- **One list** (`wspr::merge`): WSPRnet's reports, then wspr.live's, then PSK Reporter's WSPR receptions, kept once per receiver per 2-minute cycle per band. The first record wins (so WSPRnet's figures stand); a later site only adds its name and fills a blank (drift, power, km, SNR). The source reads `WSPRnet`, `wspr.live`, `PSK Reporter`, or `WSPRnet + live`, `WSPRnet + PSKR`, `wspr.live + PSKR`, `WSPRnet + live + PSKR`. The map's history replaces a WSPR report when another site's record of the same receiver, cycle and band arrives, so a station is one report, not two. With WSPR HEARD ME on, PSK Reporter's WSPR receptions go into this list rather than in beside it. `Globe::heard_me()` hands the TX window's HEARD ME the merged list (its own per-cycle dedupe is unchanged; tx/ is untouched).
+- **Pace:** every 2 minutes (one cycle) while the panel beacons WSPR (TX window open, in WSPR, TX enabled: `Globe::set_beacon`, one line in `main.rs`), else every 5.
+- **With GLOBE shut** the fetcher no longer stops: while PSK REPORTER or WSPR HEARD ME is on it goes on asking only those (the space weather, clouds, KC2G, weather and PSK BAND wait until the window opens), and the reports go into the map's history, so the TX window's HEARD ME and the globe are current. With both off a shut GLOBE fetches nothing, as before. `Globe::idle` now takes the settings and the station (`main.rs`).
+- **WSPR mode turns WSPR HEARD ME on** (`Globe::set_mode` → `turn_on_wspr`): once, when the panel goes to WSPR; turned off by hand in WSPR it stays off. Its SOURCES chip is renamed **ASK WSPRNET + WSPR.LIVE**, saying what it does.
+- **Tests:** canned replies of both sites through `fetch_wspr`'s injected getter (both asked; one down keeps its last answer), the merge (key, winner, site names, PSK Reporter's WSPR), the history's replacement, the merged list on the map and for TX, and WSPR mode turning it on. Nothing calls either site.
+
+**Not done.** The TX window's empty-list text still says GLOBE fetches "while it is open" (tx/ was off limits for this change); it now fetches shut too.
+
+## 94. GLOBE MODES ▾: the mode in use and chosen extras (11 Nov 2026)
+
+**What.** The SHOW row's mode chips (FT8 ONLY · ALL MODES) became one **GLOBE MODES: FT8 ▾** drop-down (`modes_menu`). The mode the panel is on is shown first, ticked and locked; under it every other mode heard this hour with its station count, each to tick as an extra (saved: `GlobeSettings::extra_modes`); **ALL MODES**; **Paths for the extras too** (off to start: only the mode in use has paths, so extras don't clutter the map); **CLEAR EXTRAS**. The key names what shows: `FT8`, `FT8 + WSPR, FT4`, `FT8 + 3`, `FT8 + ALL`, or `EVERY MODE` when no WSJT mode runs.
+- **Colours:** the mode in use keeps its colours (decode cyan, the TX-colour ring for heard-me, band colours under ALL BANDS); an extra mode's stations are in its mode's colour (`mode_colour`: FT8 blue, FT4 violet, WSPR pink, JT65 sea green, JT9 periwinkle, Q65 lilac, FST4 pale blue, MSK144 near-white, others silver), never yellow, red, orange or the cyan; the legend under the map adds each extra shown.
+- **One dot per station** each way (`one_mark_each`): of a station heard in several modes or bands, the picked one, else the mode in use's, else the newest. The HEARD list now keeps one line per station, band, mode and source, so a mode heard later no longer hides the mode in use's line.
+- Decay unchanged.
+
+## 95. GLOBE: a pop-up for a station that heard AJ3G (11 Nov 2026)
+
+**What.** Clicking a station on the map that heard AJ3G this hour (PSK Reporter or WSPR HEARD ME) opens a pop-up over the map's top right (`heard_me_popup`, an egui `Area`, so clicks in it don't reach the map): call, grid, country (cty.dat), distance, bearing short and long, spot UTC and age, band and mode, frequency (MHz, six places), SNR, drift, declared power, source (as in decision 93), every report of AJ3G from that station in the last hour, and AJ3G's own decodes of it this hour (DECODE, SKIM), if any. One at a time: ✕ closes it; clicking another station that heard AJ3G replaces it; clicking a station that didn't closes it (that station is picked as before); clicking the bare map or turning the globe leaves it. CLEAR closes it.
+
+## 96. GLOBE: a solid globe (11 Nov 2026)
+
+**What.** Nothing behind the globe is drawn any more: the faint far side of an arc (decision 73's `BEHIND`), the ring where a path ends behind the globe, and the FT8 strobe's pulse behind it are gone. An arc lifted above the surface still shows where it rises past the limb (`sphere::arc_runs` marks those pieces in front; `drawn_runs` keeps only those). The flat map is unchanged.
+

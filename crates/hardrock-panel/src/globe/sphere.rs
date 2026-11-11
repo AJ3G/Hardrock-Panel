@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn an_arc_behind_the_globe_is_kept_faint_not_dropped() {
+    fn an_arc_behind_the_globe_is_split_from_what_is_seen() {
         let p = view(Proj::Globe, 0.0, 0.0);
         // From the middle of the view round to the far side, low.
         let pts = great_circle(vec_of(0.0, 0.0), vec_of(0.0, 170.0), 34);

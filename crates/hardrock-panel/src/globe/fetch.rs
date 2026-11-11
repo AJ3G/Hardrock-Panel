@@ -1,6 +1,8 @@
-//! What GLOBE fetches, and only while its window is open: closing it stops
-//! the fetcher, and never opening it means no request is made (as
-//! SDRoxide's 3D view does, its manual's §7.14).
+//! What GLOBE fetches, while its window is open (as SDRoxide's 3D view does,
+//! its manual's §7.14). With the window shut only the reports of the station
+//! go on being fetched, PSK REPORTER's and WSPR HEARD ME's when they are on,
+//! so the TX window's HEARD ME and the globe are current when it opens
+//! (decision 93); with both off, a shut window fetches nothing.
 //!
 //! | Host | What | Every |
 //! | --- | --- | --- |
@@ -12,7 +14,7 @@
 //! | api.weather.gov | Weather alerts at the station (United States only) | 15 min |
 //! | retrieve.pskreporter.info | Who heard the station's callsign in the last hour (PSK REPORTER on) | 5 min |
 //! | retrieve.pskreporter.info | Everyone's reports on GLOBE's band in the last 15 minutes (PSK BAND on) | 15 min |
-//! | db1.wspr.live, else wsprnet.org | Who heard the station's WSPR in the last hour (WSPR HEARD ME on) | 5 min |
+//! | wsprnet.org and db1.wspr.live | Who heard the station's WSPR in the last hour (WSPR HEARD ME on) | 2 min beaconing WSPR, else 5 |
 //!
 //! Each is parsed here by a plain function, so the tests read sample answers
 //! and the container never calls out. Nothing is ever sent but the request.
@@ -127,11 +129,15 @@ pub(crate) struct Fetched {
     /// minutes, as paths from each receiver to its sender (PSK BAND).
     pub band_paths: Vec<Reception>,
     pub band_for: Option<(u64, u64)>,
-    /// WSPR HEARD ME: who heard the station's WSPR, the whole last hour.
-    pub wspr_heard: Vec<WsprReport>,
+    /// WSPR HEARD ME: who heard the station's WSPR, the whole last hour, as
+    /// WSPRnet and wspr.live each last answered (a site that fails keeps
+    /// its last answer). `wspr::merge` makes them one list.
+    pub wsprnet: Vec<WsprReport>,
+    pub wspr_live: Vec<WsprReport>,
     /// Bumped each time anything arrives.
     pub serial: u64,
-    /// By source name: SWPC, OVATION, KC2G, CLOUDS, WX, NWS, PSKR, WSPR.
+    /// By source name: SWPC, OVATION, KC2G, CLOUDS, WX, NWS, PSKR, WSPRNET,
+    /// WSPR.LIVE.
     pub status: Vec<(&'static str, Status)>,
 }
 
@@ -166,8 +172,28 @@ pub(crate) struct Ask {
     /// PSK BAND: the band's edges, Hz, to ask PSK Reporter about; `None` is
     /// off.
     pub pskr_band: Option<(u64, u64)>,
-    /// WSPR HEARD ME: ask wspr.live (else WSPRnet) who heard the call.
+    /// WSPR HEARD ME: ask WSPRnet and wspr.live who heard the call.
     pub wspr: bool,
+    /// Beaconing WSPR: WSPR HEARD ME every 2 minutes, not 5.
+    pub wspr_fast: bool,
+    /// The window is open. Shut, only PSKR and WSPR are fetched.
+    pub open: bool,
+}
+
+impl Ask {
+    /// Nothing asked: what the thread falls back on.
+    fn none() -> Ask {
+        Ask {
+            qth: None,
+            call: None,
+            pskr: false,
+            clouds: false,
+            pskr_band: None,
+            wspr: false,
+            wspr_fast: false,
+            open: false,
+        }
+    }
 }
 
 /// The fetcher's thread, while the window is open.
@@ -195,7 +221,10 @@ impl Fetcher {
             .name("globe-fetch".into())
             .spawn(move || run(s, d, a))
             .expect("the globe's fetch thread starts");
-        tracing::info!("globe: fetching while the window is open");
+        tracing::info!(
+            "globe: fetching (window open: {})",
+            ask.lock().map(|a| a.open).unwrap_or(false)
+        );
         Fetcher { stop, data, ask }
     }
 
@@ -261,8 +290,9 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
         ("WX", 15),
         ("NWS", 15),
         ("PSKR", 5),
-        // wspr.live asks for no more than a query a minute or so; once in
-        // five minutes is two WSPR slots and a half.
+        // wspr.live asks for no more than a query a minute or so: every five
+        // minutes, two and a half WSPR cycles, or every cycle (2 min) while
+        // the panel beacons WSPR (set below from the ask).
         ("WSPR", 5),
         // Everyone's reports on one band are a big answer, and PSK Reporter
         // asks for few queries: one band, every 15 minutes, the window it
@@ -277,14 +307,16 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
     let mut slow_swpc: Option<Instant> = None;
     let mut last_ask: Option<Ask> = None;
     while !stop.load(Ordering::Relaxed) {
-        let a = ask.lock().map(|a| a.clone()).unwrap_or(Ask {
-            qth: None,
-            call: None,
-            pskr: false,
-            clouds: false,
-            pskr_band: None,
-            wspr: false,
-        });
+        let a = ask.lock().map(|a| a.clone()).unwrap_or_else(|_| Ask::none());
+        // WSPR HEARD ME's pace: each cycle while beaconing, else five minutes.
+        for d in due.iter_mut().filter(|d| d.name == "WSPR") {
+            let every = Duration::from_secs(wspr_every_s(a.wspr_fast));
+            if every != d.every {
+                let last = d.next.checked_sub(d.every);
+                d.every = every;
+                d.next = last.map_or_else(Instant::now, |l| l + every);
+            }
+        }
         // A new grid or callsign: the station's own sources again at once.
         if last_ask.as_ref().is_some_and(|l| {
             l.qth != a.qth
@@ -316,6 +348,11 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
                 return;
             }
             if Instant::now() < d.next {
+                continue;
+            }
+            // Shut, only the reports of the station: the rest wait, and are
+            // asked as soon as the window opens.
+            if !a.open && !matches!(d.name, "PSKR" | "WSPR") {
                 continue;
             }
             d.next = Instant::now() + d.every;
@@ -358,15 +395,33 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
                     .and_then(|t| parse_hamqsl(&t))
                     .map(|h| with(&data, |f| f.hamqsl = Some(h))),
                 "PSKR" if a.pskr => match &a.call {
-                    Some(c) => get_text(&ag, &pskr_url(c))
-                        .map(|t| parse_pskreporter(&t))
-                        .map(|r| with(&data, |f| f.heard_me = r)),
+                    Some(c) => {
+                        get_text(&ag, &pskr_url(c)).map(|t| parse_pskreporter(&t)).map(|r| {
+                            let wspr =
+                                r.iter().filter(|x| x.mode.eq_ignore_ascii_case("WSPR")).count();
+                            tracing::info!(
+                                "globe: PSK Reporter: {} reports of {c} ({wspr} WSPR)",
+                                r.len()
+                            );
+                            with(&data, |f| f.heard_me = r)
+                        })
+                    }
                     None => Err("no callsign in SETTINGS → Station".into()),
                 },
-                "WSPR" if a.wspr => match &a.call {
-                    Some(c) => fetch_wspr(&ag, c).map(|r| with(&data, |f| f.wspr_heard = r)),
-                    None => Err("no callsign in SETTINGS → Station".into()),
-                },
+                "WSPR" if a.wspr => {
+                    match &a.call {
+                        Some(c) => fetch_wspr(&|u| get_text(&ag, u), &data, c),
+                        None => {
+                            let e = "no callsign in SETTINGS → Station".to_string();
+                            if let Ok(mut f) = data.lock() {
+                                f.mark("WSPRNET", Err(e.clone()));
+                                f.mark("WSPR.LIVE", Err(e));
+                            }
+                        }
+                    }
+                    // Each site is marked on its own.
+                    continue;
+                }
                 "PSKBAND" if a.pskr_band.is_some() => {
                     let band = a.pskr_band.expect("checked");
                     get_text(&ag, &pskr_band_url(band)).map(|t| parse_pskr_band(&t)).map(|r| {
@@ -466,18 +521,44 @@ fn fetch_swpc(ag: &ureq::Agent, data: &Mutex<Fetched>, slow: bool) -> Result<(),
     if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
 }
 
-/// Who heard `call`'s WSPR in the last hour: wspr.live, or WSPRnet's own
-/// search when wspr.live fails. Only the callsign is sent.
-fn fetch_wspr(ag: &ureq::Agent, call: &str) -> Result<Vec<WsprReport>, String> {
-    let live = wspr::wspr_live_url(call).ok_or_else(|| format!("{call} isn't a callsign"))?;
-    match get_text(ag, &live).and_then(|t| wspr::parse_wspr_live(&t)) {
-        Ok(r) => Ok(r),
-        Err(e) => {
-            tracing::info!("globe: wspr.live failed ({e}), asking WSPRnet");
-            let net = wspr::wsprnet_url(call).ok_or("not a callsign")?;
-            get_text(ag, &net)
-                .and_then(|t| wspr::parse_wsprnet(&t))
-                .map_err(|e2| format!("wspr.live: {e}; WSPRnet: {e2}"))
+/// WSPR HEARD ME's pace, seconds: every cycle while beaconing WSPR, else
+/// every five minutes.
+pub(crate) fn wspr_every_s(beaconing: bool) -> u64 {
+    if beaconing { 120 } else { 300 }
+}
+
+/// Who heard `call`'s WSPR in the last hour, asked of both WSPRnet and
+/// wspr.live each time (decision 93), through `get` (the network, or a test's
+/// canned answers). Each site's answer, count or error is logged and marked
+/// on its own; a site that fails keeps its last answer. Only the callsign is
+/// sent.
+fn fetch_wspr(get: &dyn Fn(&str) -> Result<String, String>, data: &Mutex<Fetched>, call: &str) {
+    type Parse = fn(&str) -> Result<Vec<WsprReport>, String>;
+    let sites: [(&'static str, &str, Option<String>, Parse); 2] = [
+        ("WSPRNET", "WSPRnet", wspr::wsprnet_url(call), wspr::parse_wsprnet),
+        ("WSPR.LIVE", "wspr.live", wspr::wspr_live_url(call), wspr::parse_wspr_live),
+    ];
+    for (name, site, url, parse) in sites {
+        let r = url
+            .ok_or_else(|| format!("{call} isn't a callsign"))
+            .and_then(|u| get(&u))
+            .and_then(|t| parse(&t));
+        let r = match r {
+            Ok(v) => {
+                tracing::info!("globe: {site}: {} reports of {call}", v.len());
+                with(data, |f| match name {
+                    "WSPRNET" => f.wsprnet = v,
+                    _ => f.wspr_live = v,
+                });
+                Ok(())
+            }
+            Err(e) => {
+                tracing::info!("globe: {site} fetch failed: {e}");
+                Err(e)
+            }
+        };
+        if let Ok(mut f) = data.lock() {
+            f.mark(name, r);
         }
     }
 }
@@ -890,6 +971,54 @@ pub(crate) fn parse_hamqsl(t: &str) -> Result<HamQsl, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Canned answers in each site's shape (the container can't reach
+    /// either, and tests never call out).
+    const NET: &str = r#"[{"Date":"1785242040","Reporter":"G0XYZ","ReporterGrid":"IO91np",
+        "dB":"-24","MHz":"14.097090","CallSign":"AJ3G","Power":"37","Drift":"-1","distance":"5400"}]"#;
+    const LIVE: &str = r#"{"data":[
+        {"time":"2026-07-28 12:34:00","rx_sign":"G0XYZ","rx_loc":"IO91np","frequency":"14097091","power":37,"snr":-23,"drift":0,"distance":5401},
+        {"time":"2026-07-28 12:34:00","rx_sign":"VK3TDX","rx_loc":"QF22","frequency":"14097063","power":37,"snr":-27,"drift":-1,"distance":16640}]}"#;
+
+    #[test]
+    fn wspr_heard_me_asks_both_sites_every_time_and_keeps_a_failed_ones_last_answer() {
+        let data = Mutex::new(Fetched::default());
+        let asked = std::cell::RefCell::new(Vec::new());
+        let both = |u: &str| {
+            asked.borrow_mut().push(u.to_string());
+            Ok(if u.contains("wsprnet.org") { NET } else { LIVE }.to_string())
+        };
+        fetch_wspr(&both, &data, "AJ3G");
+        assert_eq!(asked.borrow().len(), 2);
+        assert!(asked.borrow()[0].contains("wsprnet.org"));
+        assert!(asked.borrow()[1].contains("db1.wspr.live"));
+        {
+            let f = data.lock().unwrap();
+            assert_eq!((f.wsprnet.len(), f.wspr_live.len()), (1, 2));
+            let m = wspr::merge(&f.wsprnet, &f.wspr_live, &[]);
+            assert_eq!(m.len(), 2);
+            let g = m.iter().find(|w| w.rec.call == "G0XYZ").unwrap();
+            assert_eq!((g.site, g.rec.snr), ("WSPRnet + live", Some(-24.0)));
+            assert!(f.status.iter().all(|(_, s)| s.ok_at.is_some() && s.error.is_none()));
+        }
+        // wspr.live down: WSPRnet still answers, wspr.live keeps its last.
+        let net_only = |u: &str| {
+            if u.contains("wsprnet.org") { Ok(NET.to_string()) } else { Err("timed out".into()) }
+        };
+        fetch_wspr(&net_only, &data, "AJ3G");
+        let f = data.lock().unwrap();
+        assert_eq!((f.wsprnet.len(), f.wspr_live.len()), (1, 2));
+        let live = &f.status.iter().find(|(n, _)| *n == "WSPR.LIVE").unwrap().1;
+        assert_eq!(live.error.as_deref(), Some("timed out"));
+        let net = &f.status.iter().find(|(n, _)| *n == "WSPRNET").unwrap().1;
+        assert!(net.error.is_none());
+    }
+
+    #[test]
+    fn wspr_heard_me_comes_each_cycle_while_beaconing() {
+        assert_eq!(wspr_every_s(true), 120);
+        assert_eq!(wspr_every_s(false), 300);
+    }
 
     #[test]
     fn times_are_read_whichever_way_swpc_writes_them() {

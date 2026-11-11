@@ -33,7 +33,8 @@ pub(crate) enum Source {
     /// and HEARD ≥, not the station list or the map's dots.
     PskBand,
     /// WSPR HEARD ME: the WSPR reports of AJ3G's call in the last hour, from
-    /// wspr.live (WSPRnet's database) or, when that is down, WSPRnet.
+    /// WSPRnet and wspr.live (WSPRnet's database), with PSK Reporter's WSPR
+    /// receptions, merged (decision 93).
     WsprHeard,
 }
 
@@ -45,6 +46,16 @@ impl Source {
             Source::PskReporter => "PSK REPORTER",
             Source::PskBand => "PSK BAND",
             Source::WsprHeard => "WSPR",
+        }
+    }
+
+    /// The site a report of AJ3G came from, for HEARD ME's pop-up, when
+    /// nothing more precise is known.
+    pub(crate) fn label_site(self) -> &'static str {
+        match self {
+            Source::PskReporter | Source::PskBand => "PSK Reporter",
+            Source::WsprHeard => "WSPRnet / wspr.live",
+            s => s.label(),
         }
     }
 
@@ -321,6 +332,18 @@ impl History {
         if r.src.reverse() && r.utc < self.cleared {
             return;
         }
+        // The WSPR sites' merged report of a receiver in a cycle on a band
+        // is one (decision 93): when another site has it too, its record
+        // is put in the old one's place, not beside it.
+        if r.src == Source::WsprHeard {
+            let k = |x: &Reception| {
+                (x.call.to_ascii_uppercase(), (x.utc / 120.0).floor() as i64, x.band())
+            };
+            if let Some(x) = self.recs.iter_mut().find(|x| x.src == r.src && k(x) == k(&r)) {
+                *x = r;
+                return;
+            }
+        }
         // PSK Reporter and the WSPR sites answer with the whole hour each
         // time: one of each.
         if r.src.reverse()
@@ -356,14 +379,20 @@ impl History {
         self.recs.iter().cloned().collect()
     }
 
-    /// The latest reception of each station on each band from each source,
-    /// newest first: the HEARD list. Each station is placed once, where its
+    /// The latest reception of each station on each band in each mode from
+    /// each source, newest first: the HEARD list (by mode too, so a mode
+    /// GLOBE MODES hides doesn't hide another, decision 94). Each station is placed once, where its
     /// most precise grid from any source puts it (`places`).
     pub(crate) fn latest(&self) -> Vec<Reception> {
         let places = self.places();
         let mut out: Vec<Reception> = Vec::new();
         for r in self.recs.iter().rev() {
-            if !out.iter().any(|x| x.call == r.call && x.band() == r.band() && x.src == r.src) {
+            if !out.iter().any(|x| {
+                x.call == r.call
+                    && x.band() == r.band()
+                    && x.src == r.src
+                    && norm_mode(&x.mode) == norm_mode(&r.mode)
+            }) {
                 let mut r = r.clone();
                 if let Some((grid, pos)) = places.get(&r.call.to_ascii_uppercase()) {
                     r.grid.clone_from(grid);
@@ -570,6 +599,23 @@ mod tests {
         h.add(me);
         h.add(rec("DL1ABC", "JO62", 14.075, "FT8", -8.0, 195.0));
         assert_eq!(h.len(), 2);
+    }
+
+    #[test]
+    fn a_wspr_report_another_site_also_had_takes_the_old_ones_place() {
+        let mut h = History::default();
+        let t = 1_785_242_040.0;
+        let mut a = rec("G4XYZ", "IO91wm", 14.097071, "WSPR", -21.0, t);
+        a.src = Source::WsprHeard;
+        h.add(a.clone());
+        // WSPRnet's record of the same spot, another frequency figure.
+        let b = Reception { rf_hz: 14_097_073.0, snr: Some(-22.0), ..a.clone() };
+        h.add(b.clone());
+        assert_eq!(h.all(), [b]);
+        // The next cycle, and another band, are their own.
+        h.add(Reception { utc: t + 120.0, ..a.clone() });
+        h.add(Reception { rf_hz: 7_040_100.0, ..a });
+        assert_eq!(h.len(), 3);
     }
 
     #[test]

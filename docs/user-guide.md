@@ -851,8 +851,8 @@ going out stops if it gets there. The yellow from 120 °F is only a warning. Bes
 on. The list on the left has two parts, newest 2 minute cycle first:
 **HEARD**, the stations your WSPR decoder heard (UTC, SNR, drift, call, grid,
 dBm, distance, heading, audio offset), and **HEARD ME**, the reports of your
-beacon from wspr.live or WSPRnet (GLOBE's WSPR HEARD ME) and PSK Reporter,
-fetched while GLOBE is open. **CLEAR** empties both.
+beacon from WSPRnet and wspr.live (GLOBE's ASK WSPRNET + WSPR.LIVE) and PSK
+Reporter, merged, fetched with GLOBE open or shut. **CLEAR** empties both.
 
 - Under your message, where the beacon lands: *TX 10.140 200 MHz (10 140.200
   kHz)*, the transmit dial (VFO B in split) plus the offset, and any
@@ -939,9 +939,14 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
   (a path counts for HEARD ≥ when one of its hops is over your area), but
   not into the station list or the map's dots. It only reads; the panel
   never sends PSK Reporter anything from it.
-- **WSPR HEARD ME** (off to start) asks wspr.live every five minutes who
-  heard your WSPR beacon in the last hour (WSPRnet if wspr.live doesn't
-  answer); only your callsign is sent. Stations that heard you are a hollow
+- **ASK WSPRNET + WSPR.LIVE** (WSPR HEARD ME; off to start, and turned on
+  by itself when the panel goes to WSPR) asks both wsprnet.org and
+  wspr.live who heard your WSPR beacon in the last hour, every two minutes
+  while you beacon WSPR, else every five, and with GLOBE shut too (so TX's
+  HEARD ME is current). The two answers and PSK Reporter's WSPR reports are
+  merged: one report per station per cycle per band, WSPRnet's figures
+  winning, the source reading e.g. *WSPRnet + live* when both had it. Only
+  your callsign is sent; the log has each fetch and its count. Stations that heard you are a hollow
   orange ring with a dashed orange path and → in HEARD, naming where the
   report came from; stations you heard are a filled dot, a solid path and ←.
   A station can be both.
@@ -949,17 +954,26 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
   a pulse runs along its path: orange out from you while you transmit, green
   back to you otherwise.
 - **Paths** are translucent arcs rising over the Earth, higher the longer the
-  path, from your station to the station's dot. Behind the globe they are
-  drawn faint, so turn the globe (right over a pole if you like) and the arc
-  follows. On the flat map a path that runs off one edge and on at the other
+  path, from your station to the station's dot. The globe is solid:
+  nothing behind it shows through, but an arc high enough still shows where
+  it rises past the edge. On the flat map a path that runs off one edge and on at the other
   has a small ring at each side. A station heard both ways is one dot with
   the orange ring round it, at its most precise grid, and one path with a
   orange glow.
 - **SHOW.** **I HEARD** shows the stations you decoded, **HEARD ME** those
-  that heard you (PSK Reporter, WSPR HEARD ME; turn those SOURCES on), and
-  **BOTH** all of them. **FT8 ONLY** (or whichever mode) shows only the mode
-  the TX window sends while it is open, else the mode DECODE runs; **ALL
-  MODES** shows every mode. Hidden stations come back when you switch.
+  that heard you (PSK Reporter, WSPRnet, wspr.live; turn those SOURCES on), and
+  **BOTH** all of them. **GLOBE MODES ▾** always shows the mode the TX
+  window sends while it is open (else the mode DECODE runs), locked on; tick
+  other modes heard this hour to add their stations, each mode in its own
+  colour, or **ALL MODES**; only the mode in use has paths unless you tick
+  **Paths for the extras too**; **CLEAR EXTRAS** goes back to the one mode.
+  Your choice is remembered. Hidden stations come back when you switch.
+- **A station that heard you:** click it on the map for its pop-up: call,
+  grid, country, distance, bearing (short and long), spot time, band,
+  frequency, SNR, drift, declared power, which site reported it, its last
+  hour's reports of you, and your own decodes of it. ✕ closes it; clicking
+  another such station replaces it; clicking the bare map or turning the
+  globe leaves it open.
   **CLEAR** wipes the stations and paths now; reports of you from before
   then don't come back with the next fetch.
 - **FORECAST.** Each band from 160 to 10 m, hour by hour for the next 24
