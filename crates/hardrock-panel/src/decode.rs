@@ -919,6 +919,14 @@ impl Decode {
         self.wide_spots.truncate(WIDE_SPOTS);
     }
 
+    /// Callsigns the WSJT decoder registers before each slot, so hashed
+    /// messages naming them resolve: ours and the station in a QSO with us.
+    pub(crate) fn seed_calls(&self, calls: &[String]) {
+        if let Some((_, Worker::Wsjt(w, _))) = &self.worker {
+            w.seed_calls(calls);
+        }
+    }
+
     /// The decoder's slots for the scope's slot lines (decision 51): the
     /// mode's period and the first slot it takes whole, while a mode with
     /// slots runs; `None` otherwise (keyboard modes, pictures, links).

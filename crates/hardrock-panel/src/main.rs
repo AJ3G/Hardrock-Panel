@@ -839,6 +839,10 @@ impl App {
             at,
             self.outside.wsjtx.as_ref(),
         );
+        // Hashed calls naming us or the station in hand resolve (decision 72).
+        let mut calls: Vec<String> = self.saved.station.call().into_iter().collect();
+        calls.extend(self.tx.qso.dx_call().map(str::to_string));
+        self.decode.seed_calls(&calls);
         // The scope's slot lines follow the decoder's slots (decision 51).
         self.scope.decode_slots(self.decode.slots());
         // And its labels, DECODE's decodes (decision 54).
