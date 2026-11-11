@@ -277,6 +277,11 @@ pub struct Scope {
     digi_note: Option<String>,
     fit_at: f64,
     wf_levels: Option<(f32, f32)>,
+    /// The band's quiet noise for the made-up fill where the waterfall and
+    /// the surface have no history, eased, and when it was last eased
+    /// (decision 112, [`Scope::noise_params`]).
+    noise_fill: Option<levels::NoiseFill>,
+    noise_fill_at: f64,
     markers: Markers,
     persist: Persistence,
     persist_tex: Option<egui::TextureHandle>,
@@ -412,6 +417,8 @@ impl Scope {
             digi_note: None,
             fit_at: f64::NEG_INFINITY,
             wf_levels: None,
+            noise_fill: None,
+            noise_fill_at: f64::NAN,
             markers: Markers::default(),
             persist: Persistence::default(),
             persist_tex: None,
@@ -831,6 +838,7 @@ impl Scope {
             bins,
             floor_dbm: floor,
             ceil_dbm: s.ceil_dbm,
+            ref_dbfs: 0.0,
         };
         let main_lay = lay(span, TX_MAIN_BINS);
         // Zoomed in: a frame over the view as well, finer, as the zoom FFT's
@@ -860,8 +868,11 @@ impl Scope {
         for a in self.tx_mon.take() {
             self.tx_seq += 1;
             let seq = TX_SEQ0 + self.tx_seq;
-            let main = Arc::new(txmon::rf_frame(&a, main_lay, seq));
-            let zoom = zoom_lay.map(|l| Arc::new(txmon::rf_frame(&a, l, seq)));
+            // At the fixed strength (decision 113), whatever it went out at.
+            let ref_dbfs = self.tx_mon.reference(&a);
+            let main = Arc::new(txmon::rf_frame(&a, txmon::Lay { ref_dbfs, ..main_lay }, seq));
+            let zoom =
+                zoom_lay.map(|l| Arc::new(txmon::rf_frame(&a, txmon::Lay { ref_dbfs, ..l }, seq)));
             let src = zoom.clone().unwrap_or_else(|| main.clone());
             self.rows.push_waterfall(
                 &src.db,
@@ -1437,7 +1448,8 @@ mod tests {
                 .enumerate()
                 .fold((0, f32::MIN), |a, (k, &d)| if d > a.1 { (k, d) } else { a });
         assert!((f.bin_hz(k) - 14_075_500.0).abs() < 20.0, "ours at {}", f.bin_hz(k));
-        let want = sc.settings.ceil_dbm - txmon::TX_MON_HEADROOM_DB - 6.02;
+        // Half-scale audio, drawn at the fixed strength all the same.
+        let want = sc.settings.ceil_dbm - txmon::TX_MON_BELOW_CEIL_DB;
         assert!((top - want).abs() < 1.5, "{top} for {want}");
         assert_eq!((f.db[0], f.noise_dbm), (-120.0, -120.0), "the rest at the band's floor");
         // Unkeyed, the stream stopped: the guard goes on with the monitor.

@@ -18,11 +18,11 @@ struct Wf {
     scroll_frac: f32,
     contrast: f32,
     brightness: f32,
-    // Where on the palette a pixel with no history is painted (the noise
-    // floor's level), and how much dimmer than that colour.
-    empty_t: f32,
-    empty_shade: f32,
-    _pad0: f32,
+    // The band's quiet level and spread, dB, for the made-up noise where
+    // there is no history (noise.wgsl), and the newest row's number (to 2^24).
+    noise_dbm: f32,
+    noise_spread: f32,
+    serial: f32,
     _pad1: f32,
     _pad2: f32,
 };
@@ -48,22 +48,22 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let srgb = u.srgb > 0.5;
-    // No history here (never measured, or not filled yet): the noise floor's
-    // colour a shade dimmer, not the bottom of the palette, so a gap reads as
-    // a quiet band with nothing in it rather than as a black block.
-    let empty = target_colour(palette_raw(u.empty_t) * u.empty_shade, srgb);
     let age_f = in.uv.y * u.rows_vis + (1.0 - u.scroll_frac);
-    if (age_f >= u.count) {
-        return vec4<f32>(empty, 1.0);
-    }
-    let h = u32(u.tex_h);
     let age = u32(floor(age_f));
-    let row = (u32(u.newest) + h - (age % h)) % h;
     let f = mix(u.view_lo, u.view_hi, in.uv.x);
     let half = (u.view_hi - u.view_lo) / max(u.px_w, 1.0) * 0.5;
-    let v = level_at(row, f, half, u.tex_w, u.smoothing > 0.5, -1.0e9);
+    var v = -1.0e9;
+    if (age_f < u.count) {
+        let h = u32(u.tex_h);
+        let row = (u32(u.newest) + h - (age % h)) % h;
+        v = level_at(row, f, half, u.tex_w, u.smoothing > 0.5, -1.0e9);
+    }
+    // No history here (never measured, or not filled yet): made-up noise
+    // like the quiet band's, coloured as a measured pixel is, rather than a
+    // flat colour; real rows draw over it as they come.
     if (v < -1.0e8) {
-        return vec4<f32>(empty, 1.0);
+        let n = (u32(u.serial) - age) & 0xffffffu;
+        v = noise_dbm(n, f, 2.0 * half, u.noise_dbm, u.noise_spread);
     }
     var t = (v - u.floor) * u.inv_range;
     t = (t - 0.5) * u.contrast + 0.5 + u.brightness;

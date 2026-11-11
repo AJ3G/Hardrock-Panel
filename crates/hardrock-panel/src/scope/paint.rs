@@ -1188,6 +1188,7 @@ fn paint_surface(
         live_t: if sc.paused { 1.0 } else { sc.rows.live_t(cx.now) },
         prev: sc.rows.prev_band(),
         light: if sc.settings.lit_3d { 1.0 } else { 0.0 },
+        noise: sc.noise_params(cx.now, sc.rows.surface_serial()),
     };
     let cb = gpu::SurfacePaint {
         id: sc.id,
@@ -1378,14 +1379,7 @@ fn paint_waterfall(
                 scroll_frac,
                 contrast: sc.settings.wf_contrast,
                 brightness: sc.settings.wf_brightness,
-                empty_t: levels::no_data_t(
-                    levels::quiet_dbm(&sc.cols).or(sc.shown().map(|f| f.noise_dbm)),
-                    floor,
-                    ceil,
-                    sc.settings.wf_contrast,
-                    sc.settings.wf_brightness,
-                ),
-                empty_shade: levels::NO_DATA_SHADE,
+                noise: sc.noise_params(cx.now, sc.rows.wf_serial()),
             };
             let cb = gpu::WaterfallPaint {
                 id: sc.id,
@@ -2122,6 +2116,31 @@ impl Scope {
     pub(super) fn wf_levels_now(&self) -> (f32, f32) {
         let set = (self.settings.floor_dbm, self.settings.ceil_dbm);
         if self.settings.wf_auto { self.wf_levels.unwrap_or(set) } else { set }
+    }
+
+    /// The made-up noise where the waterfall or the surface has no history
+    /// (decision 112), for rows numbered up to `serial`: the band's quiet
+    /// level and spread from the trace ([`levels::noise_fill`]), eased over
+    /// half a second so the fill does not flicker with each frame's median,
+    /// and held as it was over a transmission (the TX monitor's trace is our
+    /// signal on a flat floor, nothing to measure noise from).
+    pub(super) fn noise_params(&mut self, now: f64, serial: u32) -> gpu::NoiseParams {
+        let measured = if self.held { None } else { levels::noise_fill(&self.cols) };
+        if let Some(m) = measured {
+            let dt = if self.noise_fill_at.is_finite() {
+                (now - self.noise_fill_at).clamp(0.0, 1.0) as f32
+            } else {
+                1.0
+            };
+            let k = 1.0 - (-dt / 0.5).exp();
+            let cur = self.noise_fill.unwrap_or(m);
+            self.noise_fill = Some(levels::NoiseFill {
+                dbm: cur.dbm + (m.dbm - cur.dbm) * k,
+                spread_db: cur.spread_db + (m.spread_db - cur.spread_db) * k,
+            });
+        }
+        self.noise_fill_at = now;
+        gpu::NoiseParams { fill: self.noise_fill, serial }
     }
 
     pub(super) fn wf_range(&mut self) -> (f32, f32) {

@@ -25,6 +25,9 @@ struct S3 {
     fill: f32,
     bg: vec4<f32>,
     ink: vec4<f32>,
+    // The band's quiet level and spread, dB, for the made-up noise where a
+    // row has no data (noise.wgsl), and the live row's number (to 2^24).
+    noise: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: S3;
@@ -55,9 +58,10 @@ fn level(k: u32, c: u32) -> f32 {
     let w = u.view_hi - u.view_lo;
     let f = u.view_lo + x * w;
     let half = w / max(u.cols - 1.0, 1.0) * 0.5;
-    let v = level_at(slot_of(k), f, half, u.tex_w, true, -1.0e9);
+    var v = level_at(slot_of(k), f, half, u.tex_w, true, -1.0e9);
     if (v < -1.0e8) {
-        return 0.0;
+        let n = (u32(u.noise.z) - k) & 0xffffffu;
+        v = noise_dbm(n, f, 2.0 * half, u.noise.x, u.noise.y);
     }
     return clamp((v - u.floor) * u.inv_range, 0.0, 1.0);
 }

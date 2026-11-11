@@ -69,6 +69,15 @@ fn sample(prev: bool, r: i32, lo: f32, hi: f32, f: f32, half: f32) -> f32 {
     return m;
 }
 
+// `v`, or where row `k` has no data there, made-up noise like the quiet
+// band's (noise.wgsl).
+fn or_noise(v: f32, k: u32, f: f32, half: f32) -> f32 {
+    if (v >= -1.0e8) {
+        return v;
+    }
+    return noise_dbm((u32(u.noise.z) - k) & 0xffffffu, f, 2.0 * half, u.noise.x, u.noise.y);
+}
+
 fn to_level(v: f32) -> f32 {
     if (v < -1.0e8) {
         return 0.0;
@@ -90,9 +99,9 @@ fn levels(@builtin(global_invocation_id) g: vec3<u32>) {
     let half = w / max(u.cols - 1.0, 1.0) * 0.5;
     let slot = slot_of(k);
     let gb = textureLoad(geom_tex, vec2<i32>(i32(slot), 0), 0).xy;
-    var lvl = to_level(sample(false, i32(slot), gb.x, gb.y, f, half));
+    var lvl = to_level(or_noise(sample(false, i32(slot), gb.x, gb.y, f, half), k, f, half));
     if (k == 0u && u.has_prev > 0.5) {
-        let was = to_level(sample(true, 0, u.prev_lo, u.prev_hi, f, half));
+        let was = to_level(or_noise(sample(true, 0, u.prev_lo, u.prev_hi, f, half), k, f, half));
         lvl = mix(was, lvl, clamp(u.live_t, 0.0, 1.0));
     }
     lv[k * cols + c] = lvl;

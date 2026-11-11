@@ -113,6 +113,11 @@ pub struct Rows {
     /// The newest waterfall row's slot, and how many slots hold rows.
     wf_head: u32,
     wf_count: u32,
+    /// Waterfall rows and surface rows laid down since the start, wrapping:
+    /// what the made-up noise where a row has no data is keyed on, so it
+    /// moves with the rows (decision 112).
+    wf_serial: u32,
+    s3_serial: u32,
     /// When each waterfall row was laid down, UTC seconds, by slot.
     wf_times: Vec<f64>,
     pending: Option<Pending>,
@@ -148,6 +153,8 @@ impl Rows {
             ref_hz: None,
             wf_head: WF_ROWS - 1,
             wf_count: 0,
+            wf_serial: 0,
+            s3_serial: 0,
             wf_times: vec![f64::NAN; WF_ROWS as usize],
             pending: None,
             s3_head: 0,
@@ -182,6 +189,17 @@ impl Rows {
 
     pub fn wf_count(&self) -> u32 {
         self.wf_count
+    }
+
+    /// The newest waterfall row's number, counting every row laid down
+    /// (wrapping), for the made-up noise to be keyed on.
+    pub fn wf_serial(&self) -> u32 {
+        self.wf_serial
+    }
+
+    /// The live surface row's number, as [`Rows::wf_serial`].
+    pub fn surface_serial(&self) -> u32 {
+        self.s3_serial
     }
 
     /// When the row `age` rows older than the newest was laid down, UTC
@@ -290,6 +308,7 @@ impl Rows {
         let ready = self.pending.as_ref().is_some_and(|p| p.frames >= frames_per_row.max(1));
         if ready && let Some(p) = self.pending.take() {
             self.wf_head = (self.wf_head + 1) % WF_ROWS;
+            self.wf_serial = self.wf_serial.wrapping_add(1);
             self.wf_count = (self.wf_count + 1).min(WF_ROWS);
             self.wf_times[self.wf_head as usize] = utc;
             out.wf.push(self.row(self.wf_head, p.cov, &p.max));
@@ -323,6 +342,7 @@ impl Rows {
         }
         self.gpu_pending = None;
         self.wf_head = (self.wf_head + 1) % WF_ROWS;
+        self.wf_serial = self.wf_serial.wrapping_add(1);
         self.wf_count = (self.wf_count + 1).min(WF_ROWS);
         self.wf_times[self.wf_head as usize] = utc;
         out.wf.push(self.row(self.wf_head, cov, &[]));
@@ -408,6 +428,7 @@ impl Rows {
             // The live row stays where it is as the newest history row; a
             // copy of it becomes the new live row in the next slot.
             self.s3_head = (self.s3_head + 1) % SURFACE_ROWS;
+            self.s3_serial = self.s3_serial.wrapping_add(1);
             self.s3_count = (self.s3_count + 1).min(DEPTH + 1);
         }
         // The rows laid down this repaint, as copies of the live one, and
@@ -490,6 +511,8 @@ mod tests {
         assert_eq!(slots, [0, 1, 2]);
         assert_eq!(r.wf_head(), 2);
         assert_eq!(r.wf_count(), 3);
+        // Numbered on past the ring, for the made-up noise (decision 112).
+        assert_eq!(r.wf_serial(), 3);
         assert_eq!(r.wf_time(0), Some(0.0));
         assert_eq!(r.wf_time(3), None);
         let row = &up.wf[0];
