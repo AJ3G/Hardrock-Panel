@@ -133,7 +133,8 @@ says more.
 - **E1.** Turning changes VOL, SQL, AGC (AGC or manual gain), NR or NB, the
   one named under it; a click picks the next. NR and NB here are the DUO's
   own, on the DUO's audio: heard at SPAN 192k, not above it (use SCOPE's NR
-  there). VOL is one volume with
+  there). Switching NB or NR on sets its level first (5 if it read 0), and
+  switching it off sets the level to 0 too, as the DUO wants. VOL is one volume with
   RADIO's VOLUME and SCOPE's Sound slider: move any of them, or the radio's
   own knob, and the others follow, so it turns whichever audio you hear (the
   radio's at 192 kHz SPAN, the panel's receiver wider). That is only while

@@ -930,3 +930,11 @@ AJ3G's round-2 GLOBE items (11 Nov 2026).
 - **FILE's ▾ drop-down** lists the .adi files found when it opens: WSJT-X's `wsjtx_log.adi`, the last eight imports (kept in the settings), the .adi files beside the log (the panel's exports), and those directly in Documents and Downloads, newest first. **BROWSE…** (Windows only, the `rfd` crate with no default features, on its own thread) opens the system's file dialog. Either fills the FILE box.
 
 **Not done:** QRZ.com's free (non-XML) pages are not scraped; the form's LOOKUP still asks only the service chosen in SETTINGS.
+
+## 76. The DUO's NB and NR switched with their level; silent settings logged (11 Nov 2026)
+
+AJ3G found that NB and NR wouldn't switch from the panel, though the DUO's own NB button worked. The log showed every `NB1` read back as `NB0`, `NR1` as `NR0`, and no answer to a read of `NK` (the NB level), so the panel's level stood at 0.
+
+- **On** now sets the level first (the level read, or 5 when it reads 0 or nothing), then the switch: `NK005;` `NB1;`. **Off** sends the switch and then level 0 (`NB0;` `NK000;`), which the CAT reference also calls off. This holds for RADIO's menu switches, the NB/NR annunciators and E1.
+- **Silent settings:** after each full read of the radio's settings, the log has one line, `rigcat: settings read: N read; no answer to …; refused …`. It is written again only when the list changes, so COPY LOG shows which settings the DUO doesn't answer (and so can't be checked after a set).
+- **Not confirmed on the radio yet:** whether the order or the level is what the DUO wanted. If `set NB1; read back NB0;` still shows, another command form is next.

@@ -499,6 +499,44 @@ pub(crate) fn control_frame(
     p.set_control(c, value, s.value(c.cmd))
 }
 
+/// The level the DUO's NB or NR is switched on at when its own level reads
+/// 0 or doesn't read at all: mid-scale.
+pub(crate) const NOISE_ON_LEVEL: i32 = 5;
+
+/// The level control that goes with a noise switch: NK with NB, NC with NR.
+pub(crate) fn noise_level(cmd: &str) -> Option<&'static str> {
+    match cmd {
+        "NB" => Some("NK"),
+        "NR" => Some("NC"),
+        _ => None,
+    }
+}
+
+/// The frames that set `c` to `value`: one, except for NB and NR, which go
+/// with their level (AJ3G, 11 Nov 2026). The DUO answered NB0 to every NB1
+/// the panel sent while the NB level stood at 0 (NK, which it never answers
+/// a read of), yet its own NB button switched NB on, at its own level. So
+/// switching on sets the level first, the one read or [`NOISE_ON_LEVEL`]
+/// when that is 0 or unknown, then the switch; switching off sends the
+/// switch and then level 0, which the CAT reference also calls off.
+pub(crate) fn control_frames(
+    p: &dyn Protocol,
+    c: &Control,
+    value: &str,
+    s: &RigStatus,
+) -> Result<Vec<Frame>, String> {
+    let Some(lvl) = noise_level(c.cmd).and_then(|l| find(p, l)) else {
+        return Ok(vec![control_frame(p, c, value, s)?]);
+    };
+    let now = readback(lvl, s).and_then(|v| v.trim().parse::<i32>().ok()).unwrap_or(0);
+    Ok(if value == "1" {
+        let to = if now > 0 { now } else { NOISE_ON_LEVEL };
+        vec![control_frame(p, lvl, &to.to_string(), s)?, control_frame(p, c, "1", s)?]
+    } else {
+        vec![control_frame(p, c, value, s)?, control_frame(p, lvl, "0", s)?]
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,6 +720,15 @@ mod tests {
             "TB005;"
         );
         assert_eq!(readback(nk, &s2), Some("03"));
+        // NB and NR go with their level: on at the level read, or 5 when it
+        // reads 0 or nothing; off with level 0 as well.
+        let nb = find(&*d, "NB").unwrap();
+        assert_eq!(texts(&control_frames(&*d, nb, "1", &s).unwrap()), ["NK005;", "NB1;"]);
+        assert_eq!(texts(&control_frames(&*d, nb, "1", &s2).unwrap()), ["NK003;", "NB1;"]);
+        assert_eq!(texts(&control_frames(&*d, nb, "0", &s2).unwrap()), ["NB0;", "NK000;"]);
+        let nr = find(&*d, "NR").unwrap();
+        assert_eq!(texts(&control_frames(&*d, nr, "1", &s).unwrap()), ["NC005;", "NR1;"]);
+        assert_eq!(texts(&control_frames(&*d, nk, "4", &s).unwrap()), ["NK004;"]);
         // Read only, and BR, which would cut the link, can't be set.
         assert!(!settable(&*d, find(&*d, "GS").unwrap()));
         assert!(!settable(&*d, find(&*d, "BR").unwrap()));

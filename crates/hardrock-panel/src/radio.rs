@@ -162,8 +162,8 @@ impl Face<'_> {
     }
 
     fn send_control(&mut self, c: &rigcat::Control, value: &str) {
-        match logic::control_frame(self.p, c, value, self.s) {
-            Ok(f) => self.out.frames.push(f),
+        match logic::control_frames(self.p, c, value, self.s) {
+            Ok(f) => self.out.frames.extend(f),
             Err(e) => self.st.note = Some(e),
         }
     }

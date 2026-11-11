@@ -337,7 +337,8 @@ pub(crate) fn e1_text(e: E1, v: Option<i32>) -> String {
 }
 
 /// The frames that take E1's setting from `from` to `to` (the same scale
-/// as [`e1_value`]). NR and NB switch on with their level, and off at 0.
+/// as [`e1_value`]). NR and NB switch on after their level is set, and off
+/// at 0 with their level to 0.
 pub(crate) fn e1_frames(
     p: &dyn Protocol,
     s: &RigStatus,
@@ -359,8 +360,10 @@ pub(crate) fn e1_frames(
         E1::Nr | E1::Nb => {
             let (sw, lvl) = if e == E1::Nr { ("NR", "NC") } else { ("NB", "NK") };
             match (from, to) {
-                (_, 0) => vec![set(sw, "0")?],
-                (0, _) => vec![set(sw, "1")?, set(lvl, &to.to_string())?],
+                // As the RADIO menu's switch does (logic::control_frames):
+                // the level before the switch on, and to 0 with it off.
+                (_, 0) => vec![set(sw, "0")?, set(lvl, "0")?],
+                (0, _) => vec![set(lvl, &to.to_string())?, set(sw, "1")?],
                 _ => vec![set(lvl, &to.to_string())?],
             }
         }
@@ -522,10 +525,10 @@ mod tests {
         assert_eq!(e1_value(&*d, &s, E1::Vol), Some(35));
         assert_eq!(texts(&e1_frames(&*d, &s, E1::Vol, 35, 37).unwrap()), ["VM037;"]);
         assert_eq!(e1_value(&*d, &s, E1::Nr), Some(0));
-        assert_eq!(texts(&e1_frames(&*d, &s, E1::Nr, 0, 1).unwrap()), ["NR1;", "NC001;"]);
+        assert_eq!(texts(&e1_frames(&*d, &s, E1::Nr, 0, 1).unwrap()), ["NC001;", "NR1;"]);
         assert_eq!(texts(&e1_frames(&*d, &s, E1::Nr, 3, 4).unwrap()), ["NC004;"]);
-        assert_eq!(texts(&e1_frames(&*d, &s, E1::Nr, 1, 0).unwrap()), ["NR0;"]);
-        assert_eq!(texts(&e1_frames(&*d, &s, E1::Nb, 0, 2).unwrap()), ["NB1;", "NK002;"]);
+        assert_eq!(texts(&e1_frames(&*d, &s, E1::Nr, 1, 0).unwrap()), ["NR0;", "NC000;"]);
+        assert_eq!(texts(&e1_frames(&*d, &s, E1::Nb, 0, 2).unwrap()), ["NK002;", "NB1;"]);
         assert_eq!(texts(&e1_frames(&*d, &s, E1::Agc, 0, 1).unwrap()), ["GC1;"]);
         assert_eq!(texts(&e1_frames(&*d, &s, E1::Sql, 0, 3).unwrap()), ["SQ003;"]);
         assert!(e1_frames(&*d, &s, E1::Vol, 5, 5).unwrap().is_empty());

@@ -495,6 +495,9 @@ fn run<P: Read + Write>(
     // A settings read under way: the next item, the rows so far, and
     // whether it goes on while the radio transmits.
     let mut sweep: Option<(usize, Vec<SettingRow>, bool)> = None;
+    // What the last full read found silent or refused, so the log says it
+    // once, and again only when it changes.
+    let mut quiet_logged = String::new();
     let mut tune: Option<TuneState> = None;
     let mut last_tx: Option<Instant> = None;
     loop {
@@ -779,6 +782,11 @@ fn run<P: Read + Write>(
             if end >= items.len() {
                 let rows = std::mem::take(rows);
                 sweep = None;
+                let quiet = quiet_settings(&rows);
+                if quiet != quiet_logged {
+                    info!("rigcat: settings read: {quiet}");
+                    quiet_logged = quiet;
+                }
                 set(status, |s| {
                     s.settings = rows;
                     s.settings_read = Some(Instant::now());
@@ -798,6 +806,23 @@ fn run<P: Read + Write>(
             }
         }
     }
+}
+
+/// The settings the radio didn't answer, or refused, in one line for the
+/// log. The panel shows "—" for these, and a set of one can't be checked
+/// (AJ3G, 11 Nov 2026: NB and NR wouldn't take from the panel, and NK was
+/// one the DUO never answered; "make sure there are no others").
+fn quiet_settings(rows: &[SettingRow]) -> String {
+    let list = |want: fn(&Option<String>) -> bool| -> String {
+        let v: Vec<&str> = rows.iter().filter(|r| want(&r.raw)).map(|r| r.item.cmd).collect();
+        if v.is_empty() { "none".into() } else { v.join(" ").replace(';', "") }
+    };
+    format!(
+        "{} read; no answer to {}; refused {}",
+        rows.len(),
+        list(|r| r.is_none()),
+        list(|r| r.as_deref() == Some("?"))
+    )
 }
 
 #[cfg(test)]
@@ -1175,5 +1200,18 @@ mod tests {
         let gi: Vec<usize> =
             sent.iter().enumerate().filter(|(_, f)| *f == "GI;").map(|(i, _)| i).collect();
         assert!(gi.len() > 5, "GI read every round while on air: {}", gi.len());
+    }
+
+    #[test]
+    fn the_log_names_settings_the_radio_left_unanswered() {
+        use crate::protocol::Item;
+        let row = |cmd, raw: Option<&str>| SettingRow {
+            item: Item { cmd, menu: None, name: "" },
+            value: None,
+            raw: raw.map(str::to_string),
+        };
+        let rows = [row("NB;", Some("NB0")), row("NK;", None), row("XY;", Some("?"))];
+        assert_eq!(quiet_settings(&rows), "3 read; no answer to NK; refused XY");
+        assert_eq!(quiet_settings(&rows[..1]), "1 read; no answer to none; refused none");
     }
 }
