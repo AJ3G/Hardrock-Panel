@@ -357,6 +357,9 @@ pub(crate) struct Tx {
     bar_mode: Option<TxMode>,
     /// ENABLE TX last frame, to see it turned off in WSPR (decision 91).
     was_enabled: bool,
+    /// HALT pressed since the station in hand was picked or ENABLE TX
+    /// last turned on: the scope's worked mark is taken away (decision 104).
+    halted: bool,
 }
 
 impl Default for Tx {
@@ -391,6 +394,7 @@ impl Default for Tx {
             dx_seen: None,
             bar_mode: None,
             was_enabled: false,
+            halted: false,
         }
     }
 }
@@ -421,12 +425,23 @@ impl Tx {
         self.over.as_ref().map(|o| o.mode)
     }
 
-    /// The station worked and where we copy them: call, audio offset Hz
-    /// and RF Hz, from their latest decode; for the QSO box and the
-    /// scope's mark (AJ3G, 11 Nov 2026).
-    pub(crate) fn dx_mark(&self) -> Option<(String, f32, f64)> {
+    /// The station in hand and where we copy them: call, audio offset Hz
+    /// and RF Hz, from their latest decode; for the QSO box (AJ3G, 11 Nov
+    /// 2026).
+    pub(crate) fn dx_copied(&self) -> Option<(String, f32, f64)> {
         let call = self.qso.dx_call()?;
         self.dx_seen.clone().filter(|(c, ..)| c == call)
+    }
+
+    /// The scope's worked-station mark: [`Tx::dx_copied`], only while the
+    /// QSO is actually in progress (decision 104). Gone once the contact is
+    /// complete and logged, timed out, out of calls, or after HALT; back as
+    /// soon as a station is picked (or ENABLE TX resumes the one in hand).
+    pub(crate) fn dx_mark(&self) -> Option<(String, f32, f64)> {
+        if self.halted || !self.qso.in_progress() {
+            return None;
+        }
+        self.dx_copied()
     }
 
     /// The offset our WSPR beacon goes out on: the one on the air, else the
@@ -490,6 +505,7 @@ impl Tx {
         self.dx_seen = Some((call.clone(), r.d.audio_hz, r.rf_hz));
         self.report = r.d.snr_db;
         self.qso.start_qso(&call, r.d.grid.clone(), r.d.snr_db, wait, now as i64);
+        self.halted = false;
         self.hand = None;
         self.generate(s);
     }
@@ -500,6 +516,7 @@ impl Tx {
     /// keys.
     pub(crate) fn enable(&mut self, s: &mut TxSettings) {
         self.enabled = true;
+        self.halted = false;
         self.note = None;
         if s.mode == TxMode::Ft8 {
             self.qso.reset_watchdog();
@@ -624,6 +641,7 @@ impl Tx {
     /// HALT TX: unkey now and turn ENABLE TX off.
     pub(crate) fn halt(&mut self, link: Option<&RigLink>) {
         self.enabled = false;
+        self.halted = true;
         if self.over.is_some()
             && let Some(l) = link
         {
@@ -745,6 +763,7 @@ impl Tx {
                 self.report = q.snr_db;
                 self.dx_seen = Some((q.call.clone(), q.audio_hz, 0.0));
                 self.qso.start_qso(&q.call, q.grid.clone(), q.snr_db, q.wait_for_cq, now as i64);
+                self.halted = false;
                 self.generate(s);
             }
         }
@@ -1279,6 +1298,27 @@ mod round3_tests {
         assert_eq!(rf_text(474_200.0), "0.474 200 MHz (474.200 kHz)");
         assert_eq!(mhz_cell(10_140_123.4), "10.140 123");
         assert_eq!(tx_rf_hz(&RigStatus::default(), 1500.0, 0.0), None);
+    }
+
+    #[test]
+    fn the_worked_mark_shows_only_while_the_qso_is_in_progress() {
+        let mut tx = Tx::default();
+        tx.qso.cfg.my_call = "AJ3G".into();
+        assert_eq!(tx.dx_mark(), None);
+        tx.qso.start_qso("K1ABC", None, -5, false, 0);
+        tx.dx_seen = Some(("K1ABC".into(), 1550.0, 14_075_550.0));
+        assert_eq!(tx.dx_mark().map(|m| m.0), Some("K1ABC".into()));
+        // HALT takes it away; ENABLE TX resumes the QSO and brings it back.
+        tx.halt(None);
+        assert_eq!(tx.dx_mark(), None);
+        assert!(tx.dx_copied().is_some(), "the QSO box still says where");
+        let mut s = TxSettings::default();
+        tx.enable(&mut s);
+        assert!(tx.dx_mark().is_some());
+        // Logged: gone, though the call stays in the QSO box.
+        assert!(tx.qso.log_by_hand(45));
+        assert_eq!(tx.dx_mark(), None);
+        assert!(tx.dx_copied().is_some());
     }
 
     #[test]

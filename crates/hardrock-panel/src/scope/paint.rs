@@ -62,7 +62,11 @@ fn dim() -> Color32 {
 fn accent() -> Color32 {
     theme::scope().accent
 }
-/// Our own transmission, as GLOBE and the TX window draw it.
+/// The station being worked (decision 102): the slot lines' clear green,
+/// already on the scope, at full strength. Green is no warning colour.
+const DX_INK: Color32 = slotlines::START_INK;
+/// Our own transmission, as GLOBE and the TX window draw it: on the scope,
+/// the TX MONITOR caption only (decision 103).
 fn tx_ink() -> Color32 {
     txsig::TX_INK
 }
@@ -179,6 +183,9 @@ fn paint_hover_cursor(sc: &Scope, ui: &egui::Ui, spec: Rect, wf: Rect, cx: &Ctx)
     p.vline(xx, spec.y_range(), line);
     p.vline(xx, wf.y_range(), line);
     let mut text = format!("{} MHz", mhz_spaced(cx.map.shown(hz)));
+    if let Some(af) = hover_af(hz, &cx.rig) {
+        text.push_str(&format!(" · {af:.0} Hz"));
+    }
     if !sc.held
         && let Some(f) = sc.shown()
         && let Some(pk) = hover_level(f, hz, px_hz)
@@ -201,6 +208,22 @@ fn paint_hover_cursor(sc: &Scope, ui: &egui::Ui, spec: Rect, wf: Rect, cx: &Ctx)
     p.rect_filled(r, 2.0, Color32::from_black_alpha(210));
     p.rect_stroke(r, 2.0, Stroke::new(1.0, ink().gamma_multiply(0.5)), egui::StrokeKind::Inside);
     p.galley(r.min + pad, g, ink());
+}
+
+/// The audio offset `hz` would be heard at, as DECODE's AF column and the
+/// offset bar read it (decision 101): Hz from the receive dial, counting up
+/// into the passband on either sideband. `None` outside the receiver's
+/// passband, or with no dial known, where no audio is made.
+fn hover_af(hz: f64, rig: &ScopeRig) -> Option<f64> {
+    let dial = rig.rx_hz;
+    if !(dial.is_finite() && dial > 0.0) {
+        return None;
+    }
+    let (a, b) = (dial + rig.passband.0 as f64, dial + rig.passband.1 as f64);
+    if !(a.min(b)..=a.max(b)).contains(&hz) {
+        return None;
+    }
+    Some(OffsetBar { hz }.offset_hz(dial, rig.mode.is_lower()).round() + 0.0)
 }
 
 /// A frequency to the hertz as "14.213 720" (MHz), as the TX window's lists
@@ -400,8 +423,14 @@ fn paint_spectrum(
         if sc.settings.persist {
             paint_persistence(sc, ui, trace, &cols, cx.now);
         }
-        // Fill, then the line: in the TX colour while it is the TX monitor's.
-        let trace_ink = if sc.tx_live { tx_ink() } else { accent() };
+        // Fill, then the line. The TX monitor's is coloured by level through
+        // the waterfall's palette, as its rows are (decision 103); only its
+        // caption is in the TX orange.
+        let tx_pal = sc.tx_live.then(|| TxPalette::new(sc));
+        let ink_at = |dbm: f32, a: f32| match &tx_pal {
+            Some(tp) => tp.at(dbm).gamma_multiply(a),
+            None => accent().gamma_multiply(a),
+        };
         if !cols.is_empty() {
             let top_a = 0.45;
             let mut mesh = Mesh::default();
@@ -409,8 +438,8 @@ fn paint_spectrum(
                 let yy = y(c).clamp(trace.top(), trace.bottom());
                 let t = 1.0 - (yy - trace.top()) / trace.height().max(1.0);
                 let a = 0.03 + (top_a - 0.03) * t;
-                mesh.colored_vertex(pos2(xx, yy), trace_ink.gamma_multiply(a));
-                mesh.colored_vertex(pos2(xx, trace.bottom()), trace_ink.gamma_multiply(0.03));
+                mesh.colored_vertex(pos2(xx, yy), ink_at(c, a));
+                mesh.colored_vertex(pos2(xx, trace.bottom()), ink_at(c, 0.03));
                 if i > 0 {
                     let k = (i * 2) as u32;
                     mesh.add_triangle(k - 2, k - 1, k);
@@ -426,7 +455,18 @@ fn paint_spectrum(
                 .map(|(&c, &xx)| pos2(xx, y(c).clamp(trace.top(), trace.bottom())))
                 .collect();
             let a = if sc.settings.persist { 0.55 } else { 1.0 };
-            p.add(Shape::line(line, Stroke::new(1.2, trace_ink.gamma_multiply(a))));
+            match &tx_pal {
+                // A segment at a time, each in its level's colour.
+                Some(_) => {
+                    for (k, w) in line.windows(2).enumerate() {
+                        let c = ink_at(cols[k].max(cols[k + 1]), a);
+                        p.line_segment([w[0], w[1]], Stroke::new(1.2, c));
+                    }
+                }
+                None => {
+                    p.add(Shape::line(line, Stroke::new(1.2, accent().gamma_multiply(a))));
+                }
+            }
         }
         if sc.settings.peak && f.peak.is_some() {
             let (pk, pxs) = columns(f, v, trace, ncols, true);
@@ -484,8 +524,8 @@ fn paint_spectrum(
     if has_trace {
         paint_skim_spectrum(sc, &p, all, trace, cx);
     }
-    paint_offset(sc, &p, all, cx, true);
     paint_dx_mark(sc, &p, all, cx, true);
+    paint_offset(sc, &p, all, cx, true);
 
     // The radio's centre, dashed.
     let xc = x(cx.span.center);
@@ -555,6 +595,48 @@ fn paint_spectrum(
             sc.settings.floor_dbm = a;
             sc.settings.ceil_dbm = b;
         }
+    }
+}
+
+/// The waterfall's palette, as it colours a level (decision 103): the TX
+/// monitor's trace is drawn in it so our signal looks as a received one
+/// does in the palette the operator picked. The same mapping as the
+/// waterfall's shader: the waterfall's levels, then its contrast and
+/// brightness.
+struct TxPalette {
+    lut: [u8; 256 * 4],
+    floor: f32,
+    ceil: f32,
+    contrast: f32,
+    brightness: f32,
+}
+
+/// The least of the palette a TX trace is drawn with, so the line stays
+/// visible on the glass where it lies on the floor (the palettes start at
+/// black).
+const TX_TRACE_MIN_T: f32 = 0.4;
+
+impl TxPalette {
+    fn new(sc: &Scope) -> TxPalette {
+        let s = &sc.settings;
+        let (floor, ceil) = sc.wf_levels_now();
+        TxPalette {
+            lut: s.palette.lut(),
+            floor,
+            ceil,
+            contrast: s.wf_contrast,
+            brightness: s.wf_brightness,
+        }
+    }
+
+    fn t(&self, dbm: f32) -> f32 {
+        let t = (dbm - self.floor) / (self.ceil - self.floor).max(1.0);
+        ((t - 0.5) * self.contrast + 0.5 + self.brightness).clamp(TX_TRACE_MIN_T, 1.0)
+    }
+
+    fn at(&self, dbm: f32) -> Color32 {
+        let i = (self.t(dbm) * 255.0).round() as usize * 4;
+        Color32::from_rgb(self.lut[i], self.lut[i + 1], self.lut[i + 2])
     }
 }
 
@@ -704,14 +786,16 @@ fn paint_skim_spectrum(sc: &Scope, p: &egui::Painter, all: Rect, trace: Rect, cx
             continue;
         }
         let xx = v.x_of(s.hz, all.left(), all.width()).round() + 0.5;
-        // The station the offset bar is on: its tick in the bar's red.
-        let on = sc.skim_on_bar == Some(i);
+        // The station being worked: its tick in the worked green
+        // (decision 102); else the one the offset bar is on, in its red.
+        let mark = skim_mark(sc, i);
+        let on = mark.is_some();
         let col = if on { ink() } else { skim_ink(s, *a) };
         let g = p.layout_no_wrap(s.tag(), font.clone(), col);
         let (w, h) = (g.size().x, g.size().y);
         // A bold tick on the station's frequency (AJ3G: easy to read).
-        let tick = if on {
-            Stroke::new(3.0, BAR_INK)
+        let tick = if let Some(c) = mark {
+            Stroke::new(3.0, c)
         } else {
             Stroke::new(2.0, accent().gamma_multiply(*a))
         };
@@ -723,6 +807,24 @@ fn paint_skim_spectrum(sc: &Scope, p: &egui::Painter, all: Rect, trace: Rect, cx
             Rect::from_min_max(pos2(at.x - 1.0, at.y - w - 2.0), pos2(at.x + h + 1.0, at.y + 1.0));
         p.rect_filled(back, 2.0, ground().gamma_multiply(0.75 * a));
         p.add(egui::epaint::TextShape::new(at, g, col).with_angle(-std::f32::consts::FRAC_PI_2));
+    }
+}
+
+/// The colour a skimmer label `i` is picked out in: the worked green for the
+/// station being worked (decision 102), the bar's red for the one the
+/// offset bar is on, else none. Green wins: the bar keeps its own flag.
+fn skim_mark(sc: &Scope, i: usize) -> Option<Color32> {
+    let s = &sc.skim_shown.get(i)?.0;
+    let worked = sc
+        .dx_mark
+        .as_ref()
+        .is_some_and(|(_, call)| !call.is_empty() && call.eq_ignore_ascii_case(&s.call));
+    if worked {
+        Some(DX_INK)
+    } else if sc.skim_on_bar == Some(i) {
+        Some(BAR_INK)
+    } else {
+        None
     }
 }
 
@@ -769,12 +871,15 @@ fn paint_skim_waterfall(sc: &mut Scope, ui: &egui::Ui, p: &egui::Painter, rect: 
             continue;
         }
         let hot = hover.is_some_and(|q| r.contains(q));
-        // The station the offset bar is on (AJ3G: "make it so I know which
-        // station I am on"): its leader, pointer and box in the bar's red,
-        // the box tinted and its call full white.
-        let on = sc.skim_on_bar == Some(i);
+        // The station being worked, in the worked green (decision 102), or
+        // the one the offset bar is on (AJ3G: "make it so I know which
+        // station I am on") in the bar's red: its leader, pointer and box in
+        // that colour, the box tinted and its call full white.
+        let mark = skim_mark(sc, i);
+        let on = mark.is_some();
+        let mark_c = mark.unwrap_or(BAR_INK);
         let edge_c = if on {
-            BAR_INK
+            mark_c
         } else if hot {
             accent()
         } else {
@@ -785,7 +890,7 @@ fn paint_skim_waterfall(sc: &mut Scope, ui: &egui::Ui, p: &egui::Painter, rect: 
         // dark-edged, from a pointer at the top on the signal's frequency
         // down to the box's middle.
         let lead_c = if on {
-            BAR_INK
+            mark_c
         } else if hot {
             accent()
         } else {
@@ -808,7 +913,7 @@ fn paint_skim_waterfall(sc: &mut Scope, ui: &egui::Ui, p: &egui::Painter, rect: 
         ));
         p.rect_filled(r, 2.0, ground().gamma_multiply(0.85));
         if on {
-            p.rect_filled(r, 2.0, BAR_INK.gamma_multiply(0.3));
+            p.rect_filled(r, 2.0, mark_c.gamma_multiply(0.3));
         }
         p.rect_stroke(
             r,
@@ -983,9 +1088,14 @@ fn paint_tx_waterfall(
     }
 }
 
-/// The station being worked: a thin line in the trace's colour at its
-/// frequency, its call in a flag at the top of the spectrum, as the offset
-/// bar's but quieter. Nothing to grab.
+/// The station being worked (decision 102): as pronounced as the offset
+/// bar, in green where the bar is red (green is the station, red is where we
+/// transmit). A bold line with a dark halo through the spectrum and the
+/// waterfall; on the spectrum a green-edged, green-tinted box with the call,
+/// its audio offset from the dial and its frequency, a row under the bar's
+/// flag so the two never overlap; on the waterfall the call along the foot,
+/// a row over the bar's readout. Drawn before the bar, so a bar on the same
+/// station stays visible down the middle of the green. Nothing to grab.
 fn paint_dx_mark(sc: &Scope, p: &egui::Painter, rect: Rect, cx: &Ctx, spectrum: bool) {
     let Some((hz, call)) = &sc.dx_mark else { return };
     let v = cx.view;
@@ -993,18 +1103,33 @@ fn paint_dx_mark(sc: &Scope, p: &egui::Painter, rect: Rect, cx: &Ctx, spectrum: 
     if !(rect.left()..=rect.right()).contains(&xx) {
         return;
     }
-    let ink_dx = accent();
-    p.vline(xx.round() + 0.5, rect.y_range(), Stroke::new(1.0, ink_dx.gamma_multiply(0.7)));
-    if !spectrum || call.is_empty() {
+    let lx = xx.round() + 0.5;
+    p.vline(lx, rect.y_range(), Stroke::new(6.0, ground().gamma_multiply(0.75)));
+    p.vline(lx, rect.y_range(), Stroke::new(3.0, DX_INK));
+    if call.is_empty() {
         return;
     }
-    let g = p.layout_no_wrap(call.clone(), mono(10.0), ink_dx);
+    let text = if spectrum {
+        let off = OffsetBar { hz: *hz }.offset_hz(cx.rig.rx_hz, cx.rig.mode.is_lower());
+        format!("{call} · {} · {}", fmt_offset(off), fmt_tenth(cx.map.shown(*hz)))
+    } else {
+        call.clone()
+    };
+    let g = p.layout_no_wrap(text, mono(10.5), ink());
     let size = g.size() + vec2(8.0, 4.0);
-    let left = if xx + 4.0 + size.x > rect.right() { xx - 4.0 - size.x } else { xx + 4.0 };
-    let r = Rect::from_min_size(pos2(left, rect.top() + 56.0), size);
-    p.rect_filled(r, 2.0, ground().gamma_multiply(0.85));
-    p.rect_stroke(r, 2.0, Stroke::new(1.0, ink_dx.gamma_multiply(0.6)), egui::StrokeKind::Inside);
-    p.galley(pos2(r.left() + 4.0, r.top() + 2.0), g, ink_dx);
+    // A row clear of the offset bar's flag (spectrum, at 38 points down) or
+    // its readout (waterfall foot), both the same height as this box.
+    let y = if spectrum {
+        rect.top() + 38.0 + size.y + 4.0
+    } else {
+        rect.bottom() - 2.0 * size.y - 8.0
+    };
+    let left = if xx + 5.0 + size.x > rect.right() { xx - 5.0 - size.x } else { xx + 5.0 };
+    let r = Rect::from_min_size(pos2(left, y), size);
+    p.rect_filled(r, 2.0, ground().gamma_multiply(0.9));
+    p.rect_filled(r, 2.0, DX_INK.gamma_multiply(0.3));
+    p.rect_stroke(r, 2.0, Stroke::new(2.0, DX_INK), egui::StrokeKind::Inside);
+    p.galley(pos2(r.left() + 4.0, r.top() + 2.0), g, ink());
 }
 
 /// The 3D surface: the receding floor, the GPU surface, and the receiver on
@@ -1412,8 +1537,8 @@ fn paint_waterfall(
     // The skimmer's labels and the offset bar over the slot lines and the
     // ticks, so the lines pass behind the labels as the rows scroll (AJ3G).
     paint_skim_waterfall(sc, ui, &p, rect, cx);
-    paint_offset(sc, &p, rect, cx, false);
     paint_dx_mark(sc, &p, rect, cx, false);
+    paint_offset(sc, &p, rect, cx, false);
 
     // The colour bar, with the levels it runs between.
     let bar = Rect::from_min_max(
@@ -1992,6 +2117,13 @@ pub fn fft_label(n: usize) -> String {
 impl Scope {
     /// The waterfall's levels: its own, following the noise, or the
     /// spectrum's.
+    /// The waterfall's levels as they stand, without stepping auto levels
+    /// on (that is [`Scope::wf_range`]'s, once a frame).
+    pub(super) fn wf_levels_now(&self) -> (f32, f32) {
+        let set = (self.settings.floor_dbm, self.settings.ceil_dbm);
+        if self.settings.wf_auto { self.wf_levels.unwrap_or(set) } else { set }
+    }
+
     pub(super) fn wf_range(&mut self) -> (f32, f32) {
         if !self.settings.wf_auto {
             return (self.settings.floor_dbm, self.settings.ceil_dbm);
@@ -2024,6 +2156,46 @@ impl Scope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hover_reads_the_audio_offset_inside_the_passband_only() {
+        let usb = ScopeRig {
+            rx_hz: 14_095_600.0,
+            mode: sdr::Mode::Usb,
+            passband: (200.0, 3000.0),
+            transmitting: false,
+            on_air: false,
+        };
+        assert_eq!(hover_af(14_097_150.0, &usb), Some(1550.0));
+        assert_eq!(hover_af(14_095_700.0, &usb), None, "below the passband");
+        assert_eq!(hover_af(14_099_000.0, &usb), None, "above it");
+        // LSB: the audio rises as the signal goes down, as DECODE has it.
+        let lsb = ScopeRig {
+            rx_hz: 7_175_000.0,
+            mode: sdr::Mode::Lsb,
+            passband: (-2900.0, -100.0),
+            ..usb
+        };
+        assert_eq!(hover_af(7_173_500.0, &lsb), Some(1500.0));
+        // No dial known: no offset.
+        assert_eq!(hover_af(1550.0, &ScopeRig { rx_hz: 0.0, ..usb }), None);
+    }
+
+    #[test]
+    fn the_tx_trace_takes_the_waterfalls_palette_by_level() {
+        let tp = TxPalette {
+            lut: super::super::palette::Palette::Icom.lut(),
+            floor: -120.0,
+            ceil: -20.0,
+            contrast: 1.0,
+            brightness: 0.0,
+        };
+        // Full scale: the palette's top (Icom's red); the floor is lifted
+        // so the line still shows.
+        assert_eq!(tp.at(-20.0), Color32::from_rgb(230, 20, 20));
+        assert_eq!(tp.t(-200.0), TX_TRACE_MIN_T);
+        assert!((tp.t(-50.0) - 0.7).abs() < 1e-6);
+    }
 
     #[test]
     fn the_passband_width_reads_as_a_filter() {

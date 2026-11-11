@@ -898,6 +898,14 @@ impl Qso {
         self.dx.is_some() && !matches!(self.step, Step::Idle | Step::Confirming)
     }
 
+    /// True while a contact is actually in progress (decision 104): a
+    /// station in hand, the exchange going (or waiting for their CQ), and
+    /// not yet logged. False once it is complete and logged, timed out, out
+    /// of calls or stopped.
+    pub(crate) fn in_progress(&self) -> bool {
+        self.busy() && !self.logged
+    }
+
     /// The next queued station to call, once free. Stations not heard for
     /// 10 minutes, and any `dupe` says, are skipped with a note.
     pub(crate) fn take_next_queued(&mut self, now_utc: i64, dupe: impl Fn(&str) -> bool) -> Option<Queued> {
@@ -959,6 +967,49 @@ mod tests {
         q.note_tx_sent(75);
         assert_eq!(q.step(), Step::Confirming);
         assert!(q.take_completed().is_none(), "logged once");
+    }
+
+    #[test]
+    fn a_qso_is_in_progress_only_until_it_is_logged_or_given_up() {
+        // Complete: over once their RR73 logs it, though our 73 still goes.
+        let mut q = Qso::new(cfg());
+        assert!(!q.in_progress());
+        q.start_qso("JA1ABC", None, -14, false, 0);
+        assert!(q.in_progress());
+        q.note_tx_sent(15);
+        q.on_rx(&[d("AJ3G JA1ABC -10")], 30);
+        q.note_tx_sent(45);
+        assert!(q.in_progress());
+        q.on_rx(&[d("AJ3G JA1ABC RR73")], 60);
+        assert!(!q.in_progress(), "logged");
+        assert_eq!(q.dx_call(), Some("JA1ABC"), "the QSO box keeps the call");
+        // A new station picked: in progress again.
+        q.start_qso("K1ABC", None, -5, false, 90);
+        assert!(q.in_progress());
+        // Out of calls.
+        let mut q = Qso::new(Config { max_tx_repeats: 3, ..cfg() });
+        q.start_qso("K1ABC", None, -5, false, 0);
+        for k in 0..3 {
+            q.note_tx_sent(15 * k);
+        }
+        assert!(!q.in_progress(), "no reply after 3 calls");
+        // The watchdog.
+        let mut q = Qso::new(Config { tx_watchdog_min: 1, ..cfg() });
+        q.start_qso("K1ABC", None, -5, false, 100);
+        q.tick(100);
+        assert!(q.tick(161));
+        assert!(!q.in_progress(), "timed out");
+        // Waiting for their CQ, and given up on.
+        let mut q = Qso::new(cfg());
+        q.start_qso("K1ABC", None, -5, true, 0);
+        assert!(q.in_progress());
+        q.tick(WAIT_CQ_S + 1);
+        assert!(!q.in_progress());
+        // STOP QSO.
+        let mut q = Qso::new(cfg());
+        q.start_qso("K1ABC", None, -5, false, 0);
+        q.stop();
+        assert!(!q.in_progress());
     }
 
     #[test]

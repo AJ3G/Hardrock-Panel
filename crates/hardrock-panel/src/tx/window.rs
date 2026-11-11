@@ -1008,7 +1008,7 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, sp
                     ui.label(mono(g));
                 }
                 // Where we copy them: the offset alone (AJ3G, 11 Nov 2026).
-                if let Some((_, hz, _)) = tx.dx_mark() {
+                if let Some((_, hz, _)) = tx.dx_copied() {
                     ui.label(mono(format!("{hz:.0} Hz")))
                         .on_hover_text("The audio offset you copy them at, from their latest decode");
                 }
