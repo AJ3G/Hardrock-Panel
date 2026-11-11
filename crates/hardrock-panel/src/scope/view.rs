@@ -66,10 +66,12 @@ impl View {
 }
 
 /// The narrowest the view can be zoomed to: 1/4096 of the span (a few bins at
-/// the FFT sizes offered), but never under 1.5 kHz, which still shows a whole
-/// SSB passband.
+/// the FFT sizes offered), but never under 200 Hz, WSPR's whole sub-band.
+/// It was 1.5 kHz, a whole SSB passband, which left WSPR's signals a few
+/// pixels wide (AJ3G, 11 Nov 2026); the zoom FFT's 1 Hz bins still draw a
+/// WSPR signal several bins wide at 200 Hz.
 pub fn min_width(span: Span) -> f64 {
-    (span.width / 4096.0).max(1500.0).min(span.width)
+    (span.width / 4096.0).max(200.0).min(span.width)
 }
 
 /// The view: what was asked for (`None` is the whole span), kept inside the
@@ -316,14 +318,16 @@ mod tests {
         let v = view(SPAN, Some(View { lo: 14_169_000.0, hi: 14_179_000.0 }));
         assert_eq!(v.hi, SPAN.hi());
         let v = view(SPAN, Some(View { lo: 14_074_000.0, hi: 14_074_010.0 }));
-        assert_eq!(v.width(), 1500.0);
+        assert_eq!(v.width(), 200.0);
         // Wider than the span: the span.
         let v = view(SPAN, Some(View { lo: 13e6, hi: 15e6 }));
         assert_eq!(v, view(SPAN, None));
         // A 6 MHz span zooms to 1/4096 of itself.
         let wide = Span { center: 10e6, width: 6_144_000.0 };
         assert_eq!(min_width(wide), 1500.0);
-        assert_eq!(min_width(Span { center: 10e6, width: 1000.0 }), 1000.0);
+        assert_eq!(min_width(SPAN), 200.0);
+        assert_eq!(min_width(Span { center: 10e6, width: 1000.0 }), 200.0);
+        assert_eq!(min_width(Span { center: 10e6, width: 150.0 }), 150.0);
     }
 
     #[test]
