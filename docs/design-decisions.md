@@ -942,3 +942,36 @@ AJ3G found that NB and NR wouldn't switch from the panel, though the DUO's own N
 ## 77. WSPR stops for heat only over 155 °F (11 Nov 2026)
 
 The WSPR temperature stop (interlock #12) used the 120 °F (48.8 °C) warning colour, so beacons stopped at 49 °C. AJ3G: "Should not trip until over 155F"; SDRoxide never stopped for heat. A beacon now isn't started, and one going out stops, only over 155 °F (68.3 °C), a step below the HR500's own 70 °C (158 °F) trip. The yellow from 120 °F stays as a warning colour only.
+
+## 87. TX: LEVEL changes the drive mid-over (11 Nov 2026)
+
+The FT8 and WSPR LEVEL sliders set the over's gain once, at its start; moving one mid-over did nothing until the next over, while the interlocks already judged the drive at the slider's new place. Now the over's audio follows the slider at once, as TX TUNE's tone follows the Tune slider: `main.rs` `keep_tune()` checks the TUNE interlocks at the mode's level and, only when they pass, calls `Tx::set_level()`, which sets the player's gain to `audio::gain_for(level, ceiling)`. The player ramps to a new level over 5 ms so a move doesn't click or splatter. Interlock #6 is amended to match.
+
+TX TUNE's path was checked end to end and is live: the Tune slider writes `saved.drive`; `keep_tune()`, while TUNE's tone is keyed, sets the tone's gain every frame to `gain_for(drive, audio_ceiling)` (amplitude the square root of the power share, within the DUO's 0.24 ceiling) and judges `tune_must_stop()` at `planned_watts(drive)`, the same value; the tone ramps over 5 ms. One difference from the TX window: TUNE sets the tone's gain before that frame's check, so a slider raised past the limit sounds for at most a frame before the unkey; `main.rs` was left as it was.
+
+## 88. TX: WSPR's offset on the scope's bar (11 Nov 2026)
+
+The scope's offset bar set only FT8's audio. In WSPR (with the TX window open):
+
+- Entering WSPR the bar goes to the beacon's offset: 1500 Hz, the sub-band's centre, with ROAM on; the offset set with ROAM off.
+- Dragging it sets the WSPR offset, clamped to 1400 to 1600 Hz, and turns ROAM off. A drag during a beacon applies from the next beacon; the one on the air keeps its offset (unlike FT8's bar, which can't move while transmitting, #9, nothing on the air changes).
+- With ROAM on the bar moves to each beacon's chosen offset, and stays at the last one between beacons.
+- The bar is an offset from the receiver's dial, the beacon's audio an offset from the transmit dial; in split the two are converted (`wspr_bar_from_audio`, `wspr_audio_from_bar`).
+- Entering FT8 the bar is placed at FT8's offset, never read: before, FT8 on MANUAL took up WSPR's bar position. With the TX window closed the bar is the operator's measuring cursor and is neither read nor placed (`Env::bar_ours`).
+- The AUDIO box's range is now 1400 to 1600 Hz too (was 1410 to 1590). No change was needed in `scope/`: the bar already reports drags and takes a position.
+
+## 89. TX: the beacon's RF under its message (11 Nov 2026)
+
+Under the WSPR message the TX window shows where the beacon lands, e.g. `TX 10.140 200 MHz (10 140.200 kHz)`: the transmit dial (VFO B in split, else the receive VFO, `scope::txsig::tx_dial`), plus the audio offset on USB (minus on LSB), plus the transverter offset set in the radio window. The offset is the beacon's on the air, else the one set, else with ROAM the last one sent; before ROAM has sent one it reads `TX ≈ … · ROAM picks each beacon's offset` from 1500 Hz.
+
+## 90. TX: WSPR's lists as tables, sorted by their headings (11 Nov 2026)
+
+HEARD and HEARD ME were lines of monospace text under proportional headings, so the columns drifted. Each is now a table drawn cell by cell in fixed-width columns (each sized in monospace characters for its figures or its heading with the sort arrow), headings in the same columns as the data; egui_extras isn't a dependency, so it is drawn directly. HEARD gains a MHz column, the decode's RF (dial plus its audio offset), e.g. `10.140 123`. The UTC, SNR, CALL and KM headings are clickable (accent colour, pointing hand, underlined under the pointer) and sort the table: newest, strongest, farthest first, CALL A to Z; a second click reverses it, and ▼ or ▲ shows which. Rows without a figure (no distance) go last either way. Each table's sort is saved in the settings. Sorted by UTC the rows keep their 2 minute cycle headings; sorted by anything else they are one list. A table wider than its column scrolls sideways, headings with it.
+
+## 91. TX: ENABLE TX and WSPR's TRANSMIT OFF go together (11 Nov 2026)
+
+In WSPR, turning ENABLE TX off (its button, HALT TX, an over stopped by an interlock, or a mode change) sets TRANSMIT to OFF, keeping the share it had (`wspr_pct_last`, saved); turning ENABLE TX on brings that share back (20 % if none was kept). Picking OFF turns ENABLE TX off. Picking a share doesn't turn ENABLE TX on: that stays the operator's own act.
+
+## 92. TX: WSPR's lists show the band the panel is on (11 Nov 2026)
+
+A band change cleared HEARD with the FT8 list. Now WSPR's reports are kept across band changes (up to 400), and HEARD and HEARD ME show only those on the band of the true RF the panel listens on (transverter included); the heading says the band and how many are kept from other bands. When the band isn't known both show everything. CLEAR still empties both on every band. The FT8 list is still cleared on a band change.

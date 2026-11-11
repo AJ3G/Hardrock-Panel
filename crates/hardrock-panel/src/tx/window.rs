@@ -6,7 +6,9 @@
 use eframe::egui::{self, Color32, RichText, Sense, vec2};
 use rigcat::RigLink;
 
-use super::{FreqMode, ListRow, Sort, Tx, TxMode, TxSettings, sched, wave};
+use super::{
+    FreqMode, ListRow, Sort, Tx, TxMode, TxSettings, WsprKey, WsprRow, WsprSort, sched, wave,
+};
 use crate::globe::field::Reception;
 use crate::globe::wspr::WsprReport;
 use crate::station::{self, StationSettings};
@@ -39,6 +41,10 @@ pub(crate) struct Ctx<'a> {
     /// Who heard the station, as GLOBE fetched it: PSK Reporter's reports
     /// and WSPR HEARD ME's.
     pub heard_me: (&'a [Reception], &'a [WsprReport]),
+    /// The true RF the panel listens on, Hz: for the WSPR lists' band.
+    pub heard_hz: Option<f64>,
+    /// The transverter's offset the panel knows of, Hz (0 without one).
+    pub xvtr_hz: f64,
 }
 
 pub(crate) fn window(
@@ -133,8 +139,7 @@ fn body(ui: &mut egui::Ui, popped: bool, tx: &mut Tx, s: &mut TxSettings, c: &Ct
             .clicked()
         {
             if tx.enabled {
-                tx.enabled = false;
-                tx.note = None;
+                tx.disable(s);
             } else {
                 tx.enable(s);
             }
@@ -312,7 +317,7 @@ fn slot_bar(ui: &mut egui::Ui, tx: &Tx, s: &TxSettings, c: &Ctx<'_>) {
 
 fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, out: &mut WindowOut) {
     if s.mode == TxMode::Wspr {
-        wspr_list(ui, tx, c);
+        wspr_list(ui, tx, s, c);
         return;
     }
     ui.horizontal_wrapped(|ui| {
@@ -463,100 +468,350 @@ fn heard_me(
     v
 }
 
-/// WSPR's list (AJ3G, 11 Nov 2026): who our decoder heard, and who heard
-/// our beacon, newest 2 min cycle first. Nothing to REPLY to.
-fn wspr_list(ui: &mut egui::Ui, tx: &mut Tx, c: &Ctx<'_>) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("WSPR").strong().color(theme::TEXT_STRONG()));
-        if chrome::chip(ui, false, "CLEAR").clicked() {
-            tx.wspr_rows.clear();
-            tx.wspr_cleared = c.now;
-        }
-    });
-    let me = heard_me(c.heard_me.0, c.heard_me.1, c.station.pos(), tx.wspr_cleared);
-    let head = |ui: &mut egui::Ui, t: &str| ui.label(RichText::new(t).size(10.5).color(theme::CYAN_DIM()));
-    let cycle_head = |ui: &mut egui::Ui, t: i64, n: usize| {
-        ui.label(RichText::new(format!("{} · {n}", crate::decode::hms(t as f64))).size(10.5).color(theme::CYAN_DIM()));
+/// A column of a WSPR table: its heading, its width in characters, whether
+/// its figures sit to the right, and the sort its heading sets, if any.
+struct Col {
+    head: &'static str,
+    chars: usize,
+    right: bool,
+    key: Option<WsprKey>,
+}
+
+const fn col(head: &'static str, chars: usize, right: bool, key: Option<WsprKey>) -> Col {
+    Col { head, chars, right, key }
+}
+
+/// HEARD's columns: what our decoder heard (decision 90).
+const HEARD_COLS: [Col; 10] = [
+    col("UTC", 4, false, Some(WsprKey::Utc)),
+    col("SNR", 3, true, Some(WsprKey::Snr)),
+    col("DRIFT", 3, true, None),
+    col("MHz", 11, true, None),
+    col("CALL", 10, false, Some(WsprKey::Call)),
+    col("GRID", 6, false, None),
+    col("DBM", 3, true, None),
+    col("KM", 5, true, Some(WsprKey::Km)),
+    col("BRG", 4, true, None),
+    col("HZ", 4, true, None),
+];
+
+/// HEARD ME's columns: who heard our beacon.
+const ME_COLS: [Col; 6] = [
+    col("UTC", 4, false, Some(WsprKey::Utc)),
+    col("CALL", 10, false, Some(WsprKey::Call)),
+    col("SNR", 3, true, Some(WsprKey::Snr)),
+    col("KM", 5, true, Some(WsprKey::Km)),
+    col("MHz", 11, true, None),
+    col("FROM", 12, false, None),
+];
+
+/// What the WSPR lists sort by.
+trait WsprCols {
+    fn utc(&self) -> f64;
+    fn snr(&self) -> Option<f32>;
+    fn call(&self) -> &str;
+    fn km(&self) -> Option<f64>;
+    fn rf_hz(&self) -> f64;
+}
+
+impl WsprCols for WsprRow {
+    fn utc(&self) -> f64 {
+        self.h.slot_utc as f64
+    }
+    fn snr(&self) -> Option<f32> {
+        Some(self.h.snr_db)
+    }
+    fn call(&self) -> &str {
+        &self.h.call
+    }
+    fn km(&self) -> Option<f64> {
+        self.path.map(|p| p.1)
+    }
+    fn rf_hz(&self) -> f64 {
+        self.h.rf_hz
+    }
+}
+
+impl WsprCols for HeardMe {
+    fn utc(&self) -> f64 {
+        self.utc
+    }
+    fn snr(&self) -> Option<f32> {
+        self.snr
+    }
+    fn call(&self) -> &str {
+        &self.call
+    }
+    fn km(&self) -> Option<f64> {
+        self.km
+    }
+    fn rf_hz(&self) -> f64 {
+        self.rf_hz
+    }
+}
+
+/// The rows on `band` (all of them when the band isn't known, and any
+/// without a frequency), sorted as `sort` says: rows with no figure for
+/// the column go last either way (decisions 90, 92).
+fn shown_rows<'a, T: WsprCols + 'a>(
+    rows: impl Iterator<Item = &'a T>,
+    band: Option<&str>,
+    sort: WsprSort,
+) -> Vec<&'a T> {
+    use std::cmp::Ordering;
+    let mut v: Vec<&T> = rows
+        .filter(|r| {
+            band.is_none_or(|b| r.rf_hz() <= 0.0 || crate::logbook::adif_band(r.rf_hz()) == b)
+        })
+        .collect();
+    let num = |a: Option<f64>, b: Option<f64>| match (a, b) {
+        (Some(a), Some(b)) if sort.desc => b.total_cmp(&a),
+        (Some(a), Some(b)) => a.total_cmp(&b),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
     };
-    let row_h = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
-    let half = ((ui.available_height() - 4.0 * row_h) / 2.0).max(row_h);
-
-    caption(ui, "HEARD");
-    head(ui, "UTC   SNR DRIFT CALL       GRID   DBM     KM  BRG   HZ");
-    egui::ScrollArea::vertical().id_salt("tx-wspr-heard").auto_shrink([false, false]).max_height(half).show(ui, |ui| {
-        let mut i = 0;
-        while i < tx.wspr_rows.len() {
-            let t = tx.wspr_rows[i].h.slot_utc;
-            let n = tx.wspr_rows.iter().skip(i).take_while(|r| r.h.slot_utc == t).count();
-            cycle_head(ui, t, n);
-            for r in tx.wspr_rows.iter().skip(i).take(n) {
-                ui.label(mono(wspr_heard_line(r)).color(theme::TEXT()));
-            }
-            i += n;
-        }
-        if tx.wspr_rows.is_empty() {
-            ui.label(RichText::new("Nothing heard yet: DECODE runs WSPR while this window is open.").size(11.5).color(theme::TEXT()));
+    v.sort_by(|a, b| match sort.key {
+        WsprKey::Utc => num(Some(a.utc()), Some(b.utc())),
+        WsprKey::Snr => num(a.snr().map(f64::from), b.snr().map(f64::from)),
+        WsprKey::Km => num(a.km(), b.km()),
+        WsprKey::Call => {
+            let o = a.call().cmp(b.call());
+            if sort.desc { o.reverse() } else { o }
         }
     });
+    v
+}
 
-    caption(ui, "HEARD ME");
-    head(ui, "UTC   CALL        SNR     KM  MHZ         FROM");
-    egui::ScrollArea::vertical().id_salt("tx-wspr-me").auto_shrink([false, false]).show(ui, |ui| {
-        let cycle = |t: f64| sched::slot_start(t, sched::WSPR_PERIOD);
-        let mut i = 0;
-        while i < me.len() {
-            let t = cycle(me[i].utc);
-            let n = me.iter().skip(i).take_while(|m| cycle(m.utc) == t).count();
-            cycle_head(ui, t, n);
-            for m in me.iter().skip(i).take(n) {
-                ui.label(mono(heard_me_line(m)).color(theme::TEXT()));
+/// The width of each column, px: its figures or its heading with the sort
+/// arrow, whichever is wider, and a space.
+fn col_widths(ui: &egui::Ui, cols: &[Col]) -> Vec<f32> {
+    let cw = ui.fonts_mut(|f| f.glyph_width(&egui::FontId::monospace(12.0), '0'));
+    cols.iter().map(|c| (c.chars.max(c.head.chars().count() + 2) + 1) as f32 * cw).collect()
+}
+
+/// A table's headings, in its columns. A sortable one is in the accent
+/// colour and underlined under the pointer; the sorted one is bright, with
+/// ▼ or ▲. A click sorts by it, a second the other way.
+fn table_head(ui: &mut egui::Ui, salt: &str, cols: &[Col], widths: &[f32], sort: &mut WsprSort) {
+    let h = 18.0;
+    let total: f32 = widths.iter().sum();
+    let (rect, _) = ui.allocate_exact_size(vec2(total, h), Sense::hover());
+    let font = egui::FontId::monospace(12.0);
+    let mut x = rect.left();
+    for (i, (c, &w)) in cols.iter().zip(widths).enumerate() {
+        let cell = egui::Rect::from_min_size(egui::pos2(x, rect.top()), vec2(w, h));
+        x += w;
+        let sorted = c.key.is_some() && c.key == Some(sort.key);
+        let mut ink = theme::CYAN_DIM();
+        let mut hovered = false;
+        if let Some(k) = c.key {
+            let resp = ui
+                .interact(cell, ui.id().with((salt, i)), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("Sort by this column; click again for the other way");
+            if resp.clicked() {
+                sort.click(k);
             }
-            i += n;
+            hovered = resp.hovered();
+            ink = if sorted || hovered { theme::TEXT_STRONG() } else { theme::CYAN() };
         }
-        if me.is_empty() {
-            ui.label(
-                RichText::new(
-                    "No reports of your beacon yet. GLOBE fetches them while it is open: from wspr.live or \
-                     WSPRnet with its WSPR HEARD ME on, and from PSK Reporter with its PSK REPORTER on. The \
-                     sites take a few minutes.",
-                )
-                .size(11.5)
-                .color(theme::TEXT()),
+        let arrow = if !sorted {
+            ""
+        } else if sort.desc {
+            "▼"
+        } else {
+            "▲"
+        };
+        let (text, pos, align) = if c.right {
+            let t =
+                if arrow.is_empty() { c.head.to_string() } else { format!("{arrow} {}", c.head) };
+            (
+                t,
+                cell.right_center() - vec2(ui.fonts_mut(|f| f.glyph_width(&font, '0')), 0.0),
+                egui::Align2::RIGHT_CENTER,
+            )
+        } else {
+            let t =
+                if arrow.is_empty() { c.head.to_string() } else { format!("{} {arrow}", c.head) };
+            (t, cell.left_center(), egui::Align2::LEFT_CENTER)
+        };
+        let r = ui.painter().text(pos, align, text, font.clone(), ink);
+        if hovered {
+            ui.painter().hline(r.x_range(), r.bottom(), egui::Stroke::new(1.0, ink));
+        }
+    }
+}
+
+/// A row of a table: each cell in its column, figures to the right.
+fn table_row(ui: &mut egui::Ui, cols: &[Col], widths: &[f32], cells: &[String], ink: Color32) {
+    let h = ui.fonts_mut(|f| f.row_height(&egui::FontId::monospace(12.0))) + 2.0;
+    let total: f32 = widths.iter().sum();
+    let (rect, _) = ui.allocate_exact_size(vec2(total, h), Sense::hover());
+    let font = egui::FontId::monospace(12.0);
+    let cw = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+    let p = ui.painter();
+    let mut x = rect.left();
+    for ((c, &w), t) in cols.iter().zip(widths).zip(cells) {
+        let cell = egui::Rect::from_min_size(egui::pos2(x, rect.top()), vec2(w, h));
+        x += w;
+        if c.right {
+            p.text(
+                cell.right_center() - vec2(cw, 0.0),
+                egui::Align2::RIGHT_CENTER,
+                t,
+                font.clone(),
+                ink,
             );
+        } else {
+            p.text(cell.left_center(), egui::Align2::LEFT_CENTER, t, font.clone(), ink);
         }
+    }
+}
+
+/// A WSPR table: its headings, then its rows scrolling under them, the two
+/// scrolling sideways together when the column is narrower than the table.
+/// By UTC the rows come in their 2 minute cycles; by anything else, one
+/// list.
+#[allow(clippy::too_many_arguments)]
+fn wspr_table<T: WsprCols>(
+    ui: &mut egui::Ui,
+    salt: &str,
+    cols: &[Col],
+    rows: &[&T],
+    sort: &mut WsprSort,
+    height: Option<f32>,
+    cells: impl Fn(&T) -> Vec<String>,
+    empty: &str,
+) {
+    let widths = col_widths(ui, cols);
+    let total: f32 = widths.iter().sum();
+    egui::ScrollArea::horizontal().id_salt((salt, "x")).auto_shrink([false, true]).show(ui, |ui| {
+        let w = total.max(ui.available_width());
+        ui.set_min_width(w);
+        table_head(ui, salt, cols, &widths, sort);
+        let mut inner =
+            egui::ScrollArea::vertical().id_salt((salt, "y")).auto_shrink([false, false]);
+        if let Some(h) = height {
+            inner = inner.max_height(h);
+        }
+        inner.show(ui, |ui| {
+            ui.set_min_width(w);
+            let cycle = |t: f64| sched::slot_start(t, sched::WSPR_PERIOD);
+            let mut i = 0;
+            while i < rows.len() {
+                let n = if sort.key == WsprKey::Utc {
+                    let t = cycle(rows[i].utc());
+                    let n = rows[i..].iter().take_while(|r| cycle(r.utc()) == t).count();
+                    ui.label(
+                        RichText::new(format!("{} · {n}", crate::decode::hms(t as f64)))
+                            .size(10.5)
+                            .color(theme::CYAN_DIM()),
+                    );
+                    n
+                } else {
+                    rows.len()
+                };
+                for r in &rows[i..i + n] {
+                    table_row(ui, cols, &widths, &cells(r), theme::TEXT());
+                }
+                i += n;
+            }
+            if rows.is_empty() {
+                ui.label(RichText::new(empty).size(11.5).color(theme::TEXT()));
+            }
+        });
     });
 }
 
-fn wspr_heard_line(r: &super::WsprRow) -> String {
+/// WSPR's list (AJ3G, 11 Nov 2026): who our decoder heard, and who heard
+/// our beacon, as tables sorted by a click on a heading (decision 90), on
+/// the band the panel is on (decision 92). Nothing to REPLY to.
+fn wspr_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
+    let band = c.heard_hz.map(crate::logbook::adif_band).filter(|b| !b.is_empty());
+    let me = heard_me(c.heard_me.0, c.heard_me.1, c.station.pos(), tx.wspr_cleared);
+    let heard = shown_rows(tx.wspr_rows.iter(), band, s.wspr_heard_sort);
+    let me_shown = shown_rows(me.iter(), band, s.wspr_me_sort);
+    let elsewhere = tx.wspr_rows.len() - heard.len() + me.len() - me_shown.len();
+    let mut clear = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("WSPR").strong().color(theme::TEXT_STRONG()));
+        if let Some(b) = band {
+            ui.label(RichText::new(b).size(11.0).color(theme::TEXT())).on_hover_text(
+                "The lists show this band only; what was heard on other bands is kept for when you go back",
+            );
+        }
+        if elsewhere > 0 {
+            ui.label(RichText::new(format!("· {elsewhere} on other bands")).size(10.5).color(theme::CYAN_DIM()));
+        }
+        clear = chrome::chip(ui, false, "CLEAR").on_hover_text("Empty both lists, on every band").clicked();
+    });
+    let row_h = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
+    let half = ((ui.available_height() - 6.0 * row_h) / 2.0).max(row_h);
+
+    caption(ui, "HEARD");
+    wspr_table(
+        ui,
+        "tx-wspr-heard",
+        &HEARD_COLS,
+        &heard,
+        &mut s.wspr_heard_sort,
+        Some(half),
+        |r| wspr_heard_cells(r).to_vec(),
+        "Nothing heard on this band yet: DECODE runs WSPR while this window is open.",
+    );
+    caption(ui, "HEARD ME");
+    wspr_table(
+        ui,
+        "tx-wspr-me",
+        &ME_COLS,
+        &me_shown,
+        &mut s.wspr_me_sort,
+        None,
+        |m| heard_me_cells(m).to_vec(),
+        "No reports of your beacon on this band yet. GLOBE fetches them while it is open: from wspr.live \
+         or WSPRnet with its WSPR HEARD ME on, and from PSK Reporter with its PSK REPORTER on. The sites \
+         take a few minutes.",
+    );
+    if clear {
+        tx.wspr_rows.clear();
+        tx.wspr_cleared = c.now;
+    }
+}
+
+/// HEARD's cells, in [`HEARD_COLS`]' order.
+fn wspr_heard_cells(r: &WsprRow) -> [String; 10] {
     let h = &r.h;
     let t = crate::decode::hms(h.slot_utc as f64).replace(':', "");
     let (km, brg) = match r.path {
-        Some((b, km)) => (format!("{km:5.0}"), format!("{b:3.0}°")),
-        None => ("    –".into(), "  –".into()),
+        Some((b, km)) => (format!("{km:.0}"), format!("{b:.0}°")),
+        None => ("–".into(), "–".into()),
     };
-    format!(
-        "{} {:+4.0} {:+5.0} {:<10} {:<6} {:>3} {km} {brg} {:4.0}",
-        t.get(..4).unwrap_or(&t),
-        h.snr_db,
-        h.drift_hz,
-        h.call,
-        if h.grid.is_empty() { "–" } else { &h.grid },
-        h.dbm,
-        h.audio_hz
-    )
+    [
+        t.get(..4).unwrap_or(&t).to_string(),
+        format!("{:+.0}", h.snr_db),
+        format!("{:+.0}", h.drift_hz),
+        if h.rf_hz > 0.0 { super::mhz_cell(h.rf_hz) } else { "–".into() },
+        h.call.clone(),
+        if h.grid.is_empty() { "–".into() } else { h.grid.clone() },
+        h.dbm.to_string(),
+        km,
+        brg,
+        format!("{:.0}", h.audio_hz),
+    ]
 }
 
-fn heard_me_line(m: &HeardMe) -> String {
+/// HEARD ME's cells, in [`ME_COLS`]' order.
+fn heard_me_cells(m: &HeardMe) -> [String; 6] {
     let t = crate::decode::hms(m.utc).replace(':', "");
-    format!(
-        "{} {:<10} {:>4} {:>6} {:<11.6} {}",
-        t.get(..4).unwrap_or(&t),
-        m.call,
+    [
+        t.get(..4).unwrap_or(&t).to_string(),
+        m.call.clone(),
         m.snr.map_or("–".into(), |s| format!("{s:+.0}")),
         m.km.map_or("–".into(), |k| format!("{k:.0}")),
-        m.rf_hz / 1e6,
-        m.site
-    )
+        if m.rf_hz > 0.0 { super::mhz_cell(m.rf_hz) } else { "–".into() },
+        m.site.to_string(),
+    ]
 }
 
 enum Act {
@@ -978,6 +1233,31 @@ fn wspr_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
                 .on_hover_text("The audio offset of the beacon on the air, or of the last one with ROAM on");
         }
     });
+    // Where it lands (decision 89): the transmit dial, the offset, and any
+    // transverter.
+    let on_air = tx.over().filter(|o| o.1 == TxMode::Wspr).map(|o| o.2);
+    let roam_unknown = on_air.is_none() && s.wspr_roam && tx.wspr_offset(s).is_none();
+    let audio = on_air.unwrap_or_else(|| tx.wspr_bar_audio(s));
+    match c.rig.and_then(|r| super::tx_rf_hz(r, audio as f64, c.xvtr_hz)) {
+        Some(rf) => {
+            let (pre, post) = if roam_unknown {
+                ("TX ≈ ", " · ROAM picks each beacon's offset")
+            } else {
+                ("TX ", "")
+            };
+            ui.label(mono(format!("{pre}{}{post}", super::rf_text(rf))).color(tx_ink())).on_hover_text(
+                "Your beacon's RF: the transmit dial (VFO B in split), plus the audio offset (minus on LSB), \
+                 plus the transverter's offset",
+            );
+        }
+        None => {
+            ui.label(
+                RichText::new("TX RF: the radio's dial hasn't been read.")
+                    .size(11.0)
+                    .color(theme::TEXT()),
+            );
+        }
+    }
     if !ok {
         ui.label(
             RichText::new("Type 1 only: a plain callsign and a 4-character grid. A compound call can't be sent.")
@@ -989,8 +1269,13 @@ fn wspr_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
     ui.horizontal_wrapped(|ui| {
         caption(ui, "TRANSMIT");
         for (p, l) in [(0u8, "OFF"), (10, "10 %"), (20, "20 %"), (33, "33 %"), (50, "50 %")] {
-            if chrome::chip(ui, s.wspr_pct == p, l).clicked() {
-                s.wspr_pct = p;
+            let tip = if p == 0 {
+                "No beacons: turns ENABLE TX off"
+            } else {
+                "This share of the 2 minute slots"
+            };
+            if chrome::chip(ui, s.wspr_pct == p, l).on_hover_text(tip).clicked() {
+                tx.set_duty(s, p);
             }
         }
     });
@@ -1107,24 +1392,103 @@ mod tests {
         assert_eq!(heard_me(&pskr, &wspr, None, t + 60.0).len(), 1);
     }
 
-    #[test]
-    fn a_wspr_line_holds_its_columns() {
-        let r = crate::tx::WsprRow {
+    fn wspr_row(
+        call: &str,
+        slot: i64,
+        snr: f32,
+        km: Option<f64>,
+        rf_hz: f64,
+    ) -> crate::tx::WsprRow {
+        crate::tx::WsprRow {
             h: crate::decode::WsprHeard {
-                slot_utc: 1_800_000_000 - 1_800_000_000 % 120,
-                snr_db: -18.0,
+                slot_utc: slot,
+                snr_db: snr,
                 drift_hz: 1.0,
                 audio_hz: 1503.0,
-                call: "K1ABC".into(),
+                call: call.into(),
                 grid: "FN42".into(),
                 dbm: 37,
-                rf_hz: 14_097_103.0,
+                rf_hz,
             },
-            path: Some((45.0, 1234.0)),
+            path: km.map(|k| (45.0, k)),
+        }
+    }
+
+    #[test]
+    fn a_wspr_row_fills_its_columns() {
+        let r = wspr_row(
+            "K1ABC",
+            1_800_000_000 - 1_800_000_000 % 120,
+            -18.0,
+            Some(1234.0),
+            10_140_123.0,
+        );
+        let c = wspr_heard_cells(&r);
+        assert_eq!(c.len(), HEARD_COLS.len());
+        assert_eq!(
+            &c[1..],
+            &["-18", "+1", "10.140 123", "K1ABC", "FN42", "37", "1234", "45°", "1503"]
+        );
+        // Every figure fits its column.
+        for (cell, col) in c.iter().zip(&HEARD_COLS) {
+            assert!(cell.chars().count() <= col.chars, "{cell} in {}", col.head);
+        }
+    }
+
+    #[test]
+    fn the_wspr_lists_sort_by_a_heading_and_show_one_band() {
+        let t = 1_800_000_000 - 1_800_000_000 % 120;
+        let rows = [
+            wspr_row("K1ABC", t + 120, -18.0, Some(1200.0), 10_140_150.0),
+            wspr_row("G4XYZ", t + 120, -5.0, Some(5900.0), 10_140_180.0),
+            wspr_row("VK2XX", t, -25.0, None, 10_140_110.0),
+            wspr_row("DL1ABC", t, -10.0, Some(6500.0), 14_097_100.0),
+        ];
+        let calls =
+            |v: Vec<&crate::tx::WsprRow>| v.iter().map(|r| r.h.call.clone()).collect::<Vec<_>>();
+        let mut sort = WsprSort::default();
+        // Newest first, as heard, on 30 m only: DL1ABC is on 20 m.
+        assert_eq!(calls(shown_rows(rows.iter(), Some("30m"), sort)), ["K1ABC", "G4XYZ", "VK2XX"]);
+        // Every band when the band isn't known.
+        assert_eq!(shown_rows(rows.iter(), None, sort).len(), 4);
+        sort.click(WsprKey::Km);
+        assert_eq!(sort, WsprSort { key: WsprKey::Km, desc: true });
+        // Farthest first; no distance last.
+        assert_eq!(calls(shown_rows(rows.iter(), Some("30m"), sort)), ["G4XYZ", "K1ABC", "VK2XX"]);
+        sort.click(WsprKey::Km);
+        // Nearest first; no distance still last.
+        assert_eq!(calls(shown_rows(rows.iter(), Some("30m"), sort)), ["K1ABC", "G4XYZ", "VK2XX"]);
+        sort.click(WsprKey::Snr);
+        assert_eq!(
+            calls(shown_rows(rows.iter(), None, sort)),
+            ["G4XYZ", "DL1ABC", "K1ABC", "VK2XX"]
+        );
+        sort.click(WsprKey::Call);
+        assert!(!sort.desc);
+        assert_eq!(
+            calls(shown_rows(rows.iter(), None, sort)),
+            ["DL1ABC", "G4XYZ", "K1ABC", "VK2XX"]
+        );
+        sort.click(WsprKey::Utc);
+        sort.click(WsprKey::Utc);
+        // Oldest first.
+        assert_eq!(calls(shown_rows(rows.iter(), Some("30m"), sort))[0], "VK2XX");
+    }
+
+    #[test]
+    fn a_heard_me_row_fills_its_columns() {
+        let m = HeardMe {
+            utc: 1_800_000_000.0,
+            call: "G4XYZ".into(),
+            snr: Some(-22.0),
+            km: None,
+            rf_hz: 144_490_500.0,
+            site: "wspr.live",
         };
-        let l = wspr_heard_line(&r);
-        for part in ["-18", "+1", "K1ABC", "FN42", "37", "1234", "45°", "1503"] {
-            assert!(l.contains(part), "{part} in {l}");
+        let c = heard_me_cells(&m);
+        assert_eq!(&c[1..], &["G4XYZ", "-22", "–", "144.490 500", "wspr.live"]);
+        for (cell, col) in c.iter().zip(&ME_COLS) {
+            assert!(cell.chars().count() <= col.chars, "{cell} in {}", col.head);
         }
     }
 

@@ -434,7 +434,13 @@ impl App {
                 .or_else(|| self.tx.keep(amp, decoders::slot::utc_now()));
             match why {
                 Some(why) => link.tune_stop(why),
-                None => link.tune_alive(),
+                None => {
+                    // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): the
+                    // over's audio follows LEVEL live, set only once the
+                    // checks above pass at that same level (decision 87).
+                    self.tx.set_level(level, r.audio_ceiling);
+                    link.tune_alive();
+                }
             }
             return;
         }
@@ -507,6 +513,7 @@ impl App {
             rx_dial,
             bar_off,
             bar_moved,
+            bar_ours: self.saved.show_tx,
             station: &station,
             decoding_ft8,
         };
@@ -612,6 +619,8 @@ impl App {
                 band,
                 rig,
                 heard_me: self.globe.heard_me(),
+                heard_hz: heard.map(|f| f as f64),
+                xvtr_hz: xvtr as f64,
             },
         );
         if let Some(p) = o.pop {
