@@ -448,7 +448,7 @@ impl App {
             let watts = tune::planned_watts(r, Keying::Data, level);
             let why = tune::tune_must_stop(amp, r, self.saved.swr_warn, watts, false)
                 .map(Some)
-                .or_else(|| self.tx.keep(amp, decoders::slot::utc_now()));
+                .or_else(|| self.tx.keep(decoders::slot::utc_now()));
             match why {
                 Some(why) => stop_over(link, &mut self.stop_logged, &t, what, why),
                 None => {

@@ -868,8 +868,8 @@ slots, picked from your call. **POWER** is the figure in the message: it must
 be what you really radiate. **ROAM** picks a new offset between 1 400 and
 1 600 Hz each time. Only a plain call and a 4-character grid can be sent. A
 beacon keys for 110.6 s with the amplifier in line; none starts while the
-amplifier is over 155 °F (68 °C), a step below its own 158 °F trip, and one
-going out stops if it gets there. The yellow from 120 °F is only a warning. Beside your message, the offset the beacon goes (or last went) out
+amplifier is over 155 °F (68 °C), a step below its own 158 °F trip; one
+already going out finishes, guarded by that trip. The yellow from 120 °F is only a warning. Beside your message, the offset the beacon goes (or last went) out
 on. The list on the left has two parts, newest 2 minute cycle first:
 **HEARD**, the stations your WSPR decoder heard (UTC, SNR, drift, call, grid,
 dBm, distance, heading, audio offset), and **HEARD ME**, the reports of your

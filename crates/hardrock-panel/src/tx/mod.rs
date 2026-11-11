@@ -657,7 +657,7 @@ impl Tx {
     /// caller has checked the TUNE interlocks at this mode's level; on top
     /// of those the over stops when its audio stops, and a WSPR beacon when
     /// the amplifier's temperature reaches its warning.
-    pub(crate) fn keep(&mut self, amp: &AmpStatus, now: f64) -> Option<Option<String>> {
+    pub(crate) fn keep(&mut self, now: f64) -> Option<Option<String>> {
         let Some(o) = self.over.as_mut() else {
             return Some(Some("the TX window has no over going out".into()));
         };
@@ -665,11 +665,10 @@ impl Tx {
         if !self.player.playing() {
             return Some(Some("the transmit audio stopped".into()));
         }
-        if o.mode == TxMode::Wspr
-            && let Some(why) = too_hot(amp)
-        {
-            return Some(Some(why));
-        }
+        // A WSPR beacon already on the air runs to its end whatever the
+        // amplifier's heat (interlock #12 is checked before one starts); the
+        // HR500's own 158 °F trip still guards the last few degrees (AJ3G,
+        // 11 Nov 2026: "Finish the beacon").
         // The sound card's clock and ours: the audio may not run out well
         // before the over's own end (a device that took it at the wrong
         // rate would have sent something else).
@@ -1162,13 +1161,14 @@ pub(crate) fn mhz_cell(hz: f64) -> String {
 pub(crate) const WSPR_HOT_C: f32 = (155.0 - 32.0) / 1.8;
 
 /// SAFETY INTERLOCK (docs/safety-interlocks.md, #12): a WSPR beacon keys
-/// the amplifier for 110.6 s, so none starts, and one going out stops, once
-/// its temperature is over [`WSPR_HOT_C`] (155 °F).
+/// the amplifier for 110.6 s, so none starts once its temperature is over
+/// [`WSPR_HOT_C`] (155 °F). One already going out finishes: the HR500's own
+/// 158 °F trip guards it (AJ3G, 11 Nov 2026).
 pub(crate) fn too_hot(amp: &AmpStatus) -> Option<String> {
     let t = amp.readings.filter(|_| amp.connected)?.known_temp_c()?;
     (t > WSPR_HOT_C).then(|| {
         format!(
-            "The amplifier is at {t:.0} °C ({:.0} °F), over the 155 °F a beacon stops at.",
+            "The amplifier is at {t:.0} °C ({:.0} °F), over the 155 °F a beacon won't start at.",
             t * 1.8 + 32.0
         )
     })
