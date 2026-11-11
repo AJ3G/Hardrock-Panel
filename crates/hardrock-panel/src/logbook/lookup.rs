@@ -7,15 +7,20 @@
 //!
 //! FILL MISSING runs a batch of these on its own thread, paced so the services
 //! don't block the account ([`pace`]), and fills only the fields a QSO has
-//! empty ([`fill_missing`]).
+//! empty ([`fill_missing`]). For a grid it asks, in turn (decision 75): QRZ.com
+//! XML and HamQTH when there is a login for them, callook.info (the FCC's data,
+//! no login) for a US call, and then, with no network, the same call's grid
+//! elsewhere in the log and the grid it was last decoded with ([`FillBatch`],
+//! [`Source`]). Only the callsign is sent (and the service's own login).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::net::{Http, scrub, tag_text, urlencode};
-use super::{Credentials, LookupService, QsoRecord};
+use super::{Credentials, LogSettings, LookupService, QsoRecord};
 
 /// What a lookup service says about a callsign. `None` or empty where it says
 /// nothing.
@@ -160,7 +165,7 @@ fn parse(service: LookupService, body: &str, call: &str) -> Reply {
                 qth: Some(t("qth")).filter(|s| !s.is_empty()).unwrap_or_else(|| t("adr_city")),
                 state: t("us_state"),
                 county: t("us_county"),
-                grid: t("grid"),
+                grid: grid_or_position(&t("grid"), &t("latitude"), &t("longitude")),
                 country: t("country"),
                 dxcc: tag_text(body, "adif").and_then(|s| s.parse().ok()).filter(|v| *v > 0),
                 cq_zone: num("cq"),
@@ -178,7 +183,7 @@ fn parse(service: LookupService, body: &str, call: &str) -> Reply {
                 qth: t("addr2"),
                 state: t("state"),
                 county: t("county"),
-                grid: t("grid"),
+                grid: grid_or_position(&t("grid"), &t("lat"), &t("lon")),
                 country: t("country"),
                 dxcc: tag_text(body, "dxcc").and_then(|s| s.parse().ok()).filter(|v| *v > 0),
                 cq_zone: num("cqzone"),
@@ -186,6 +191,92 @@ fn parse(service: LookupService, body: &str, call: &str) -> Reply {
             })
         }
     }
+}
+
+/// The grid a service gave, or else the 6-character one its latitude and
+/// longitude are in (HamQTH often has a position but no grid: AJ3G, 11 Nov
+/// 2026). Empty when it gave neither.
+fn grid_or_position(grid: &str, lat: &str, lon: &str) -> String {
+    if super::grid4(grid).is_some() {
+        return grid.trim().to_string();
+    }
+    match (lat.trim().parse::<f64>(), lon.trim().parse::<f64>()) {
+        // 0, 0 is what some records hold for "unknown".
+        (Ok(la), Ok(lo)) if !(la == 0.0 && lo == 0.0) => latlon_to_grid(la, lo).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// The 6-character Maidenhead locator (`FN31pr`) a point is in: the inverse
+/// of `station::grid_to_latlon`. `None` off the globe.
+pub(crate) fn latlon_to_grid(lat: f64, lon: f64) -> Option<String> {
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return None;
+    }
+    // The north pole and the antimeridian belong to the last square, not one
+    // past it.
+    let x = (lon + 180.0).min(359.999_999);
+    let y = (lat + 90.0).min(179.999_999);
+    let (fx, fy) = ((x / 20.0) as u8, (y / 10.0) as u8);
+    let (sx, sy) = (((x % 20.0) / 2.0) as u8, (y % 10.0) as u8);
+    let (ux, uy) = (((x % 2.0) * 12.0) as u8, ((y % 1.0) * 24.0) as u8);
+    Some(format!(
+        "{}{}{}{}{}{}",
+        (b'A' + fx) as char,
+        (b'A' + fy) as char,
+        (b'0' + sx) as char,
+        (b'0' + sy) as char,
+        (b'a' + ux.min(23)) as char,
+        (b'a' + uy.min(23)) as char,
+    ))
+}
+
+/// callook.info's reply for a US call: the FCC's licence data, with its grid.
+/// `Ok(None)` for a call it doesn't hold.
+fn parse_callook(body: &str, call: &str) -> Result<Option<CallInfo>, String> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("callook.info: an unreadable reply ({e})"))?;
+    let text = |p: &str| v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    match text("/status").as_str() {
+        "VALID" => {}
+        // UPDATING: the FCC data is being reloaded; as good as not found.
+        "INVALID" | "UPDATING" => return Ok(None),
+        s => return Err(format!("callook.info: status {s:?}")),
+    }
+    // "NEWINGTON, CT 06111"
+    let line2 = text("/address/line2");
+    let (town, state) = match line2.rsplit_once(',') {
+        Some((t, rest)) => {
+            (t.trim().to_string(), rest.split_whitespace().next().unwrap_or("").to_string())
+        }
+        None => (String::new(), String::new()),
+    };
+    Ok(Some(CallInfo {
+        call: call.to_string(),
+        name: text("/name"),
+        qth: town,
+        state,
+        grid: grid_or_position(
+            &text("/location/gridsquare"),
+            &text("/location/latitude"),
+            &text("/location/longitude"),
+        ),
+        ..CallInfo::default()
+    }))
+}
+
+/// Ask callook.info about a US call.
+fn callook<H: Http>(http: &H, call: &str) -> Result<Option<CallInfo>, String> {
+    let body = http.get(&format!("https://callook.info/{}/json", urlencode(call)))?;
+    parse_callook(&body, call)
+}
+
+/// A call callook.info can know: one the FCC licenses (the US and its
+/// territories), with no `/`.
+pub(crate) fn fcc_call(call: &str) -> bool {
+    const US: [&str; 10] = ["K", "KL", "KH6", "KP4", "KH2", "KP2", "KH0", "KH8", "KH9", "KP1"];
+    !call.contains('/')
+        && crate::dxcc::lookup(call).is_some_and(|e| US.contains(&e.prefix.as_str()))
 }
 
 /// The fields FILL MISSING fills, all empty in `r`: what is worth a lookup.
@@ -246,12 +337,10 @@ pub(crate) enum Msg {
     Done,
 }
 
-/// A lookup batch running on its own thread.
+/// A lookup batch running on its own thread (the form's LOOKUP).
 pub(crate) struct Batch {
     pub rx: Receiver<Msg>,
     stop: Arc<AtomicBool>,
-    pub total: usize,
-    pub done: usize,
 }
 
 impl Batch {
@@ -259,7 +348,6 @@ impl Batch {
     pub(crate) fn start(service: LookupService, login: Credentials, calls: Vec<String>) -> Batch {
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
-        let total = calls.len();
         let st = stop.clone();
         let spawned = std::thread::Builder::new().name("log-lookup".into()).spawn(move || {
             let web = super::net::Web::new();
@@ -268,9 +356,9 @@ impl Batch {
         if let Err(e) = spawned {
             let (tx, rx2) = channel();
             let _ = tx.send(Msg::Failed(format!("couldn't start the lookups: {e}")));
-            return Batch { rx: rx2, stop, total, done: 0 };
+            return Batch { rx: rx2, stop };
         }
-        Batch { rx, stop, total, done: 0 }
+        Batch { rx, stop }
     }
 
     pub(crate) fn stop(&self) {
@@ -319,6 +407,235 @@ fn run<H: Http>(
         }
     }
     let _ = tx.send(Msg::Done);
+}
+
+/// Where FILL MISSING found a grid, in the order it asks (decision 75).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum Source {
+    Qrz,
+    HamQth,
+    Callook,
+    /// The same call's grid in another QSO in the log.
+    Log,
+    /// The grid the station was decoded sending this run (DECODE's heard
+    /// stations).
+    Heard,
+}
+
+impl Source {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Source::Qrz => "QRZ.com",
+            Source::HamQth => "HamQTH",
+            Source::Callook => "callook.info",
+            Source::Log => "the log",
+            Source::Heard => "decodes",
+        }
+    }
+
+    /// The time between one request to this source and the next.
+    fn pace(self) -> Duration {
+        match self {
+            Source::Qrz => pace(LookupService::Qrz),
+            Source::HamQth => pace(LookupService::HamQth),
+            Source::Callook => Duration::from_millis(1000),
+            Source::Log | Source::Heard => Duration::ZERO,
+        }
+    }
+}
+
+/// The logins FILL MISSING has: QRZ.com XML when switched on and set, and
+/// HamQTH when set. callook.info needs none.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Plan {
+    pub qrz: Option<Credentials>,
+    pub hamqth: Option<Credentials>,
+}
+
+impl Plan {
+    pub(crate) fn of(s: &LogSettings) -> Plan {
+        Plan {
+            qrz: (s.qrz_enabled && s.qrz.is_set()).then(|| s.qrz.clone()),
+            hamqth: s.hamqth.is_set().then(|| s.hamqth.clone()),
+        }
+    }
+
+    pub(crate) fn has_login(&self) -> bool {
+        self.qrz.is_some() || self.hamqth.is_some()
+    }
+}
+
+/// A call FILL MISSING asks about, and what its QSOs lack.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Want {
+    pub call: String,
+    /// Some field a login service fills is empty ([`wants_lookup`]).
+    pub any: bool,
+    /// Some QSO with it has no grid.
+    pub grid: bool,
+}
+
+impl Want {
+    /// Whether any source on the network could help with this call under
+    /// `plan`.
+    pub(crate) fn worth_asking(&self, plan: &Plan) -> bool {
+        (plan.has_login() && (self.any || self.grid)) || (self.grid && fcc_call(&self.call))
+    }
+}
+
+/// What a FILL MISSING batch sends back.
+#[derive(Debug)]
+pub(crate) enum FillMsg {
+    /// What the sources said about a call, in the order asked; the first to
+    /// give a field is the one used. Empty when none knew it.
+    Call {
+        call: String,
+        found: Vec<(Source, CallInfo)>,
+    },
+    /// A source can't be used (a refused login, no connection): it is left
+    /// out for the rest of the batch, and the others go on.
+    SourceFailed(Source, String),
+    Done,
+}
+
+/// FILL MISSING's lookups on their own thread.
+pub(crate) struct FillBatch {
+    pub rx: Receiver<FillMsg>,
+    stop: Arc<AtomicBool>,
+    pub total: usize,
+    pub done: usize,
+}
+
+impl FillBatch {
+    pub(crate) fn start(plan: Plan, wants: Vec<Want>) -> FillBatch {
+        let (tx, rx) = channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let total = wants.len();
+        let st = stop.clone();
+        let spawned = std::thread::Builder::new().name("log-fill".into()).spawn(move || {
+            let web = super::net::Web::new();
+            run_fill(&web, plan, wants, &st, &tx, true);
+        });
+        if let Err(e) = spawned {
+            let (tx, rx2) = channel();
+            let _ = tx.send(FillMsg::SourceFailed(
+                Source::HamQth,
+                format!("couldn't start the lookups: {e}"),
+            ));
+            let _ = tx.send(FillMsg::Done);
+            return FillBatch { rx: rx2, stop, total, done: 0 };
+        }
+        FillBatch { rx, stop, total, done: 0 }
+    }
+
+    pub(crate) fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for FillBatch {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Wait until `src` may be asked again (when `paced`), in small steps so STOP
+/// is quick. False when stopped.
+fn take_turn(
+    last: &mut HashMap<Source, Instant>,
+    src: Source,
+    paced: bool,
+    stop: &AtomicBool,
+) -> bool {
+    if paced && let Some(t) = last.get(&src) {
+        let until = *t + src.pace();
+        while Instant::now() < until {
+            if stop.load(Ordering::Relaxed) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    last.insert(src, Instant::now());
+    !stop.load(Ordering::Relaxed)
+}
+
+/// Ask about each call in turn: the login services in order (the second only
+/// for a grid the first didn't give), then callook.info for a US call still
+/// without one. Each call is asked once per source.
+fn run_fill<H: Http>(
+    http: &H,
+    plan: Plan,
+    wants: Vec<Want>,
+    stop: &AtomicBool,
+    tx: &Sender<FillMsg>,
+    paced: bool,
+) {
+    let mut sessions: Vec<(Source, Session<'_, H>)> = Vec::new();
+    if let Some(l) = plan.qrz {
+        sessions.push((Source::Qrz, Session::new(http, LookupService::Qrz, l)));
+    }
+    if let Some(l) = plan.hamqth {
+        sessions.push((Source::HamQth, Session::new(http, LookupService::HamQth, l)));
+    }
+    let mut callook_ok = true;
+    let mut last = HashMap::new();
+    let mut asked: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for w in wants {
+        let call = w.call.trim().to_ascii_uppercase();
+        if call.is_empty() || !asked.insert(call.clone()) {
+            continue;
+        }
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut found: Vec<(Source, CallInfo)> = Vec::new();
+        let has_grid =
+            |f: &[(Source, CallInfo)]| f.iter().any(|(_, i)| super::grid4(&i.grid).is_some());
+        let mut n = 0;
+        while n < sessions.len() {
+            let needed =
+                if found.is_empty() { w.any || w.grid } else { w.grid && !has_grid(&found) };
+            if !needed {
+                break;
+            }
+            let src = sessions[n].0;
+            if !take_turn(&mut last, src, paced, stop) {
+                return;
+            }
+            match sessions[n].1.lookup(&call) {
+                Ok(Some(i)) => found.push((src, i)),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("logbook lookup: {e}");
+                    sessions.remove(n);
+                    if tx.send(FillMsg::SourceFailed(src, e)).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+            }
+            n += 1;
+        }
+        if w.grid && !has_grid(&found) && callook_ok && fcc_call(&call) {
+            if !take_turn(&mut last, Source::Callook, paced, stop) {
+                return;
+            }
+            match callook(http, &call) {
+                Ok(Some(i)) => found.push((Source::Callook, i)),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("logbook lookup: callook.info: {e}");
+                    callook_ok = false;
+                    let _ = tx.send(FillMsg::SourceFailed(Source::Callook, e));
+                }
+            }
+        }
+        if tx.send(FillMsg::Call { call, found }).is_err() {
+            return;
+        }
+    }
+    let _ = tx.send(FillMsg::Done);
 }
 
 #[cfg(test)]
@@ -484,5 +801,168 @@ mod tests {
         let mut p = QsoRecord { call: "AA7BQ/KH6".into(), ..QsoRecord::default() };
         fill_missing(&mut p, &i);
         assert_eq!((p.name.as_str(), p.grid.as_str(), p.dxcc), ("FRED L LLOYD", "", None));
+    }
+
+    #[test]
+    fn a_position_is_turned_into_its_grid() {
+        // W1AW, Newington CT.
+        assert_eq!(latlon_to_grid(41.714775, -72.727260).as_deref(), Some("FN31pr"));
+        assert_eq!(latlon_to_grid(50.30, 14.50).as_deref(), Some("JO70gh"));
+        assert_eq!(latlon_to_grid(-90.0, -180.0).as_deref(), Some("AA00aa"));
+        assert_eq!(latlon_to_grid(90.0, 180.0).as_deref(), Some("RR99xx"));
+        assert_eq!(latlon_to_grid(91.0, 0.0), None);
+        // Every subsquare's centre comes back to itself.
+        for g in ["FN20xr", "JO65ab", "PM95vq", "GG66mk", "RE78ir", "AA00aa", "RR99xx"] {
+            let p = crate::station::grid_to_latlon(g).unwrap();
+            assert_eq!(latlon_to_grid(p.lat, p.lon).as_deref(), Some(g));
+        }
+        // A grid given wins; a position fills in for none; 0,0 is no position.
+        assert_eq!(grid_or_position("FN20", "41.7", "-72.7"), "FN20");
+        assert_eq!(grid_or_position("", "41.714775", "-72.727260"), "FN31pr");
+        assert_eq!(grid_or_position("", "0", "0"), "");
+        assert_eq!(grid_or_position("", "", ""), "");
+    }
+
+    const HAMQTH_NO_GRID: &str = r#"<?xml version="1.0"?>
+<HamQTH version="2.8" xmlns="https://www.hamqth.com">
+<search><callsign>dl1abc</callsign><nick>Hans</nick><country>Germany</country>
+<latitude>52.52</latitude><longitude>13.40</longitude></search></HamQTH>"#;
+
+    #[test]
+    fn hamqth_with_a_position_and_no_grid_gives_the_grid() {
+        match parse(LookupService::HamQth, HAMQTH_NO_GRID, "DL1ABC") {
+            Reply::Found(i) => assert_eq!(i.grid, "JO62qm"),
+            r => panic!("{r:?}"),
+        }
+    }
+
+    const CALLOOK_W1AW: &str = r#"{"status":"VALID","type":"CLUB","current":{"callsign":"W1AW","operClass":""},
+"previous":{"callsign":"","operClass":""},"trustee":{"callsign":"W1AW","name":"ARRL"},
+"name":"ARRL HQ OPERATORS CLUB","address":{"line1":"225 MAIN ST","line2":"NEWINGTON, CT 06111","attn":""},
+"location":{"latitude":"41.714775","longitude":"-72.727260","gridsquare":"FN31pr"},
+"otherInfo":{"grantDate":"05\/04\/2020","frn":"0004511143"}}"#;
+
+    #[test]
+    fn callook_replies_are_read() {
+        let i = parse_callook(CALLOOK_W1AW, "W1AW").unwrap().unwrap();
+        assert_eq!(i.grid, "FN31pr");
+        assert_eq!(
+            (i.name.as_str(), i.qth.as_str(), i.state.as_str()),
+            ("ARRL HQ OPERATORS CLUB", "NEWINGTON", "CT")
+        );
+        let no_grid = CALLOOK_W1AW.replace(r#""gridsquare":"FN31pr""#, r#""gridsquare":"""#);
+        assert_eq!(parse_callook(&no_grid, "W1AW").unwrap().unwrap().grid, "FN31pr");
+        assert_eq!(parse_callook(r#"{"status":"INVALID"}"#, "W9ZZZ").unwrap(), None);
+        assert!(parse_callook("<html>busy</html>", "W1AW").is_err());
+    }
+
+    fn fill(web: &Fake, plan: Plan, wants: Vec<Want>) -> Vec<FillMsg> {
+        let (tx, rx) = channel();
+        run_fill(web, plan, wants, &AtomicBool::new(false), &tx, false);
+        rx.try_iter().collect()
+    }
+
+    fn want(call: &str, any: bool, grid: bool) -> Want {
+        Want { call: call.into(), any, grid }
+    }
+
+    const QRZ_NO_GRID: &str = r#"<QRZDatabase><Callsign><call>OK1RR</call><fname>Petr</fname>
+<country>Czech Republic</country></Callsign><Session><Key>k</Key></Session></QRZDatabase>"#;
+
+    #[test]
+    fn grids_are_asked_of_qrz_then_hamqth_then_callook() {
+        let both = Plan { qrz: Some(login()), hamqth: Some(login()) };
+        // QRZ.com gives no grid: HamQTH is asked, and its grid is the one.
+        let web = Fake::with(&[
+            ("https://xmldata.qrz.com/xml/current/?username=", QRZ_SESSION),
+            ("https://xmldata.qrz.com/xml/current/?s=", QRZ_NO_GRID),
+            ("https://www.hamqth.com/xml.php?u=", HAMQTH_SESSION),
+            ("https://www.hamqth.com/xml.php?id=", HAMQTH_OK1RR),
+        ]);
+        let m = fill(&web, both.clone(), vec![want("OK1RR", true, true)]);
+        match &m[0] {
+            FillMsg::Call { call, found } => {
+                assert_eq!(call, "OK1RR");
+                let srcs: Vec<Source> = found.iter().map(|f| f.0).collect();
+                assert_eq!(srcs, [Source::Qrz, Source::HamQth]);
+                assert_eq!(found[1].1.grid, "jo70gg");
+            }
+            m => panic!("{m:?}"),
+        }
+        assert!(matches!(m[1], FillMsg::Done));
+        // QRZ.com gives the grid: nothing else is asked.
+        let web = Fake::with(&[
+            ("https://xmldata.qrz.com/xml/current/?username=", QRZ_SESSION),
+            ("https://xmldata.qrz.com/xml/current/?s=", QRZ_AA7BQ),
+        ]);
+        fill(&web, both.clone(), vec![want("AA7BQ", true, true)]);
+        assert_eq!(web.asked.borrow().len(), 2);
+        // Neither has the US call: callook.info is asked, with only the call.
+        let web = Fake::with(&[
+            ("https://xmldata.qrz.com/xml/current/?username=", QRZ_SESSION),
+            (
+                "https://xmldata.qrz.com/xml/current/?s=",
+                "<QRZDatabase><Session><Error>Not found: W1AW</Error></Session></QRZDatabase>",
+            ),
+            ("https://www.hamqth.com/xml.php?u=", HAMQTH_SESSION),
+            ("https://www.hamqth.com/xml.php?id=", HAMQTH_NOT_FOUND),
+            ("https://callook.info/W1AW/json", CALLOOK_W1AW),
+        ]);
+        let m = fill(&web, both, vec![want("W1AW", false, true)]);
+        match &m[0] {
+            FillMsg::Call { found, .. } => {
+                assert_eq!(found.len(), 1);
+                assert_eq!((found[0].0, found[0].1.grid.as_str()), (Source::Callook, "FN31pr"));
+            }
+            m => panic!("{m:?}"),
+        }
+        assert_eq!(web.asked.borrow().last().unwrap(), "https://callook.info/W1AW/json");
+    }
+
+    #[test]
+    fn with_no_login_only_us_calls_go_to_callook() {
+        let none = Plan::default();
+        assert!(want("W1AW", false, true).worth_asking(&none));
+        assert!(!want("OK1RR", true, true).worth_asking(&none), "callook.info is the FCC's");
+        assert!(!want("W1AW", true, false).worth_asking(&none), "callook is asked for grids only");
+        assert!(!want("W1AW/KH6", false, true).worth_asking(&none));
+        let web = Fake::with(&[("https://callook.info/W1AW/json", CALLOOK_W1AW)]);
+        // A call twice is asked once.
+        let m = fill(&web, none, vec![want("W1AW", false, true), want("w1aw", false, true)]);
+        assert_eq!(web.asked.borrow().len(), 1);
+        assert_eq!(m.len(), 2, "{m:?}");
+    }
+
+    #[test]
+    fn a_refused_login_leaves_that_service_out_and_goes_on() {
+        let plan = Plan { qrz: None, hamqth: Some(login()) };
+        let web = Fake::with(&[
+            ("https://www.hamqth.com/xml.php?u=", HAMQTH_BAD_LOGIN),
+            ("https://callook.info/W1AW/json", CALLOOK_W1AW),
+        ]);
+        let m = fill(&web, plan, vec![want("W1AW", true, true), want("K1ABC", true, true)]);
+        match &m[0] {
+            FillMsg::SourceFailed(Source::HamQth, e) => assert!(!e.contains("s3cret"), "{e}"),
+            m => panic!("{m:?}"),
+        }
+        assert!(matches!(&m[1], FillMsg::Call { found, .. } if found.len() == 1));
+        // K1ABC: HamQTH isn't asked again; callook.info has no reply scripted,
+        // so it fails and is left out too.
+        assert!(matches!(&m[2], FillMsg::SourceFailed(Source::Callook, _)));
+        assert!(matches!(&m[3], FillMsg::Call { found, .. } if found.is_empty()));
+        assert!(matches!(m[4], FillMsg::Done));
+        assert_eq!(web.asked.borrow().iter().filter(|u| u.contains("hamqth")).count(), 1);
+    }
+
+    #[test]
+    fn a_grid_from_any_source_fills_only_an_empty_grid() {
+        let i = CallInfo { call: "W1AW".into(), grid: "FN31pr".into(), ..CallInfo::default() };
+        let mut r = QsoRecord { call: "W1AW".into(), ..QsoRecord::default() };
+        assert!(fill_missing(&mut r, &i));
+        assert_eq!(r.grid, "FN31pr");
+        let mut r = QsoRecord { call: "W1AW".into(), grid: "FN31".into(), ..QsoRecord::default() };
+        let other = CallInfo { grid: "EM10".into(), ..i };
+        assert!(!fill_missing(&mut r, &other));
+        assert_eq!(r.grid, "FN31");
     }
 }

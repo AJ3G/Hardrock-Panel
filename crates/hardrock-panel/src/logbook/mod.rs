@@ -174,7 +174,8 @@ impl QsoRecord {
 /// one.
 pub(crate) fn grid4(g: &str) -> Option<String> {
     let g = g.trim().get(..4)?;
-    (crate::station::grid_check(g) == crate::station::GridCheck::Valid).then(|| g.to_ascii_uppercase())
+    (crate::station::grid_check(g) == crate::station::GridCheck::Valid)
+        .then(|| g.to_ascii_uppercase())
 }
 
 /// ADIF's band name for a frequency. Taken from SDRoxide's `adif_band`: the
@@ -512,6 +513,54 @@ impl Logbook {
             self.changed();
         }
         n
+    }
+
+    /// The calls with a QSO that has no grid, each once, leaving out `/`
+    /// calls (a portable station's grid is wherever it was that day).
+    pub(crate) fn calls_without_grid(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .recs
+            .iter()
+            .filter(|r| r.grid.trim().is_empty() && !r.call.contains('/') && !r.call.is_empty())
+            .map(|r| r.call.clone())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// The grid `call` has in another QSO in the log: the latest one that
+    /// gives a valid grid. Not for `/` calls.
+    pub(crate) fn grid_in_log(&self, call: &str) -> Option<String> {
+        if call.contains('/') {
+            return None;
+        }
+        self.recs
+            .iter()
+            .filter(|r| r.call.eq_ignore_ascii_case(call) && grid4(&r.grid).is_some())
+            .max_by_key(|r| r.start_utc)
+            .map(|r| r.grid.trim().to_string())
+    }
+
+    /// Give every QSO with a call in `grids` and no grid of its own that
+    /// call's grid (never a `/` call, never over a grid already there), and
+    /// save once. Returns (call, grid, QSOs filled) for each call that filled
+    /// any, in call order.
+    pub(crate) fn fill_grids(
+        &mut self,
+        grids: &HashMap<String, String>,
+    ) -> Vec<(String, String, usize)> {
+        let mut by_call: std::collections::BTreeMap<String, (String, usize)> = Default::default();
+        self.modify(|r| {
+            if !r.grid.trim().is_empty() || r.call.contains('/') {
+                return false;
+            }
+            let Some(g) = grids.get(&r.call).filter(|g| grid4(g).is_some()) else { return false };
+            r.grid = g.trim().to_string();
+            by_call.entry(r.call.clone()).or_insert_with(|| (r.grid.clone(), 0)).1 += 1;
+            true
+        });
+        by_call.into_iter().map(|(c, (g, n))| (c, g, n)).collect()
     }
 
     /// After any change but an add: the index again, and the whole file.
