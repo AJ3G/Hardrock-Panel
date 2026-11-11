@@ -46,6 +46,11 @@ zune-core = "0.5.3"
 # as this program is).
 mfsk-core.workspace = true
 
+# LOG's BROWSE…: the system's own file picker. Windows only, so the Linux
+# tests need no GTK (AJ3G, 11 Nov 2026).
+[target.'cfg(windows)'.dependencies]
+rfd = { version = "0.17.2", default-features = false }
+
 [dev-dependencies]
 # Parses and validates the scope's WGSL in the tests, with no GPU.
 naga = { version = "30.0.1", features = ["wgsl-in"] }

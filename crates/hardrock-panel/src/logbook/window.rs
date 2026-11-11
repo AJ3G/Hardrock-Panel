@@ -203,6 +203,11 @@ pub(crate) struct LogUi {
     heard_at: Option<Instant>,
     /// The calls with a QSO that has no grid, for the log generation.
     gridless: Option<(u64, Vec<String>)>,
+    /// The .adi files offered by FILE's drop-down, found when it opens.
+    found_files: Vec<PathBuf>,
+    /// BROWSE…'s file dialog, open on its own thread.
+    #[cfg(windows)]
+    browse: Option<Receiver<Option<PathBuf>>>,
     /// LOOKUP in the form.
     form_lookup: Option<Batch>,
     eqsl: Option<Receiver<EqslDone>>,
@@ -265,6 +270,17 @@ impl LogUi {
             || self.eqsl.is_some()
             || self.lotw.is_some()
             || self.confirms.is_some()
+            || self.browsing()
+    }
+
+    #[cfg(windows)]
+    fn browsing(&self) -> bool {
+        self.browse.is_some()
+    }
+
+    #[cfg(not(windows))]
+    fn browsing(&self) -> bool {
+        false
     }
 
     /// The QSOs a send acts on: those selected, or else every one not yet
@@ -314,6 +330,19 @@ impl LogUi {
         }
         if finished && let Some(f) = self.fill.take() {
             self.finish_fill(f, log, heard);
+        }
+        #[cfg(windows)]
+        if let Some(rx) = &self.browse {
+            match rx.try_recv() {
+                Ok(p) => {
+                    self.browse = None;
+                    if let Some(p) = p {
+                        self.file = p.display().to_string();
+                    }
+                }
+                Err(TryRecvError::Disconnected) => self.browse = None,
+                Err(TryRecvError::Empty) => {}
+            }
         }
         if let Some(b) = &self.form_lookup {
             match b.rx.try_recv() {
@@ -734,10 +763,102 @@ fn file_or_default(ui_state: &LogUi, log: &Logbook) -> Option<PathBuf> {
     Some(dir.join(format!("hardrock-panel-export-{}.adi", adif_today())))
 }
 
-fn import(ui_state: &mut LogUi, log: &mut Logbook, path: PathBuf) {
+fn import(ui_state: &mut LogUi, log: &mut Logbook, s: &mut LogSettings, path: PathBuf) {
     match log.import_file(&path) {
-        Ok(rep) => ui_state.say(format!("Imported {}: {}", path.display(), rep.summary()), false),
+        Ok(rep) => {
+            s.note_import(&path);
+            ui_state.say(format!("Imported {}: {}", path.display(), rep.summary()), false)
+        }
         Err(e) => ui_state.say(format!("Import: {e}"), true),
+    }
+}
+
+/// The .adi files worth offering in FILE's drop-down, each once, the ones
+/// that exist: WSJT-X's log, the files imported lately, then the .adi files
+/// directly in the log's folder (the panel's exports) and the operator's
+/// Documents and Downloads folders, newest first in each. Never the master
+/// log itself. Looked for when the drop-down opens, not every frame.
+fn adif_files(s: &LogSettings, log: &Logbook) -> Vec<PathBuf> {
+    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let mut fixed = Vec::new();
+    if let Some(d) = env("LOCALAPPDATA") {
+        fixed.push(d.join("WSJT-X").join("wsjtx_log.adi"));
+    }
+    if let Some(h) = env("HOME") {
+        fixed.push(h.join(".local/share/WSJT-X/wsjtx_log.adi"));
+    }
+    fixed.extend(s.recent_imports.iter().map(PathBuf::from));
+    let mut dirs = Vec::new();
+    if let Some(d) = log.path().and_then(|p| p.parent()) {
+        dirs.push(d.to_path_buf());
+    }
+    if let Some(home) = env("USERPROFILE").or_else(|| env("HOME")) {
+        dirs.push(home.join("Documents"));
+        dirs.push(home.join("Downloads"));
+    }
+    find_adif(&fixed, &dirs, log.path())
+}
+
+/// [`adif_files`]' search: `fixed` where they exist, then each of `dirs`'
+/// .adi and .adif files (not below it), newest first; leaving out `master`.
+fn find_adif(
+    fixed: &[PathBuf],
+    dirs: &[PathBuf],
+    master: Option<&std::path::Path>,
+) -> Vec<PathBuf> {
+    const MOST: usize = 40;
+    let is_adif = |p: &std::path::Path| {
+        p.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("adi") || e.eq_ignore_ascii_case("adif"))
+    };
+    let mut out: Vec<PathBuf> = Vec::new();
+    let add = |p: PathBuf, out: &mut Vec<PathBuf>| {
+        if Some(p.as_path()) != master && !out.contains(&p) && out.len() < MOST {
+            out.push(p);
+        }
+    };
+    for p in fixed {
+        if p.is_file() {
+            add(p.clone(), &mut out);
+        }
+    }
+    for d in dirs {
+        let Ok(rd) = std::fs::read_dir(d) else { continue };
+        let mut here: Vec<(std::time::SystemTime, PathBuf)> = rd
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                let m = e.metadata().ok().filter(|m| m.is_file())?;
+                is_adif(&p).then(|| (m.modified().unwrap_or(std::time::UNIX_EPOCH), p))
+            })
+            .collect();
+        here.sort_by_key(|h| std::cmp::Reverse(h.0));
+        for (_, p) in here {
+            add(p, &mut out);
+        }
+    }
+    out
+}
+
+/// BROWSE…: the system's file dialog, on its own thread so the panel keeps
+/// drawing while it is open.
+#[cfg(windows)]
+fn browse(ui_state: &mut LogUi) {
+    let (tx, rx) = channel();
+    let start = PathBuf::from(ui_state.file.trim().trim_matches('"'));
+    let spawned = std::thread::Builder::new().name("log-browse".into()).spawn(move || {
+        let mut d = rfd::FileDialog::new()
+            .set_title("ADIF file to import")
+            .add_filter("ADIF", &["adi", "adif"])
+            .add_filter("All files", &["*"]);
+        if let Some(dir) = start.parent().filter(|d| d.is_dir()) {
+            d = d.set_directory(dir);
+        }
+        let _ = tx.send(d.pick_file());
+    });
+    match spawned {
+        Ok(_) => ui_state.browse = Some(rx),
+        Err(e) => ui_state.say(format!("couldn't open the file dialog: {e}"), true),
     }
 }
 
@@ -852,7 +973,7 @@ fn body(
             .collect()
     });
     for p in dropped {
-        import(u, log, p);
+        import(u, log, s, p);
     }
     top_bar(ui, popped, log, out);
     ui.add_space(4.0);
@@ -870,6 +991,7 @@ fn body(
             "IMPORT reads this file. ADIF writes the selected QSOs, or all of them, to it; left \
              empty, ADIF writes hardrock-panel-export-<date>.adi beside the log",
         );
+        file_picker(ui, log, u, s);
         ui.add_space(12.0);
         ui.label(caps("FIND"));
         chrome::field(
@@ -893,6 +1015,46 @@ fn body(
     }
     ui.add_space(4.0);
     list(ui, log, u);
+}
+
+/// FILE's drop-down of .adi files found, and (Windows) BROWSE…. Picking one
+/// puts it in the FILE box (AJ3G, 11 Nov 2026).
+fn file_picker(ui: &mut egui::Ui, log: &Logbook, u: &mut LogUi, s: &LogSettings) {
+    let mut picked = None;
+    let r = ui.menu_button("▾", |ui| {
+        if u.found_files.is_empty() {
+            u.found_files = adif_files(s, log);
+        }
+        if u.found_files.is_empty() {
+            ui.label(RichText::new("No .adi files found").size(11.0).weak());
+        }
+        for p in &u.found_files {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let dir = p.parent().map(|d| d.display().to_string()).unwrap_or_default();
+            if ui.button(RichText::new(name).size(11.5)).on_hover_text(dir).clicked() {
+                picked = Some(p.clone());
+                ui.close();
+            }
+        }
+    });
+    r.response.on_hover_text(
+        "ADIF files found: WSJT-X's log, recent imports, the panel's exports, and those in your \
+         Documents and Downloads folders",
+    );
+    if r.inner.is_none() {
+        // Shut: look again when it next opens.
+        u.found_files.clear();
+    }
+    #[cfg(windows)]
+    if chrome::chip_enabled(ui, u.browse.is_none(), false, "BROWSE…")
+        .on_hover_text("Pick the ADIF file with Windows' file dialog")
+        .clicked()
+    {
+        browse(u);
+    }
+    if let Some(p) = picked {
+        u.file = p.display().to_string();
+    }
 }
 
 fn top_bar(ui: &mut egui::Ui, popped: bool, log: &Logbook, out: &mut LogOut) {
@@ -978,7 +1140,7 @@ fn toolbar(
             if f.is_empty() {
                 u.say("Type the file to import in the FILE box, or drop it on this window", true);
             } else {
-                import(u, log, PathBuf::from(f));
+                import(u, log, s, PathBuf::from(f));
             }
         }
         let what = if nsel > 0 { format!("ADIF ({nsel})") } else { "ADIF".to_string() };
@@ -1693,5 +1855,40 @@ mod tests {
         u.heard_again(&mut log, &heard);
         assert_eq!(log.records()[3].grid, "");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adif_files_are_found_shallowly_without_the_master() {
+        let dir = std::env::temp_dir().join(format!("hrp-log-find-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("deeper")).unwrap();
+        for f in ["a.adi", "b.ADIF", "c.txt", "master.adi", "deeper/d.adi"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let wsjtx = dir.join("deeper/d.adi");
+        let master = dir.join("master.adi");
+        let found = find_adif(
+            &[wsjtx.clone(), dir.join("gone.adi")],
+            &[dir.clone(), dir.join("nowhere")],
+            Some(&master),
+        );
+        assert_eq!(found[0], wsjtx, "the named files first");
+        let mut rest: Vec<String> =
+            found[1..].iter().map(|p| p.file_name().unwrap().to_string_lossy().into()).collect();
+        rest.sort();
+        assert_eq!(rest, ["a.adi", "b.ADIF"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recent_imports_keep_the_last_eight() {
+        let mut s = LogSettings::default();
+        for i in 0..10 {
+            s.note_import(std::path::Path::new(&format!("/x/{i}.adi")));
+        }
+        s.note_import(std::path::Path::new("/x/5.adi"));
+        assert_eq!(s.recent_imports.len(), 8);
+        assert_eq!(s.recent_imports[0], "/x/5.adi");
+        assert_eq!(s.recent_imports.iter().filter(|p| *p == "/x/5.adi").count(), 1);
     }
 }

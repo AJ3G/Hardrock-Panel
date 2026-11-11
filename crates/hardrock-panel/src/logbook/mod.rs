@@ -808,6 +808,8 @@ pub(crate) struct LogSettings {
     /// TQSL's station location to sign with (`-l`); empty for TQSL's own
     /// choice.
     pub tqsl_location: String,
+    /// The files imported last, newest first, for FILE's drop-down.
+    pub recent_imports: Vec<String>,
 }
 
 impl Default for LogSettings {
@@ -824,11 +826,23 @@ impl Default for LogSettings {
             lotw: Credentials::default(),
             tqsl_path: String::new(),
             tqsl_location: String::new(),
+            recent_imports: Vec::new(),
         }
     }
 }
 
+/// How many imported files FILE's drop-down remembers.
+const RECENT_IMPORTS: usize = 8;
+
 impl LogSettings {
+    /// `path` was imported: first in the recent list.
+    pub(crate) fn note_import(&mut self, path: &Path) {
+        let p = path.display().to_string();
+        self.recent_imports.retain(|r| r != &p);
+        self.recent_imports.insert(0, p);
+        self.recent_imports.truncate(RECENT_IMPORTS);
+    }
+
     /// The lookup service to use and its login, if it can be used.
     pub(crate) fn lookup_login(&self) -> Result<(LookupService, Credentials), String> {
         match self.lookup {
