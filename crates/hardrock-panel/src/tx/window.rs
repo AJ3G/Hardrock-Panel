@@ -769,9 +769,9 @@ fn wspr_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
         &mut s.wspr_me_sort,
         None,
         |m| heard_me_cells(m).to_vec(),
-        "No reports of your beacon on this band yet. GLOBE fetches them while it is open: from wspr.live \
-         or WSPRnet with its WSPR HEARD ME on, and from PSK Reporter with its PSK REPORTER on. The sites \
-         take a few minutes.",
+        "No reports of your beacon on this band yet. They are asked for every two minutes while you \
+         beacon, GLOBE open or shut: from WSPRnet and wspr.live with GLOBE's ASK WSPRNET + WSPR.LIVE on, \
+         and from PSK Reporter with its PSK REPORTER on. The sites take a few minutes.",
     );
     if clear {
         tx.wspr_rows.clear();

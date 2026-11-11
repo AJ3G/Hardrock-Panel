@@ -407,9 +407,9 @@ impl Tx {
         self.over.as_ref().map(|o| (o.text.as_str(), o.mode, o.audio_hz, o.end_utc))
     }
 
-    /// The last `n` samples of the over that have gone to the radio, for the
-    /// scope to draw our own signal (decision 74); `None` when nothing of
-    /// ours is sounding.
+    /// The samples of the over that have gone to the radio since the last
+    /// call (at most the newest `n`), for the scope's TX monitor (decision
+    /// 83); `None` when nothing of ours is sounding.
     pub(crate) fn sounding(&self, n: usize) -> Option<audio::TxAudio> {
         self.player.recent(n)
     }
