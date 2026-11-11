@@ -873,6 +873,20 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
 - **The FT8 strobe.** While the TX window works a station, GLOBE picks it and
   a pulse runs along its path: magenta out from you while you transmit, green
   back to you otherwise.
+- **Paths** are translucent arcs rising over the Earth, higher the longer the
+  path, from your station to the station's dot. Behind the globe they are
+  drawn faint, so turn the globe (right over a pole if you like) and the arc
+  follows. On the flat map a path that runs off one edge and on at the other
+  has a small ring at each side. A station heard both ways is one dot with
+  the magenta ring round it, at its most precise grid, and one path with a
+  magenta glow.
+- **SHOW.** **I HEARD** shows the stations you decoded, **HEARD ME** those
+  that heard you (PSK Reporter, WSPR HEARD ME; turn those SOURCES on), and
+  **BOTH** all of them. **FT8 ONLY** (or whichever mode) shows only the mode
+  the TX window sends while it is open, else the mode DECODE runs; **ALL
+  MODES** shows every mode. Hidden stations come back when you switch.
+  **CLEAR** wipes the stations and paths now; reports of you from before
+  then don't come back with the next fetch.
 - **FORECAST.** Each band from 160 to 10 m, hour by hour for the next 24
   hours at your grid, dark for closed and blue to white for likely open. It
   is a rough model, not VOACAP: the MUF rises with the Sun and the solar
