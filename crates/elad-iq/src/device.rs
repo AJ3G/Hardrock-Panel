@@ -892,6 +892,26 @@ impl Device {
         {
             self.trace.note(format!("IQ0 not sent: {e}"));
         }
+        // Closing the program: a DUO on a wide image goes back to its own
+        // stand-alone 192 kHz image, or no other program can use it until it
+        // is power-cycled (AJ3G, 11 Nov 2026). `restore_standalone` refuses
+        // while the radio transmits (interlock #10).
+        if self.model == Model::Duo
+            && crate::remote::leaving()
+            && (self.remote || crate::remote::went_remote())
+        {
+            match self.restore_standalone() {
+                Ok(()) => {
+                    crate::remote::forget_remote();
+                    self.remote = false;
+                    tracing::info!("ELAD: FDM-DUO put back in stand-alone (192 kHz) on exit");
+                }
+                Err(e) => {
+                    tracing::warn!("ELAD: the FDM-DUO did not go back to stand-alone on exit: {e}");
+                    self.trace.note(format!("stand-alone on exit failed: {e}"));
+                }
+            }
+        }
     }
 
     /// Whether this is an FDM-DUO out of stand-alone.

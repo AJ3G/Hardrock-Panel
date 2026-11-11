@@ -114,9 +114,10 @@ mod tests {
     #[test]
     fn undecoded_energy_is_busy_too() {
         // Energy at 1200 to 1260 Hz that nothing decoded, beside a decode
-        // at 1300 Hz: one busy span, and AUTO moves off 1220 Hz.
+        // at 1300 Hz: both busy (the 30 Hz between them is too narrow for
+        // an over), and AUTO moves off 1220 Hz.
         let b = busy(&[1300.0], &[(1200.0, 1260.0)]);
-        assert_eq!(b, vec![(1195.0, 1355.0)]);
+        assert_eq!(b, vec![(1195.0, 1265.0), (1295.0, 1355.0)]);
         let p = pick(&b, 1220.0).expect("a gap");
         assert!(!(1145.0..1355.0).contains(&p), "{p}");
         // Clear of it, AUTO stays.

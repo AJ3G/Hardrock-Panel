@@ -1826,6 +1826,7 @@ mod round5_tests {
             station: &station,
             decoding_ft8: true,
             slot_decoded: None,
+            scope_mode: None,
         };
         tx.frame(s, env, feed, &heard, &|_, _| Badges::default())
     }

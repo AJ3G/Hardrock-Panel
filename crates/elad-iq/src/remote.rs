@@ -223,6 +223,22 @@ pub fn split() -> bool {
     SPLIT.load(Ordering::Relaxed)
 }
 
+/// Set as the program closes: the stream's shutdown then puts a DUO this
+/// process took out of stand-alone back on its own 192 kHz image, so other
+/// programs (FDM-SW2, WSJT-X through the DUO's own audio) find it as they
+/// expect (AJ3G, 11 Nov 2026: "Upon exit you must place ELAD into Stand
+/// Alone 192KHz").
+static LEAVING: AtomicBool = AtomicBool::new(false);
+
+/// The program is closing: leave the radio in stand-alone.
+pub fn set_leaving() {
+    LEAVING.store(true, Ordering::Relaxed);
+}
+
+pub(crate) fn leaving() -> bool {
+    LEAVING.load(Ordering::Relaxed)
+}
+
 /// Whether this process has put the radio in remote mode, so a later open at
 /// 192 kHz knows to put it back on its own image first.
 static WENT_REMOTE: AtomicBool = AtomicBool::new(false);

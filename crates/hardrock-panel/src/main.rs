@@ -1824,6 +1824,9 @@ impl eframe::App for App {
     /// Let the radio's USB I/Q go, stop the decoders and the servers (which
     /// unkeys any outside program), and free the scope's GPU textures.
     fn on_exit(&mut self) {
+        // The DUO goes back to stand-alone 192 kHz as its stream closes, so
+        // other programs can use it (AJ3G, 11 Nov 2026).
+        elad_iq::set_leaving();
         self.decode.stop(&self.rx.taps);
         self.outside.apply(&outside::OutsideSettings::default(), &self.rx.taps);
         self.rx.stop();

@@ -464,6 +464,9 @@ noise like the band's quiet noise, at its level and spread and in your palette,
 moving down with the rows, and real rows draw over it as they come. Back at SPAN 192k the panel has the DUO
 reload its own image, as FDM-SW2 does, which takes about 4 s and puts it back
 in stand-alone. If that fails, a yellow note says to power-cycle the DUO.
+Closing the panel does the same: a DUO left on a wide image is put back in
+stand-alone at 192 kHz as the panel exits, so FDM-SW2 and other programs can
+use it straight away (not while it is transmitting).
 
 **Listening.** The receiver plays on the sound output chosen under SETTINGS,
 *Receiver sound*: the computer's default output to start, or any other by
