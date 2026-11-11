@@ -538,6 +538,7 @@ impl App {
             bar_ours: self.saved.show_tx,
             station: &station,
             decoding_ft8,
+            slot_decoded: self.decode.last_slot_utc(),
         };
         let log = &self.logbook;
         let badges = |call: &str, grid: Option<&str>| {

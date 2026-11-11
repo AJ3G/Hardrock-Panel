@@ -808,6 +808,9 @@ it is on another mode). Use a dummy load for your first overs.
   until the radio's power setting has been read).
   Moving it during an over changes the drive at once; raised past the
   amplifier's drive limit, the over stops.
+- An FT8 over picks its message once the slot before has been decoded
+  (waiting up to a second for it), so a station's answer is replied to in
+  your very next over.
 - The slot bar is cyan while you listen and orange while you transmit, with
   a mark where the over ends. **DT** is your clock against the stations you
   hear; past 0.5 s it turns amber, and Windows' time wants syncing.

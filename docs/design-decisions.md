@@ -1061,3 +1061,8 @@ A band change cleared HEARD with the FT8 list. Now WSPR's reports are kept acros
 ## 96. GLOBE: a solid globe (11 Nov 2026)
 
 **What.** Nothing behind the globe is drawn any more: the faint far side of an arc (decision 73's `BEHIND`), the ring where a path ends behind the globe, and the FT8 strobe's pulse behind it are gone. An arc lifted above the surface still shows where it rises past the limb (`sphere::arc_runs` marks those pieces in front; `drawn_runs` keeps only those). The flat map is unchanged.
+
+## 97. FT8: an over waits for the slot before to be decoded (11 Nov 2026)
+
+AJ3G's transcript with CT7AUT showed `064230 TX CT7AUT AJ3G FM18` above `064230 RX AJ3G CT7AUT +00`: the over keyed at the slot's start, a few milliseconds before DECODE finished the slot in which CT7AUT had answered, so the grid went out a second time and the QSO lost a cycle (CT7AUT moved on). An FT8 over now picks its message only once DECODE has finished the slot before (`sched::slot_decoded`), waiting up to 1 s (`DECODE_WAIT_S`) for it, then going with what it has. Its audio still starts at 0.5 s when it can; started later, the whole message goes out a little after now (`sched::ft8_start_s`, a later DT, at most about 2.1 s) rather than losing its first symbols, which the old late start cut off.
+

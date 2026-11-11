@@ -1001,6 +1001,11 @@ impl Decode {
     /// mode's period and the first slot it takes whole, while a mode with
     /// slots runs; `None` otherwise (keyboard modes, pictures, links).
     /// The mode the decoder is running, if it is.
+    /// The last slot decoded, UTC s.
+    pub(crate) fn last_slot_utc(&self) -> Option<i64> {
+        self.last_slot.map(|(t, _, _)| t)
+    }
+
     pub(crate) fn running_kind(&self) -> Option<Kind> {
         self.worker.as_ref().map(|(k, _)| *k)
     }

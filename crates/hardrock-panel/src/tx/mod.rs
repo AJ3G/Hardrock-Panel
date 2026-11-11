@@ -296,6 +296,8 @@ pub(crate) struct Env<'a> {
     pub station: &'a StationSettings,
     /// DECODE is running FT8.
     pub decoding_ft8: bool,
+    /// The last slot DECODE has finished decoding, UTC s.
+    pub slot_decoded: Option<i64>,
 }
 
 /// The TX engine: the sequencer, the over on the air, and the decode list.
@@ -951,12 +953,22 @@ impl Tx {
                 if !env.decoding_ft8 {
                     return Err("DECODE isn't running FT8, so the sequencer can't hear replies.".into());
                 }
+                // Decision 97: the message is chosen once the slot before
+                // has been decoded, so a reply that came in it is answered
+                // now, not one over late (AJ3G, 11 Nov 2026: a second FM18
+                // went out after CT7AUT's report had arrived). If the
+                // decode is slow the over waits for it up to DECODE_WAIT_S,
+                // then goes with what it has.
+                let into = now - t0 as f64;
+                if !sched::slot_decoded(t0, env.slot_decoded) && into < sched::DECODE_WAIT_S {
+                    return Ok(false);
+                }
                 let Some(off) = self.tx_audio(s, &env) else {
                     return Err(self.audio_error(s, &env));
                 };
                 let m = wave::Message::ft8(&text, off)
                     .ok_or_else(|| format!("\"{text}\" can't be sent as FT8."))?;
-                (t0, m, text, wave::FT8_START_S, wave::FT8_LEN_S)
+                (t0, m, text, sched::ft8_start_s(into), wave::FT8_LEN_S)
             }
             TxMode::Wspr => {
                 let Some(t0) = sched::wspr_open(now) else { return Ok(false) };
@@ -1322,6 +1334,7 @@ mod round3_tests {
             bar_ours: true,
             station: &station,
             decoding_ft8: false,
+            slot_decoded: None,
         };
         tx.frame(s, env, Vec::new(), &heard, &|_, _| Badges::default())
     }

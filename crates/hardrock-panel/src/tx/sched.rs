@@ -30,6 +30,24 @@ pub(crate) fn ft8_open(now: f64, even: bool) -> Option<i64> {
     (is_even(t0, FT8_PERIOD) == even && now - (t0 as f64) < FT8_LATE_S).then_some(t0)
 }
 
+/// How long into its slot an FT8 over waits for the slot before to be
+/// decoded, s (decision 97).
+pub(crate) const DECODE_WAIT_S: f64 = 1.0;
+
+/// Whether the slot before `t0` has been decoded, from the last slot
+/// DECODE finished.
+pub(crate) fn slot_decoded(t0: i64, last: Option<i64>) -> bool {
+    last.is_some_and(|d| d >= t0 - FT8_PERIOD)
+}
+
+/// When an over keyed `into` s into its slot starts its audio, s into the
+/// slot: at 0.5 s as WSJT-X does, or a little after now when that has gone,
+/// so the whole message goes out a little late (a later DT) rather than
+/// losing its first symbols.
+pub(crate) fn ft8_start_s(into: f64) -> f64 {
+    super::wave::FT8_START_S.max(into + 0.1)
+}
+
 /// Seconds until the next FT8 slot of parity `even` starts.
 pub(crate) fn ft8_next_in(now: f64, even: bool) -> f64 {
     let t0 = slot_start(now, FT8_PERIOD);
@@ -78,6 +96,19 @@ pub(crate) fn wspr_next_in(call: &str, now: f64, pct: u8) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_over_waits_for_the_slot_before_to_be_decoded() {
+        // Slot at 06:42:30 (t0); the one before began 15 s earlier.
+        let t0 = 1_794_465_750;
+        assert!(!slot_decoded(t0, None));
+        assert!(!slot_decoded(t0, Some(t0 - 30)));
+        assert!(slot_decoded(t0, Some(t0 - 15)));
+        // On time it starts at 0.5 s; late, a little after now, whole.
+        assert_eq!(ft8_start_s(0.05), 0.5);
+        assert!((ft8_start_s(DECODE_WAIT_S) - 1.1).abs() < 1e-9);
+        assert!(ft8_start_s(FT8_LATE_S) + crate::tx::wave::FT8_LEN_S < FT8_PERIOD as f64);
+    }
 
     #[test]
     fn ft8_slots_open_for_two_seconds_on_their_parity() {
