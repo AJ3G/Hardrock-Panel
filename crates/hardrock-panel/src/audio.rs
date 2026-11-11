@@ -219,8 +219,17 @@ impl Player {
         self.stream.is_some() && self.pos.load(Ordering::Relaxed) >= self.lead + self.len
     }
 
+    /// Its level, as the LEVEL slider moves it while it plays (decision 87):
+    /// the output ramps to it over a few milliseconds, as TUNE's tone does,
+    /// so a move doesn't click.
     pub(crate) fn set_gain(&self, g: f32) {
         self.level.store(g.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// The level asked for.
+    #[cfg(test)]
+    pub(crate) fn gain(&self) -> f32 {
+        f32::from_bits(self.level.load(Ordering::Relaxed))
     }
 
     /// The samples that have gone to the output since the last call (at
@@ -303,15 +312,19 @@ fn build_buf<T: cpal::SizedSample + cpal::FromSample<f32>>(
     (buf, lead, mut tap): (Arc<Vec<f32>>, usize, rtrb::Producer<f32>),
 ) -> Result<cpal::Stream, String> {
     let channels = config.channels.max(1) as usize;
+    let step = 1.0 / (RAMP_S * config.sample_rate as f32);
+    // The level the output is at, ramping to the one asked for.
+    let mut now = 0.0f32;
     device
         .build_output_stream(
             config,
             move |data: &mut [T], _| {
-                let g = f32::from_bits(level.load(Ordering::Relaxed));
+                let want = f32::from_bits(level.load(Ordering::Relaxed));
                 let mut p = pos.load(Ordering::Relaxed);
                 for frame in data.chunks_mut(channels) {
+                    now += (want - now).clamp(-step, step);
                     let v = p.checked_sub(lead).and_then(|i| buf.get(i)).copied().unwrap_or(0.0);
-                    let s = v * g;
+                    let s = v * now;
                     let _ = tap.push(s);
                     let v = s.to_sample::<T>();
                     for x in frame.iter_mut() {

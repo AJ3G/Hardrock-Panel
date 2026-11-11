@@ -70,6 +70,45 @@ pub(crate) enum Sort {
     Country,
 }
 
+/// A column of the WSPR lists to sort by (decision 90).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub(crate) enum WsprKey {
+    #[default]
+    Utc,
+    Snr,
+    Call,
+    Km,
+}
+
+/// How a WSPR list is sorted: a column, and which way. Newest first to
+/// start; sorted by anything but UTC, the list drops its 2 minute cycles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct WsprSort {
+    pub key: WsprKey,
+    /// Newest, strongest, farthest or Z first.
+    pub desc: bool,
+}
+
+impl Default for WsprSort {
+    fn default() -> Self {
+        WsprSort { key: WsprKey::Utc, desc: true }
+    }
+}
+
+impl WsprSort {
+    /// A click on a column's heading: that column, its natural way first
+    /// (newest, strongest, farthest, A to Z); again, the other way.
+    pub(crate) fn click(&mut self, k: WsprKey) {
+        if self.key == k {
+            self.desc = !self.desc;
+        } else {
+            self.key = k;
+            self.desc = k != WsprKey::Call;
+        }
+    }
+}
+
 /// The TX window's settings, kept from run to run. ENABLE TX is not one of
 /// them: it is off at every start.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -105,6 +144,12 @@ pub(crate) struct TxSettings {
     pub wspr_dbm: i32,
     pub wspr_roam: bool,
     pub wspr_audio_hz: f32,
+    /// The share TRANSMIT went back to OFF from when ENABLE TX was turned
+    /// off, for ENABLE TX to bring back (decision 91).
+    pub wspr_pct_last: u8,
+    /// How HEARD and HEARD ME are sorted (decision 90).
+    pub wspr_heard_sort: WsprSort,
+    pub wspr_me_sort: WsprSort,
     /// Ask before logging, rather than logging at once.
     pub prompt_log: bool,
     pub sort: Sort,
@@ -137,6 +182,9 @@ impl Default for TxSettings {
             wspr_dbm: 37,
             wspr_roam: true,
             wspr_audio_hz: 1500.0,
+            wspr_pct_last: 20,
+            wspr_heard_sort: WsprSort::default(),
+            wspr_me_sort: WsprSort::default(),
             prompt_log: false,
             sort: Sort::Time,
             transcript_h: 250.0,
@@ -242,6 +290,9 @@ pub(crate) struct Env<'a> {
     pub bar_off: Option<f64>,
     /// The bar was dragged by hand since last frame.
     pub bar_moved: bool,
+    /// The TX window is open, so the bar is TX's: closed, it is the
+    /// operator's measuring cursor and is neither read nor placed.
+    pub bar_ours: bool,
     pub station: &'a StationSettings,
     /// DECODE is running FT8.
     pub decoding_ft8: bool,
@@ -299,6 +350,11 @@ pub(crate) struct Tx {
     /// The station worked, where we last copied them: call, audio Hz and
     /// RF Hz (0 when unknown), from each of their decodes.
     dx_seen: Option<(String, f32, f64)>,
+    /// The mode the scope's bar was last placed for, so entering a mode
+    /// places it afresh rather than reading it (decision 88).
+    bar_mode: Option<TxMode>,
+    /// ENABLE TX last frame, to see it turned off in WSPR (decision 91).
+    was_enabled: bool,
 }
 
 impl Default for Tx {
@@ -331,6 +387,8 @@ impl Default for Tx {
             roam: 0x9e37_79b9_7f4a_7c15,
             list_dial: None,
             dx_seen: None,
+            bar_mode: None,
+            was_enabled: false,
         }
     }
 }
@@ -438,11 +496,61 @@ impl Tx {
     /// the watchdog starts over. REPLY and CALL CQ do this too in FT8
     /// (AJ3G, 11 Nov 2026); every interlock still decides whether an over
     /// keys.
-    pub(crate) fn enable(&mut self, s: &TxSettings) {
+    pub(crate) fn enable(&mut self, s: &mut TxSettings) {
         self.enabled = true;
         self.note = None;
         if s.mode == TxMode::Ft8 {
             self.qso.reset_watchdog();
+        }
+        // WSPR: TRANSMIT back to the share it had (decision 91).
+        if s.mode == TxMode::Wspr && s.wspr_pct == 0 {
+            s.wspr_pct = if s.wspr_pct_last == 0 { 20 } else { s.wspr_pct_last };
+        }
+        self.was_enabled = true;
+    }
+
+    /// ENABLE TX off by hand (or by picking TRANSMIT OFF). In WSPR the duty
+    /// chips go to OFF, the share kept for ENABLE TX to bring back; HALT,
+    /// an interlock or a mode change do the same through `frame`.
+    pub(crate) fn disable(&mut self, s: &mut TxSettings) {
+        self.enabled = false;
+        self.note = None;
+        self.duty_off(s);
+    }
+
+    /// WSPR's TRANSMIT to OFF, keeping the share it had (decision 91).
+    fn duty_off(&mut self, s: &mut TxSettings) {
+        if s.mode == TxMode::Wspr && s.wspr_pct != 0 {
+            s.wspr_pct_last = s.wspr_pct;
+            s.wspr_pct = 0;
+        }
+        self.was_enabled = false;
+    }
+
+    /// TRANSMIT's OFF chip, or a share: OFF also turns ENABLE TX off.
+    pub(crate) fn set_duty(&mut self, s: &mut TxSettings, pct: u8) {
+        if pct == 0 {
+            self.disable(s);
+        } else {
+            s.wspr_pct = pct;
+        }
+    }
+
+    /// The LEVEL slider of the over going out, live (decision 87): its
+    /// audio follows the slider at once, as TX TUNE's tone follows the Tune
+    /// slider, so the drive the interlocks judge (at this same level) is the
+    /// drive going out. `ceiling` is the radio's audio ceiling.
+    ///
+    /// SAFETY INTERLOCK (docs/safety-interlocks.md, #6): called only once
+    /// the over has passed the TUNE checks at `level`.
+    pub(crate) fn set_level(&mut self, level: f32, ceiling: f32) {
+        if self.over.is_none() {
+            return;
+        }
+        let g = audio::gain_for(level, ceiling);
+        if g != self.gain {
+            self.gain = g;
+            self.player.set_gain(g);
         }
     }
 
@@ -642,15 +750,34 @@ impl Tx {
         if self.report != self.qso.reports().0.unwrap_or(self.report) {
             self.qso.set_report(self.report);
         }
-        // The transmit audio: the bar, AUTO's pick, or the box.
-        if env.bar_moved && s.freq == FreqMode::Auto {
-            s.freq = FreqMode::Manual;
+        // ENABLE TX turned off in WSPR (HALT, an interlock, a mode change):
+        // TRANSMIT to OFF (decision 91).
+        if self.was_enabled && !self.enabled {
+            self.duty_off(s);
         }
-        if let Some(b) = env.bar_off.filter(|_| self.over.is_none())
-            && s.freq != FreqMode::Auto
-            && (100.0..=3000.0).contains(&b)
-        {
-            s.audio_hz = b as f32;
+        self.was_enabled = self.enabled;
+        // The transmit audio: the bar, AUTO's pick, or the box. Entering a
+        // mode, the bar is placed for it, never read (it was the other
+        // mode's).
+        let entering = self.bar_mode != Some(s.mode);
+        self.bar_mode = env.bar_ours.then_some(s.mode);
+        if s.mode == TxMode::Ft8 && !entering {
+            if env.bar_moved && s.freq == FreqMode::Auto {
+                s.freq = FreqMode::Manual;
+            }
+            if let Some(b) = env.bar_off.filter(|_| self.over.is_none())
+                && s.freq != FreqMode::Auto
+                && (100.0..=3000.0).contains(&b)
+            {
+                s.audio_hz = b as f32;
+            }
+        }
+        if s.mode == TxMode::Wspr {
+            if entering && env.bar_ours {
+                // ROAM starts again from the sub-band's centre.
+                self.wspr_sent = false;
+            }
+            out.set_bar_off = self.wspr_bar(s, &env, entering);
         }
         let ours: Vec<f32> = self
             .heard
@@ -716,11 +843,11 @@ impl Tx {
         me: &str,
     ) {
         if let Some((dial, _)) = env.rx_dial {
-            // A band change (or a big move) clears the list.
+            // A band change (or a big move) clears the FT8 list. WSPR's is
+            // kept and shown by band (decision 92).
             if self.list_dial.is_some_and(|d| (d - dial).abs() > 5_000.0) {
                 self.rows.clear();
                 self.heard.clear();
-                self.wspr_rows.clear();
             }
             self.list_dial = Some(dial);
         }
@@ -932,6 +1059,32 @@ impl Tx {
         (100.0..=2950.0).contains(&a).then_some(a.round() as f32)
     }
 
+    /// WSPR and the scope's bar (decision 88): a drag sets the beacon's
+    /// offset (1400 to 1600 Hz, from the next beacon) and turns ROAM off;
+    /// otherwise the bar shows the offset set, or with ROAM the one of the
+    /// beacon going (or last gone) out, 1500 Hz before the first. Returns
+    /// where the bar should go, as an offset from the receiver's dial.
+    fn wspr_bar(&mut self, s: &mut TxSettings, env: &Env<'_>, entering: bool) -> Option<f64> {
+        let rx = env.rx_dial?;
+        let tx = env.rig.and_then(rig_tx_dial);
+        if env.bar_moved
+            && !entering
+            && let Some(b) = env.bar_off
+        {
+            let a = wspr_audio_from_bar(b, rx, tx);
+            s.wspr_audio_hz = (a.clamp(WSPR_LO_HZ as f64, WSPR_HI_HZ as f64) as f32).round();
+            s.wspr_roam = false;
+        }
+        let want = wspr_bar_from_audio(self.wspr_bar_audio(s) as f64, rx, tx);
+        (env.bar_off.is_none_or(|b| (b - want).abs() >= 1.0)).then_some(want)
+    }
+
+    /// The audio offset the bar shows in WSPR: the one set, or with ROAM
+    /// the beacon's going (or last gone) out, else the sub-band's centre.
+    pub(crate) fn wspr_bar_audio(&self, s: &TxSettings) -> f32 {
+        if s.wspr_roam { self.wspr_offset(s).unwrap_or(WSPR_MID_HZ) } else { s.wspr_audio_hz }
+    }
+
     fn audio_error(&self, s: &TxSettings, env: &Env<'_>) -> String {
         match env.rig {
             None => "The radio isn't connected.".into(),
@@ -943,6 +1096,62 @@ impl Tx {
             ),
         }
     }
+}
+
+/// WSPR's sub-band in the audio, Hz: 200 Hz either side of 1500.
+pub(crate) const WSPR_LO_HZ: f32 = 1400.0;
+pub(crate) const WSPR_HI_HZ: f32 = 1600.0;
+pub(crate) const WSPR_MID_HZ: f32 = 1500.0;
+
+/// The radio's transmit dial, Hz: VFO B in split, else the receive VFO.
+pub(crate) fn rig_tx_dial(r: &RigStatus) -> Option<f64> {
+    crate::scope::txsig::tx_dial(r.freq_hz, r.freq_b_hz, r.vfo, r.split)
+}
+
+/// The bar's offset from the receiver's dial (`rx`: dial and lower
+/// sideband) for a beacon `audio` Hz from the transmit dial `tx` (the
+/// receive dial when not known): the two differ in split.
+pub(crate) fn wspr_bar_from_audio(audio: f64, rx: (f64, bool), tx: Option<f64>) -> f64 {
+    let (dial, lower) = rx;
+    let rf = crate::scope::txsig::place(tx.unwrap_or(dial), lower, audio);
+    if lower { dial - rf } else { rf - dial }
+}
+
+/// The beacon's audio from the transmit dial for the bar at `bar` Hz from
+/// the receiver's dial: [`wspr_bar_from_audio`] the other way.
+pub(crate) fn wspr_audio_from_bar(bar: f64, rx: (f64, bool), tx: Option<f64>) -> f64 {
+    let (dial, lower) = rx;
+    let rf = crate::scope::txsig::place(dial, lower, bar);
+    let tx = tx.unwrap_or(dial);
+    if lower { tx - rf } else { rf - tx }
+}
+
+/// Our signal's true RF, Hz (decision 89): the transmit dial, plus the
+/// audio on USB (minus on LSB), plus the transverter's offset.
+pub(crate) fn tx_rf_hz(r: &RigStatus, audio_hz: f64, xvtr_hz: f64) -> Option<f64> {
+    let dial = rig_tx_dial(r)?;
+    Some(crate::scope::txsig::place(dial, r.mode == Some("LSB"), audio_hz) + xvtr_hz)
+}
+
+/// A frequency as "10.140 200 MHz (10 140.200 kHz)".
+pub(crate) fn rf_text(hz: f64) -> String {
+    let hz = hz.round().max(0.0) as u64;
+    let (mhz, rest) = (hz / 1_000_000, hz % 1_000_000);
+    let (k, h) = (rest / 1000, rest % 1000);
+    let khz_whole = hz / 1000;
+    let khz = if khz_whole >= 1000 {
+        format!("{} {:03}", khz_whole / 1000, khz_whole % 1000)
+    } else {
+        khz_whole.to_string()
+    };
+    format!("{mhz}.{k:03} {h:03} MHz ({khz}.{h:03} kHz)")
+}
+
+/// A frequency as the WSPR lists show it: "10.140 123" MHz.
+pub(crate) fn mhz_cell(hz: f64) -> String {
+    let hz = hz.round().max(0.0) as u64;
+    let rest = hz % 1_000_000;
+    format!("{}.{:03} {:03}", hz / 1_000_000, rest / 1000, rest % 1000)
 }
 
 /// Where a WSPR beacon stops for the amplifier's heat: over 155 °F, a step
@@ -990,5 +1199,200 @@ mod hot_tests {
         let mut a = amp(156.0, false);
         a.readings.as_mut().unwrap().celsius = None;
         assert!(too_hot(&a).is_none());
+    }
+}
+
+#[cfg(test)]
+mod round3_tests {
+    use super::*;
+
+    fn over(mode: TxMode) -> Over {
+        Over {
+            mode,
+            slot_utc: 0,
+            text: "AJ3G FN20 37".into(),
+            audio_hz: 1500.0,
+            asked: Instant::now(),
+            keyed_seen: true,
+            end_utc: 110.6,
+        }
+    }
+
+    #[test]
+    fn level_moves_the_over_going_out_at_once() {
+        let mut tx = Tx::default();
+        // Nothing going out: nothing to change.
+        tx.set_level(0.25, 1.0);
+        assert_eq!(tx.gain, 0.0);
+        tx.over = Some(over(TxMode::Wspr));
+        tx.set_level(0.25, 1.0);
+        assert_eq!(tx.gain, 0.5);
+        assert_eq!(tx.player.gain(), 0.5);
+        // The same level as TX TUNE's tone gets, within the radio's ceiling.
+        tx.set_level(1.0, 0.24);
+        assert_eq!(tx.player.gain(), audio::gain_for(1.0, 0.24));
+    }
+
+    #[test]
+    fn the_wspr_bar_and_the_beacon_agree_in_split_and_on_lsb() {
+        // No split: the bar is the audio.
+        assert_eq!(wspr_bar_from_audio(1500.0, (10_138_700.0, false), Some(10_138_700.0)), 1500.0);
+        // Split, VFO B 300 Hz above: the beacon's audio lands 300 Hz higher.
+        let rx = (10_138_700.0, false);
+        let tx = Some(10_139_000.0);
+        assert_eq!(wspr_bar_from_audio(1500.0, rx, tx), 1800.0);
+        assert_eq!(wspr_audio_from_bar(1800.0, rx, tx), 1500.0);
+        // LSB: below the dial.
+        let rx = (7_040_100.0, true);
+        let tx = Some(7_040_000.0);
+        let bar = wspr_bar_from_audio(1450.0, rx, tx);
+        assert_eq!(bar, 1550.0);
+        assert_eq!(wspr_audio_from_bar(bar, rx, tx), 1450.0);
+    }
+
+    #[test]
+    fn the_beacons_rf_is_the_transmit_dial_plus_the_offset() {
+        let mut r =
+            RigStatus { freq_hz: Some(10_138_700), mode: Some("USB"), ..Default::default() };
+        assert_eq!(tx_rf_hz(&r, 1500.0, 0.0), Some(10_140_200.0));
+        assert_eq!(rf_text(10_140_200.0), "10.140 200 MHz (10 140.200 kHz)");
+        // Split: VFO B.
+        r.freq_b_hz = Some(10_138_800);
+        r.split = Some(true);
+        assert_eq!(tx_rf_hz(&r, 1500.0, 0.0), Some(10_140_300.0));
+        // LSB, and a transverter 116 MHz up.
+        let r = RigStatus { freq_hz: Some(28_490_000), mode: Some("LSB"), ..Default::default() };
+        assert_eq!(tx_rf_hz(&r, 1500.0, 116_000_000.0), Some(144_488_500.0));
+        assert_eq!(rf_text(144_488_500.0), "144.488 500 MHz (144 488.500 kHz)");
+        assert_eq!(rf_text(474_200.0), "0.474 200 MHz (474.200 kHz)");
+        assert_eq!(mhz_cell(10_140_123.4), "10.140 123");
+        assert_eq!(tx_rf_hz(&RigStatus::default(), 1500.0, 0.0), None);
+    }
+
+    #[test]
+    fn enable_tx_and_wsprs_transmit_off_go_together() {
+        let mut tx = Tx::default();
+        let mut s = TxSettings { mode: TxMode::Wspr, wspr_pct: 33, ..Default::default() };
+        tx.enable(&mut s);
+        assert_eq!(s.wspr_pct, 33);
+        tx.disable(&mut s);
+        assert!(!tx.enabled);
+        assert_eq!((s.wspr_pct, s.wspr_pct_last), (0, 33));
+        tx.enable(&mut s);
+        assert_eq!(s.wspr_pct, 33);
+        // OFF turns ENABLE TX off, and keeps the share.
+        tx.set_duty(&mut s, 0);
+        assert!(!tx.enabled);
+        assert_eq!((s.wspr_pct, s.wspr_pct_last), (0, 33));
+        // A share doesn't turn it on.
+        tx.set_duty(&mut s, 10);
+        assert!(!tx.enabled);
+        tx.enable(&mut s);
+        assert_eq!(s.wspr_pct, 10);
+        // FT8 leaves WSPR's share alone.
+        s.mode = TxMode::Ft8;
+        tx.disable(&mut s);
+        assert_eq!(s.wspr_pct, 10);
+    }
+
+    fn frame(
+        tx: &mut Tx,
+        s: &mut TxSettings,
+        bar_off: Option<f64>,
+        bar_moved: bool,
+        enabled_by_halt: bool,
+    ) -> TxOut {
+        let amp = AmpStatus::default();
+        let mut outside = crate::outside::Outside::default();
+        let station = StationSettings::default();
+        let heard = station::Heard::default();
+        if enabled_by_halt {
+            tx.halt(None);
+        }
+        let env = Env {
+            now: 1_800_000_030.0,
+            link: None,
+            rig: None,
+            amp: &amp,
+            device: None,
+            outside: &mut outside,
+            rx_dial: Some((10_138_700.0, false)),
+            bar_off,
+            bar_moved,
+            bar_ours: true,
+            station: &station,
+            decoding_ft8: false,
+        };
+        tx.frame(s, env, Vec::new(), &heard, &|_, _| Badges::default())
+    }
+
+    #[test]
+    fn the_scopes_bar_sets_wsprs_offset() {
+        let mut tx = Tx::default();
+        let mut s = TxSettings {
+            mode: TxMode::Wspr,
+            wspr_roam: true,
+            audio_hz: 900.0,
+            ..Default::default()
+        };
+        // Entering WSPR: the bar to the sub-band's centre, whatever it was.
+        let o = frame(&mut tx, &mut s, Some(900.0), true, false);
+        assert_eq!(o.set_bar_off, Some(1500.0));
+        assert!(s.wspr_roam);
+        // A drag: the offset, clamped to the sub-band, and ROAM off.
+        let o = frame(&mut tx, &mut s, Some(1720.0), true, false);
+        assert_eq!(s.wspr_audio_hz, 1600.0);
+        assert!(!s.wspr_roam);
+        assert_eq!(o.set_bar_off, Some(1600.0));
+        let o = frame(&mut tx, &mut s, Some(1452.4), true, false);
+        assert_eq!(s.wspr_audio_hz, 1452.0);
+        assert_eq!(o.set_bar_off, None);
+        // FT8's offset is FT8's.
+        assert_eq!(s.audio_hz, 900.0);
+        // ROAM: the bar goes where each beacon went.
+        s.wspr_roam = true;
+        tx.wspr_hz = 1433.0;
+        tx.wspr_sent = true;
+        let o = frame(&mut tx, &mut s, Some(1452.0), false, false);
+        assert_eq!(o.set_bar_off, Some(1433.0));
+        // Back to FT8: its own offset, not WSPR's bar.
+        s.mode = TxMode::Ft8;
+        s.freq = FreqMode::Manual;
+        let o = frame(&mut tx, &mut s, Some(1433.0), false, false);
+        assert_eq!(s.audio_hz, 900.0);
+        assert_eq!(o.set_bar_off, Some(900.0));
+    }
+
+    #[test]
+    fn halt_in_wspr_sets_transmit_off() {
+        let mut tx = Tx::default();
+        let mut s = TxSettings { mode: TxMode::Wspr, wspr_pct: 50, ..Default::default() };
+        tx.enable(&mut s);
+        frame(&mut tx, &mut s, None, false, false);
+        assert_eq!(s.wspr_pct, 50);
+        frame(&mut tx, &mut s, None, false, true);
+        assert_eq!((s.wspr_pct, s.wspr_pct_last), (0, 50));
+    }
+
+    #[test]
+    fn a_band_change_keeps_the_wspr_list() {
+        let mut tx = Tx::default();
+        tx.wspr_rows.push_front(WsprRow {
+            h: WsprHeard {
+                slot_utc: 0,
+                snr_db: -20.0,
+                drift_hz: 0.0,
+                audio_hz: 1500.0,
+                call: "K1ABC".into(),
+                grid: "FN42".into(),
+                dbm: 37,
+                rf_hz: 10_140_200.0,
+            },
+            path: None,
+        });
+        tx.list_dial = Some(14_095_600.0);
+        let mut s = TxSettings { mode: TxMode::Wspr, ..Default::default() };
+        frame(&mut tx, &mut s, None, false, false);
+        assert_eq!(tx.wspr_rows.len(), 1);
     }
 }

@@ -784,6 +784,8 @@ it is on another mode). Use a dummy load for your first overs.
 - **LEVEL** is each mode's drive, a share of the radio's power setting, as
   the Tune slider is; beside it, the drive that gives (*≈ 2.5 W*, or *— W*
   until the radio's power setting has been read).
+  Moving it during an over changes the drive at once; raised past the
+  amplifier's drive limit, the over stops.
 - The slot bar is cyan while you listen and orange while you transmit, with
   a mark where the over ends. **DT** is your clock against the stations you
   hear; past 0.5 s it turns amber, and Windows' time wants syncing.
@@ -851,6 +853,20 @@ on. The list on the left has two parts, newest 2 minute cycle first:
 dBm, distance, heading, audio offset), and **HEARD ME**, the reports of your
 beacon from wspr.live or WSPRnet (GLOBE's WSPR HEARD ME) and PSK Reporter,
 fetched while GLOBE is open. **CLEAR** empties both.
+
+- Under your message, where the beacon lands: *TX 10.140 200 MHz (10 140.200
+  kHz)*, the transmit dial (VFO B in split) plus the offset, and any
+  transverter.
+- The scope's bar is the WSPR offset while TX is open: it starts at 1 500 Hz;
+  drag it to set the offset (1 400 to 1 600 Hz, from the next beacon), which
+  turns ROAM off. With ROAM on it moves to each beacon's offset.
+- Turning ENABLE TX off (or HALT TX) sets TRANSMIT to OFF; turning it on
+  again brings the share back. Picking OFF turns ENABLE TX off.
+- HEARD and HEARD ME are tables: click **UTC**, **SNR**, **CALL** or **KM**
+  to sort (▼/▲; click again to reverse), remembered. Sorted by anything but
+  UTC the 2 minute cycles are dropped. HEARD's **MHz** is each station's RF.
+- Both show the band you are on; what was heard on other bands is kept for
+  when you go back.
 
 ## The log
 
