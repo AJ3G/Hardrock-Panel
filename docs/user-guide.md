@@ -849,8 +849,11 @@ the panel sends the right reply to what it hears, through to the log, and you
 can always send a line again: the round button beside a line sends it next,
 the **TxN** button now (mid-over, the rest of that over becomes it), as in
 WSJT-X. **Generate Std Msgs** rebuilds the six lines; Tx5's arrow picks one of
-your saved free-text lines. **+** on a row queues the station; REPLY during a
-QSO queues it first. Click a queued call to drop it.
+your saved free-text lines. **+** on a row queues the station. REPLY (or a
+double-click) on another station during a QSO stops that QSO, as STOP QSO
+does (nothing logged, not queued), and starts the new one at once: an over
+already on the air finishes and the next goes to the new station; the
+transcript says "Left K1ABC for W9XYZ". Click a queued call to drop it.
 
 - Beside the station's call, the audio offset you copy them at (*1737 Hz*),
   from their latest decode.
@@ -883,7 +886,10 @@ QSO queues it first. Click a queued call to drop it.
   Hovering a line shows the station's card, the flag beside its country.
 - **TX audio and the scope's bar.** While TX is open the red offset bar on
   SCOPE is where you transmit. **AUTO** picks the clearest gap in your own
-  slots before each over and shades the busy parts faintly; **MANUAL** follows
+  slots before each over and shades the busy parts faintly. It counts the
+  stations decoded in your own period (strong ones, −5 dB or better, for 5
+  minutes, others for 2) and any signal the receiver heard there that
+  nothing decoded, over the last few of your slots; **MANUAL** follows
   the bar and a row you click; **HOLD** moves only when you drag the bar or
   type the figure. Dragging the bar on AUTO switches it to MANUAL. The bar
   can't move while you transmit.
