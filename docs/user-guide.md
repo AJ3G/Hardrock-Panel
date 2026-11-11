@@ -793,6 +793,12 @@ QSO queues it first. Click a queued call to drop it.
   can't move while you transmit.
 - The **TX watchdog** stops a run after 6 minutes with no reply and no touch,
   and a station is given up after 10 unanswered calls.
+- **Compound calls** (EK/RX3DPK, PJ4/K1ABC, W1AW/QRP) work as in WSJT-X: the
+  lines show, and the transcript records, the call that goes as a hash in
+  brackets, e.g. `<EK/RX3DPK> AJ3G FN20`, `EK/RX3DPK <AJ3G> RR73`. A CQ from
+  a compound call carries no grid. You can type a line plainly; it goes out
+  in that form. Replies to such stations decode with the call filled in once
+  the panel has heard it, or once you are working it.
 
 **WSPR.** **TRANSMIT** sends a beacon in 10, 20, 33 or 50 % of the 2 minute
 slots, picked from your call. **POWER** is the figure in the message: it must
@@ -954,6 +960,11 @@ panel won't switch the antenna, band or tuner:
   level, for no longer than its message, and the radio's link unkeys a data
   message after 116 s whatever happens. A WSPR beacon doesn't start while the
   amplifier is warm.
+- The HR500 often doesn't answer while it transmits. An over (TUNE, RIG
+  TUNE, a TX window over, an outside program's) already keyed carries on
+  through up to 5 s of that on the amplifier's last readings; a trip, high
+  SWR, over-drive or wrong band in them still stops it at once. Past 5 s it
+  stops. Starting one always needs the amplifier answering.
 
 Each of these is marked *SAFETY INTERLOCK* in the code and explained in
 [safety-interlocks.md](safety-interlocks.md).

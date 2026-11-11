@@ -865,3 +865,14 @@ The transmit plan's items 2 and 3 (AJ3G, 10 Nov 2026).
 
 **Not done yet:** occupancy from the scope's own spectrum for AUTO (decodes only for now), a sound for "calling you", REPLY on DECODE's own rows, WSPR's own decodes in the TX list (they are on GLOBE).
 
+## 72. Amplifier silence mid-over, compound calls in FT8, and the decoder's hash table (11 Nov 2026)
+
+**Why.** AJ3G, 11 Nov 2026: "amplifier is not connected" warnings were cutting his QSOs and CQs, which SDRoxide never did; the TX window refused `EK/RX3DPK AJ3G FM18`; and replies to compound-call stations decoded as `<...> KG7FST DM09` where SDRoxide resolved them.
+
+**What.**
+- **Interlock #6, a short silence mid-over (AJ3G approved the plan).** The HR500 often leaves its status query unanswered while keyed. The link (`hardrock::link`, `link_lost`) now calls the amplifier lost while transmitting only after 5 s with no answer, as well as four misses; at rest, four misses as before. The panel tells the link every frame whether the radio is keyed (`AmpLink::set_transmitting`); the link also counts the amplifier's own TX light (or, on old firmware, its drive) from the last answer, whichever says so first. `AmpStatus::readings_at` gives the readings' age. In the panel (`tune::AmpHold`), an over already keyed is judged by the last readings for up to 5 s from when they were taken, so a trip, SWR, over-drive or band mismatch they show still stops it; after 5 s it stops. Starting needs readings no older than 3.5 s (`tune::LIVE_MAX`), about what the link took to give up at rest before. See docs/safety-interlocks.md #6.
+- **Compound calls in FT8 TX** (`tx/msg.rs`, `wsjtx_form`, `pack`): WSJT-X's forms. A grid or report to a non-standard call is a Type 1 message with that call as its 22-bit hash, written into the call field by hand as SDRoxide does (mfsk-core 0.10's `pack28` has none), hashing the whole call as WSJT-X does; RRR, RR73, 73 and a bare pair are Type 4, the non-standard call spelled out and the other hashed, in the order written (bit 70, which mfsk-core always leaves for hash-first); a grid from our own compound call goes as Type 4 without it so the far station hears our call spelled out; CQ is Type 4 (no grid, no CQ word). The sequencer's templates produce these forms, so the Tx lines and the transcript show the brackets.
+- **The decoder learns every call** (`decoders::wsjt`, `learn`): standard or not, never `...`; and the panel registers its own call and the TX window's DX call before each slot (`WsjtDecoder::seed_calls`), as SDRoxide's `ApHints::calls`.
+
+**Not done:** mfsk-core's hash table drops a `/P` or `/R` before hashing where WSJT-X hashes the whole call, so a hashed `W1AW/P` from elsewhere may still read `<...>`.
+
