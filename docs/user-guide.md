@@ -160,24 +160,26 @@ RF frequency and sends the radio the IF, and BAND offers the bands the
 converter reaches. The radio is never told.
 
 **TUNE.** With the radio connected, a strip under the top line has two ways to
-key the radio, its power buttons, the **Tune** slider, and how long TUNE may
-run (10 s to start, up to 60 s).
+key the radio, its power buttons, the **TX TUNE level** slider, and how long
+TUNE may run (10 s to start, up to 60 s).
 
 - **1W, 3W, 5W, MAX** set the radio's menu 34 `TX POWER`, as SDRoxide's
   buttons did. It stays set after the panel closes, as on the radio's menu, and
   is the ceiling for every program that transmits. Use MAX with the HR500 in
   line, and bring the power down with the slider.
-- **Tune** sets TX TUNE's power within the button's setting: 50% of 5W is about
-  2.5 W. The panel shows what it should come to; the meters show what it is.
-  It can be moved while keyed.
-- **TX TUNE** plays a 1 kHz tone into the radio's USB audio and keys the radio
+- **TX TUNE level** sets TX TUNE's power as a share of menu 34: 50% of 5W is
+  about 2.5 W. The panel shows what it should come to (≈ W); the meters show
+  what it is. It can be moved while keyed. RIG TUNE does not use it.
+- **TX TUNE (USB audio)** plays a 1 kHz tone into the radio's USB audio, the
+  same path FT8 and WSPR from the TX window take, and keys the radio
   as its PTT does, which also keys the amplifier through the PTT line, as
   SDRoxide's TUNE did. It needs the radio's TX IN (menu 32) on USB audio (a
   yellow line with **USB AUDIO** appears if it isn't) and the radio in USB or
   LSB. The tone plays on **TUNE sound** under Settings, Radio: the radio's own
   USB audio unless you choose another.
-- **RIG TUNE** keys the radio's own TUNE carrier at the full button setting,
-  with no tone. The FDM-DUO may not key its PTT output for it, so the HR500 may
+- **RIG TUNE (carrier … W)** keys the radio's own TUNE carrier (`TX2;`) at the
+  full menu 34 setting, with no tone; its key shows that power, which the
+  power buttons set. The FDM-DUO may not key its PTT output for it, so the HR500 may
   stay in receive; use TX TUNE to watch the amplifier.
 
 Press either again to unkey. They are greyed, with the reason on hover, unless

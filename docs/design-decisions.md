@@ -880,3 +880,6 @@ The transmit plan's items 2 and 3 (AJ3G, 10 Nov 2026).
 - **After the over** the live spectrum comes back exactly as decision 40 had it, and no more dimmed rows are laid. Interlock #9 is unchanged: nothing tunes while transmitting.
 
 **Where.** `scope/txsig.rs` (all the arithmetic, with its tests), `scope/mod.rs` (`set_tx_signal`, `scroll_held`, `TxHold::keyed`, the hold-and-resume test), `scope/paint.rs` (`paint_tx_trace`, `paint_tx_waterfall`), `audio.rs` (`Player::recent`, `Tone::recent`), `tx/mod.rs` (`Tx::sounding`), `main.rs` (`scope_window`: two lines that hand the scope what is sounding).
+**Also, the same day.**
+- **The TUNE strip says which path each key takes** (AJ3G, 11 Nov 2026). TX TUNE reads *TX TUNE (USB audio)*: a 1 kHz tone through the radio's USB audio at the slider's share of menu 34, the path FT8 and WSPR take. Its slider is *TX TUNE level*, its value a share of menu 34 with the ≈ watts beside it (`tune::planned_watts`). RIG TUNE, which has no slider, shows the power it keys at on its key: *RIG TUNE (carrier 8.3 W)*, menu 34's watts from the power step (`tune::carrier_label`; `tune.rs`).
+- **The scope's GPU line** no longer repeats the GPU spectrum's frames a second: *FFT on the GPU* and the GPU's load (AJ3G, 11 Nov 2026).
