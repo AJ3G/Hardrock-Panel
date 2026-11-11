@@ -33,6 +33,9 @@ struct S3L {
     has_prev: f32,
     _a: f32,
     _b: f32,
+    // The band's quiet level and spread, dB, for the made-up noise where a
+    // row has no data (noise.wgsl), and the live row's number (to 2^24).
+    noise: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: S3L;

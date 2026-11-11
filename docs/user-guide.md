@@ -457,7 +457,11 @@ takes about 7 s each time SPAN changes, and the I/Q line says so meanwhile.
 The image is read from ELAD's driver, `ExtIOmc_ELAD_FDMDUO.dll`, which SDR
 Console or FDM-SW2 installs, so one of them has to be installed. Not while
 transmitting. While a wide image runs, the DUO shows SP and its band keys and
-the panel's band changes don't move it. Back at SPAN 192k the panel has the DUO
+the panel's band changes don't move it. Where the span moves (a pan, the
+centre following the receiver, most of all at 6144 kHz) the waterfall and the
+3D view have no history for the strip it uncovers: they fill it with made-up
+noise like the band's quiet noise, at its level and spread and in your palette,
+moving down with the rows, and real rows draw over it as they come. Back at SPAN 192k the panel has the DUO
 reload its own image, as FDM-SW2 does, which takes about 4 s and puts it back
 in stand-alone. If that fails, a yellow note says to power-cycle the DUO.
 
@@ -580,8 +584,11 @@ USB and below on LSB. The trace (coloured by level in the waterfall palette
 you picked, as a received signal is), the waterfall, the 3D view and the zoom
 all keep moving with only your own signal in them; only the *TX MONITOR*
 caption is in the TX colour, orange. The rest of the span sits at the band's
-noise floor as last received, and full-scale audio sits 10 dB under the top
-of the dB scale, so your signal fills most of the trace. The top bar reads
+noise floor as last received. Your signal is drawn at a fixed strength,
+whatever LEVEL and TX AUD are set to: its loudest part just under the top of
+the dB scale (3 dB under CEIL), with its shape kept, so it is the top of the
+palette on the waterfall, the trace and the 3D view. Pauses and the end of the
+over fall away as the audio does. The top bar reads
 *IQ · TX MONITOR*, and the trace's foot says what is on the air (*FT8 over*,
 *WSPR beacon*, *TX TUNE*, *RIG TUNE*). When another program keys the radio
 the panel doesn't know what it sends, so the band as last received scrolls on

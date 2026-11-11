@@ -139,79 +139,92 @@ pub fn wf_auto_levels(noise_dbm: f32, strongest_dbm: f32) -> (f32, f32) {
     (floor, floor + range)
 }
 
-/// How bright, against the noise floor's own colour, the waterfall paints
-/// a pixel it has no history for: a shade dimmer, so an area never measured
-/// (the strip a recentre uncovers, the rows not filled yet) still reads as
-/// "nothing here" up close but not as a black block beside a quiet band.
-pub const NO_DATA_SHADE: f32 = 0.8;
+/// The band's quiet noise as the waterfall and the 3D surface make it up
+/// where they have no history (decision 112): its level, dBm, and its
+/// spread, dB.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NoiseFill {
+    pub dbm: f32,
+    pub spread_db: f32,
+}
 
-/// The quiet band's level as the scope draws it: the median of the trace's
-/// columns, which carriers (a minority of the columns) do not move. Each
+/// The spread the made-up noise has when the band gives none to measure, dB.
+pub const NOISE_SPREAD_DEFAULT_DB: f32 = 3.0;
+const NOISE_SPREAD_MIN_DB: f32 = 0.5;
+const NOISE_SPREAD_MAX_DB: f32 = 10.0;
+/// Below how many columns there is too little to measure a spread from.
+const NOISE_SPREAD_COLS: usize = 32;
+
+/// The quiet band's noise from the trace's columns: its level, the median
+/// column, which carriers (a minority of the columns) do not move (each
 /// column is the strongest bin under it, so this sits a few dB over the
-/// averaged noise per bin, where a quiet band's waterfall pixels (also the
-/// strongest of several bins) sit too. `None` with no columns.
-pub fn quiet_dbm(cols: &[f32]) -> Option<f32> {
+/// averaged noise per bin, where a quiet band's waterfall pixels sit too),
+/// and how far the quiet sixth of the columns sits under it
+/// (the median less the 16th percentile, a standard deviation for noise
+/// that is spread evenly), which carriers above the median do not move.
+/// [`NOISE_SPREAD_DEFAULT_DB`] with too few columns. `None` with none.
+pub fn noise_fill(cols: &[f32]) -> Option<NoiseFill> {
     let mut v: Vec<f32> = cols.iter().copied().filter(|c| c.is_finite()).collect();
     if v.is_empty() {
         return None;
     }
-    let mid = v.len() / 2;
-    let (_, m, _) = v.select_nth_unstable_by(mid, f32::total_cmp);
-    Some(*m)
+    v.sort_unstable_by(f32::total_cmp);
+    let dbm = v[v.len() / 2];
+    let spread_db = if v.len() < NOISE_SPREAD_COLS {
+        NOISE_SPREAD_DEFAULT_DB
+    } else {
+        (dbm - v[v.len() * 16 / 100]).clamp(NOISE_SPREAD_MIN_DB, NOISE_SPREAD_MAX_DB)
+    };
+    Some(NoiseFill { dbm, spread_db })
 }
 
-/// Where on the palette, 0 to 1, the waterfall paints a pixel it has no
-/// history for: the noise floor's level ([`quiet_dbm`]), through the same levels, contrast
-/// and brightness as a measured pixel (see waterfall.wgsl), so it follows
-/// them. The bottom of the palette when there is no noise floor yet.
-pub fn no_data_t(
-    noise_dbm: Option<f32>,
-    floor: f32,
-    ceil: f32,
-    contrast: f32,
-    brightness: f32,
-) -> f32 {
-    let Some(n) = noise_dbm.filter(|n| n.is_finite()) else { return 0.0 };
-    let t = (n - floor) / (ceil - floor).max(1.0);
-    ((t - 0.5) * contrast + 0.5 + brightness).clamp(0.0, 1.0)
+/// What the shaders' `noise_dbm` (shaders/noise.wgsl) makes of a uniform
+/// draw `u` in 0..1: a Gumbel variate (the strongest of several bins of
+/// Rayleigh noise, as each pixel is), scaled so its median is `n.dbm` and
+/// its median less its 16th percentile is `n.spread_db`. Kept here to pin
+/// the distribution in tests.
+#[cfg(test)]
+pub fn noise_sample(u: f32, n: NoiseFill) -> f32 {
+    let u = u.clamp(1e-6, 1.0 - 1e-6);
+    let g = -(-u.ln()).ln();
+    n.dbm + n.spread_db * (g - GUMBEL_MEDIAN) / GUMBEL_LOW_SPREAD
 }
+
+/// The Gumbel distribution's median, and its median less its 16th
+/// percentile, as in shaders/noise.wgsl.
+#[cfg(test)]
+const GUMBEL_MEDIAN: f32 = 0.366_513;
+#[cfg(test)]
+const GUMBEL_LOW_SPREAD: f32 = 0.972_2;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn the_quiet_level_is_the_median_column() {
-        let mut cols = vec![-100.0f32; 99];
-        for (i, c) in cols.iter_mut().enumerate() {
-            *c += (i % 7) as f32 * 0.5; // -100 to -97
-        }
-        // Carriers in a tenth of the columns do not move it.
+    fn the_made_up_noise_sits_on_the_bands_noise_with_its_spread() {
+        // A band of noise 4 dB either side of -120, with carriers in it.
+        let mut cols: Vec<f32> = (0..200).map(|i| -124.0 + 8.0 * (i as f32 / 199.0)).collect();
         for c in cols.iter_mut().step_by(10) {
-            *c = -40.0;
+            *c = -50.0;
         }
-        let q = quiet_dbm(&cols).unwrap();
-        assert!((-100.0..=-97.0).contains(&q), "{q}");
-        assert_eq!(quiet_dbm(&[f32::NAN, -90.0]), Some(-90.0));
-        assert_eq!(quiet_dbm(&[]), None);
-    }
-
-    #[test]
-    fn no_data_is_drawn_at_the_noise_floor() {
-        // The auto levels put the floor 4 dB under the noise, over 45 dB.
-        let (floor, ceil) = wf_auto_levels(-120.0, -100.0);
-        let t = no_data_t(Some(-120.0), floor, ceil, 1.0, 0.0);
-        assert!((t - 4.0 / 45.0).abs() < 1e-6, "{t}");
-        // It follows the contrast and brightness as a measured pixel does.
-        let c = no_data_t(Some(-120.0), floor, ceil, 1.5, 0.2);
-        assert!((c - ((4.0 / 45.0 - 0.5) * 1.5 + 0.7)).abs() < 1e-6, "{c}");
-        // Kept on the palette, and its bottom with no noise floor known.
-        assert_eq!(no_data_t(Some(-200.0), floor, ceil, 1.0, 0.0), 0.0);
-        assert_eq!(no_data_t(Some(0.0), floor, ceil, 1.0, 0.0), 1.0);
-        assert_eq!(no_data_t(None, floor, ceil, 1.0, 0.0), 0.0);
-        assert_eq!(no_data_t(Some(f32::NAN), floor, ceil, 1.0, 0.0), 0.0);
-        // A shade, not black and not the floor itself.
-        const { assert!(NO_DATA_SHADE > 0.5 && NO_DATA_SHADE < 1.0) };
+        let n = noise_fill(&cols).unwrap();
+        assert!((n.dbm - -119.5).abs() < 1.0, "{n:?}");
+        assert!((2.0..=4.0).contains(&n.spread_db), "{n:?}");
+        // Too few columns: the default spread; flat: the least.
+        assert_eq!(noise_fill(&[-110.0; 4]).unwrap().spread_db, NOISE_SPREAD_DEFAULT_DB);
+        assert_eq!(noise_fill(&[-110.0; 64]).unwrap().spread_db, NOISE_SPREAD_MIN_DB);
+        assert_eq!(noise_fill(&[]), None);
+        assert_eq!(noise_fill(&[f32::NAN, -90.0]).unwrap().dbm, -90.0);
+        // The shaders' draw: the median at the level, the 16th percentile
+        // a spread under it, and a longer tail up than down (speckle).
+        let fill = NoiseFill { dbm: -120.0, spread_db: 3.0 };
+        assert!((noise_sample(0.5, fill) - -120.0).abs() < 1e-3);
+        assert!((noise_sample(0.16, fill) - -123.0).abs() < 0.01);
+        let up = noise_sample(0.99, fill) - -120.0;
+        let down = -120.0 - noise_sample(0.01, fill);
+        assert!(up > down, "{up} {down}");
+        assert!(noise_sample(0.0, fill).is_finite() && noise_sample(1.0, fill).is_finite());
     }
 
     #[test]

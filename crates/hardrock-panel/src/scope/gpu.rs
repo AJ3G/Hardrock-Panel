@@ -60,6 +60,7 @@ use eframe::egui_wgpu::{
 };
 
 use super::gpu_fft::{Engine, GpuWork, Readout, Targets};
+use super::levels::NoiseFill;
 use super::palette::Palette;
 use super::rows::{SURFACE_ROWS, Upload, WF_ROWS};
 
@@ -203,6 +204,7 @@ struct Shared {
 }
 
 const COMMON: &str = include_str!("shaders/common.wgsl");
+const NOISE: &str = include_str!("shaders/noise.wgsl");
 const S3_COMMON: &str = include_str!("shaders/s3_common.wgsl");
 const FIELD: &str = include_str!("shaders/field.wgsl");
 const SURFACE_LIT: &str = include_str!("shaders/surface_lit.wgsl");
@@ -212,7 +214,7 @@ const TRACE: &str = include_str!("shaders/trace.wgsl");
 
 /// Bytes in the lit surface's uniforms (`S3L`), the mip pass's and the
 /// trace's.
-const S3L_BYTES: u64 = 128;
+const S3L_BYTES: u64 = 144;
 const MIP_BYTES: u64 = 80;
 const TRACE_BYTES: u64 = 80;
 /// The widest the 3D surface is drawn, columns.
@@ -371,7 +373,7 @@ impl Lit {
                 entry(5, c, storage_ty(false)),
             ],
         );
-        let fm = module(device, "scope-s3-field", format!("{S3_COMMON}\n{FIELD}"));
+        let fm = module(device, "scope-s3-field", format!("{S3_COMMON}\n{NOISE}\n{FIELD}"));
         let fpl = pipeline_layout(device, &field_layout);
         let mip_layout = layout(
             device,
@@ -531,7 +533,7 @@ impl Shared {
         let module = |label, body: &str| {
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(format!("{COMMON}\n{body}").into()),
+                source: wgpu::ShaderSource::Wgsl(format!("{COMMON}\n{NOISE}\n{body}").into()),
             })
         };
         let wf = module("scope-waterfall", include_str!("shaders/waterfall.wgsl"));
@@ -999,7 +1001,7 @@ fn write(queue: &wgpu::Queue, tex: &wgpu::Texture, x: u32, y: u32, w: u32, data:
 /// Floats in the waterfall's uniforms (see waterfall.wgsl).
 pub const WF_UNIFORMS: usize = 20;
 /// Floats in the surface's uniforms (see surface.wgsl).
-pub const S3_UNIFORMS: usize = 24;
+pub const S3_UNIFORMS: usize = 28;
 
 /// The waterfall's settings for one repaint.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1019,10 +1021,27 @@ pub struct WfParams {
     pub scroll_frac: f32,
     pub contrast: f32,
     pub brightness: f32,
-    /// Where on the palette a pixel with no history is painted
-    /// ([`super::levels::no_data_t`]), and how much dimmer than that colour.
-    pub empty_t: f32,
-    pub empty_shade: f32,
+    /// The made-up noise where there is no history (decision 112).
+    pub noise: NoiseParams,
+}
+
+/// The made-up noise the waterfall and the surface draw where a row has no
+/// data (decision 112, shaders/noise.wgsl).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NoiseParams {
+    /// The band's quiet level and spread; `None` before any is known.
+    pub fill: Option<NoiseFill>,
+    /// The newest row's number ([`super::rows::Rows::wf_serial`]).
+    pub serial: u32,
+}
+
+impl NoiseParams {
+    /// As the shaders take it: level, spread, the row number to 2^24 (an
+    /// f32 holds it exactly).
+    fn uniforms(&self) -> [f32; 3] {
+        let (dbm, spread) = self.fill.map_or((-1.0e9, 0.0), |n| (n.dbm, n.spread_db));
+        [dbm, spread, (self.serial & 0xff_ffff) as f32]
+    }
 }
 
 /// The 3D surface's settings for one repaint.
@@ -1045,6 +1064,8 @@ pub struct SurfaceParams {
     pub prev: Option<(f32, f32)>,
     /// How much the lighting shows, 0 to 1.
     pub light: f32,
+    /// The made-up noise where a row has no data (decision 112).
+    pub noise: NoiseParams,
 }
 
 /// The GPU trace's settings for one repaint.
@@ -1155,6 +1176,7 @@ impl CallbackTrait for WaterfallPaint {
         let p = &self.params;
         // The shader pools the columns under each physical pixel.
         let px_w = p.width_pts * screen.pixels_per_point;
+        let [noise_dbm, noise_spread, serial] = p.noise.uniforms();
         let u: [f32; WF_UNIFORMS] = [
             p.view_lo,
             p.view_hi,
@@ -1171,9 +1193,9 @@ impl CallbackTrait for WaterfallPaint {
             p.scroll_frac,
             p.contrast,
             p.brightness,
-            p.empty_t,
-            p.empty_shade,
-            0.0,
+            noise_dbm,
+            noise_spread,
+            serial,
             0.0,
             0.0,
         ];
@@ -1210,6 +1232,7 @@ fn linear(c: f32, srgb: bool) -> f64 {
 impl SurfacePaint {
     fn legacy_uniforms(&self, srgb: bool) -> [f32; S3_UNIFORMS] {
         let p = &self.params;
+        let [noise_dbm, noise_spread, serial] = p.noise.uniforms();
         [
             p.view_lo,
             p.view_hi,
@@ -1235,6 +1258,10 @@ impl SurfacePaint {
             p.ink[1],
             p.ink[2],
             1.0,
+            noise_dbm,
+            noise_spread,
+            serial,
+            0.0,
         ]
     }
 }
@@ -1286,7 +1313,9 @@ impl CallbackTrait for SurfacePaint {
         let p = &self.params;
         let cols = p.cols.min(MAX_S3_COLS);
         let mut u = [0f32; S3L_BYTES as usize / 4];
-        u[..S3_UNIFORMS].copy_from_slice(&base);
+        // The legacy block up to `ink`, the lit one's own, then the noise.
+        u[..24].copy_from_slice(&base[..24]);
+        u[32..36].copy_from_slice(&base[24..28]);
         u[7] = cols as f32;
         let (plo, phi) = p.prev.unwrap_or((0.0, 0.0));
         u[24..32].copy_from_slice(&[
@@ -1505,7 +1534,7 @@ mod tests {
     /// Parse and validate a shader as `Shared::new` builds it, and return the
     /// size of its uniform block, bytes.
     fn check(body: &str) -> u32 {
-        validate(&format!("{COMMON}\n{body}")).expect("a uniform block")
+        validate(&format!("{COMMON}\n{NOISE}\n{body}")).expect("a uniform block")
     }
 
     /// Validate a whole shader, and return its uniform block's size.
@@ -1529,7 +1558,7 @@ mod tests {
     fn shaders_compile_and_match_their_uniforms() {
         assert_eq!(check(include_str!("shaders/waterfall.wgsl")), (WF_UNIFORMS * 4) as u32);
         assert_eq!(check(include_str!("shaders/surface.wgsl")), (S3_UNIFORMS * 4) as u32);
-        assert_eq!(validate(&format!("{S3_COMMON}\n{FIELD}")), Some(S3L_BYTES as u32));
+        assert_eq!(validate(&format!("{S3_COMMON}\n{NOISE}\n{FIELD}")), Some(S3L_BYTES as u32));
         assert_eq!(validate(&format!("{S3_COMMON}\n{SURFACE_LIT}")), Some(S3L_BYTES as u32));
         assert_eq!(validate(MIPS), Some(MIP_BYTES as u32));
         assert_eq!(validate(BLIT), None);
@@ -1542,6 +1571,18 @@ mod tests {
             TRACE.contains(&format!("TRACE_OFF: u32 = {}u;", super::super::gpu_fft::TRACE_OFF))
         );
         assert!(TRACE.contains(&format!("PEAK_OFF: u32 = {}u;", super::super::gpu_fft::PEAK_OFF)));
+    }
+
+    #[test]
+    fn the_made_up_noise_is_off_until_the_band_is_known() {
+        let off = NoiseParams { fill: None, serial: 5 };
+        assert!(off.uniforms()[0] < -1.0e8, "under the shaders' -1e8 test");
+        let on = NoiseParams {
+            fill: Some(NoiseFill { dbm: -120.0, spread_db: 3.0 }),
+            serial: 0x0123_4567,
+        };
+        // The row number wraps at 2^24, which an f32 holds exactly.
+        assert_eq!(on.uniforms(), [-120.0, 3.0, 0x23_4567 as f32]);
     }
 
     #[test]
