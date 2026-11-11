@@ -45,6 +45,8 @@ zune-core = "0.5.3"
 # TX: FT8 and WSPR messages packed and rendered to audio (GPL-3.0-or-later,
 # as this program is).
 mfsk-core.workspace = true
+# TX freq AUTO's coarse occupancy of the receive passband (decision 115).
+rustfft.workspace = true
 
 # LOG's BROWSE…: the system's own file picker. Windows only, so the Linux
 # tests need no GTK (AJ3G, 11 Nov 2026).
@@ -54,6 +56,6 @@ rfd = { version = "0.17.2", default-features = false }
 [dev-dependencies]
 # Parses and validates the scope's WGSL in the tests, with no GPU.
 naga = { version = "30.0.1", features = ["wgsl-in"] }
-# The GPU spectrum's tests: a headless device, and the FFT to check it by.
+# The GPU spectrum's tests: a headless device (the FFT to check it by is a
+# dependency above).
 pollster = "1.0.1"
-rustfft.workspace = true

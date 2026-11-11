@@ -556,6 +556,13 @@ impl App {
                 new_grid: w.new_grid,
             }
         };
+        // TX freq AUTO's ear on the receiver's audio, only while it is in
+        // use (decision 115).
+        let auto = self.saved.show_tx
+            && self.saved.tx.mode == tx::TxMode::Ft8
+            && self.saved.tx.freq == tx::FreqMode::Auto
+            && rx_dial.is_some();
+        self.tx.occ.tap(&self.rx.taps, auto);
         let mut out = self.tx.frame(&mut self.saved.tx, env, feed, &self.decode.heard, &badges);
         // The bar and the busy shading are TX's only while its window is
         // open: elsewhere the bar is the operator's measuring cursor.
@@ -908,6 +915,7 @@ impl App {
         // back through the I/Q: DECODE drops them (decision 71).
         let keyed = rig.filter(|r| r.connected).map_or(transmitting, |r| r.transmitting());
         self.decode.note_keyed(decoders::slot::utc_now(), keyed);
+        self.tx.occ.set_keyed(keyed);
         self.decode.frame(
             &self.saved.decode,
             &self.saved.station,

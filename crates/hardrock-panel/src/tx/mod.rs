@@ -11,6 +11,7 @@
 
 pub(crate) mod freq;
 pub(crate) mod msg;
+pub(crate) mod occupy;
 pub(crate) mod qso;
 pub(crate) mod sched;
 pub(crate) mod wave;
@@ -321,8 +322,12 @@ pub(crate) struct Tx {
     /// CLEAR in WSPR: reports of our beacon from before it are not shown,
     /// UTC s.
     pub wspr_cleared: f64,
-    /// (slot, audio Hz) of signals heard, for AUTO.
-    heard: VecDeque<(i64, f32)>,
+    /// (slot, audio Hz, SNR dB) of signals heard, for AUTO: kept
+    /// [`freq::keep_s`] (decision 115).
+    heard: VecDeque<(i64, f32, f32)>,
+    /// AUTO's ear for undecoded signal in each slot (decision 115): the
+    /// panel puts it on the receiver's audio.
+    pub occ: occupy::Occupancy,
     /// Which slots each station was heard in: even or odd.
     parity: HashMap<String, bool>,
     /// The parity of our overs now.
@@ -368,6 +373,10 @@ pub(crate) struct Tx {
     /// Split (decision 106): VFO B last asked for, and when, so the move
     /// is asked again only if the radio hasn't read it back by then.
     split_sent: Option<(u64, Instant)>,
+    /// The slot of an over that was on the air when REPLY left its station
+    /// for another (decision 114): its end is not counted against the new
+    /// one.
+    left_slot: Option<i64>,
 }
 
 impl Default for Tx {
@@ -384,6 +393,7 @@ impl Default for Tx {
             wspr_rows: VecDeque::new(),
             wspr_cleared: 0.0,
             heard: VecDeque::new(),
+            occ: Default::default(),
             parity: HashMap::new(),
             tx_even: false,
             note: None,
@@ -405,6 +415,7 @@ impl Default for Tx {
             was_enabled: false,
             halted: false,
             split_sent: None,
+            left_slot: None,
         }
     }
 }
@@ -494,27 +505,35 @@ impl Tx {
         self.lines = l;
     }
 
-    /// REPLY (or a double-click) on a station: work it now, or queue it at
-    /// the front when a QSO is under way.
+    /// REPLY (or a double-click) on a station: work it now. Mid-QSO with
+    /// another station, that QSO is stopped as STOP QSO stops it (nothing
+    /// logged, not queued again) and this one started at once (decision
+    /// 114, AJ3G: "Stop QSO and load the new station"): an over already
+    /// on the air finishes, and the next goes to this station. + still
+    /// queues ([`Tx::queue`]).
     pub(crate) fn reply(&mut self, s: &TxSettings, r: &ListRow, now: f64) {
         let Some(call) = r.d.from.clone() else { return };
-        let busy_with_other = self.qso.busy() && self.qso.dx_call() != Some(call.as_str());
         let wait = !r.d.is_cq && r.d.to.is_some() && !r.to_me;
-        if busy_with_other {
-            self.qso.queue_front(qso::Queued {
-                call,
-                grid: r.d.grid.clone(),
-                snr_db: r.d.snr_db,
-                audio_hz: r.d.audio_hz,
-                heard_utc: r.d.slot_utc,
-                wait_for_cq: wait,
-            });
-            return;
+        let left = self
+            .qso
+            .dx_call()
+            .filter(|c| self.qso.busy() && !c.eq_ignore_ascii_case(&call))
+            .map(str::to_string);
+        if left.is_some() {
+            self.qso.stop();
+            // The over on the air was the old station's: its end is not a
+            // call to this one.
+            self.left_slot = self.over.as_ref().map(|o| o.slot_utc);
         }
         self.tx_even = !sched::is_even(r.d.slot_utc, sched::FT8_PERIOD);
         self.dx_seen = Some((call.clone(), r.d.audio_hz, r.rf_hz));
         self.report = r.d.snr_db;
         self.qso.start_qso(&call, r.d.grid.clone(), r.d.snr_db, wait, now as i64);
+        if let Some(old) = left {
+            let line = format!("Left {old} for {call}");
+            tracing::info!("TX: {line}");
+            self.qso.note(line, now as i64);
+        }
         self.halted = false;
         self.hand = None;
         self.generate(s);
@@ -735,10 +754,10 @@ impl Tx {
                 // Unkeyed: at its end, or cut short.
                 let done = now >= o.end_utc - 0.5;
                 self.player.stop();
-                let mode = o.mode;
+                let (mode, slot) = (o.mode, o.slot_utc);
                 self.over = None;
                 if done {
-                    if mode == TxMode::Ft8 && self.hand.is_none() {
+                    if mode == TxMode::Ft8 && self.hand.is_none() && self.left_slot != Some(slot) {
                         self.qso.note_tx_sent(now as i64);
                     }
                 } else if self.enabled {
@@ -809,19 +828,25 @@ impl Tx {
             }
             out.set_bar_off = self.wspr_bar(s, &env, entering);
         }
+        // AUTO counts only our own transmit period: the signals decoded in
+        // it (strong ones for longer), and the energy the receiver heard in
+        // it that nothing decoded (decision 115).
         let ours: Vec<f32> = self
             .heard
             .iter()
-            .filter(|(t, _)| sched::is_even(*t, sched::FT8_PERIOD) == self.tx_even)
-            .map(|(_, a)| *a)
+            .filter(|(t, _, snr)| {
+                sched::is_even(*t, sched::FT8_PERIOD) == self.tx_even
+                    && *t >= now as i64 - freq::keep_s(*snr)
+            })
+            .map(|(_, a, _)| *a)
             .collect();
         if s.mode == TxMode::Ft8 && s.freq == FreqMode::Auto {
-            out.busy = freq::busy(&ours);
+            out.busy = freq::busy(&ours, &self.occ.spans(self.tx_even, now));
             // Only between overs, and not in the middle of an exchange,
             // so the station we work finds us where they answered.
             if self.over.is_none() && !(self.qso.busy() && self.auto_hz.is_some()) {
                 let cur = self.auto_hz.unwrap_or(s.audio_hz);
-                if let Some(p) = freq::pick(&ours, cur) {
+                if let Some(p) = freq::pick(&out.busy, cur) {
                     self.auto_hz = Some(p);
                     s.audio_hz = p;
                 }
@@ -881,6 +906,7 @@ impl Tx {
             if self.list_dial.is_some_and(|d| (d - dial).abs() > 5_000.0) {
                 self.rows.clear();
                 self.heard.clear();
+                self.occ.clear();
             }
             self.list_dial = Some(dial);
         }
@@ -895,7 +921,7 @@ impl Tx {
             let snr = h.snr_db.round().clamp(-99.0, 99.0) as i16;
             let d = msg::parse(&h.text, h.slot_utc, snr, h.dt, h.audio_hz);
             dts.push(h.dt);
-            self.heard.push_back((h.slot_utc, h.audio_hz));
+            self.heard.push_back((h.slot_utc, h.audio_hz, h.snr_db));
             if let Some(f) = &d.from {
                 self.parity.insert(f.clone(), sched::is_even(h.slot_utc, sched::FT8_PERIOD));
             }
@@ -935,10 +961,9 @@ impl Tx {
         }
         self.rows.truncate(ROWS);
         self.note_dx_seen();
-        let newest = self.heard.back().map_or(0, |h| h.0);
-        while self.heard.front().is_some_and(|h| h.0 < newest - 120) {
-            self.heard.pop_front();
-        }
+        // Strong stations are remembered longer (decision 115).
+        let newest = self.heard.iter().map(|h| h.0).max().unwrap_or(0);
+        self.heard.retain(|h| h.0 >= newest - freq::keep_s(h.2));
         dts.sort_by(f32::total_cmp);
         self.dt = dts.get(dts.len() / 2).copied();
         if s.auto_seq && s.mode == TxMode::Ft8 && self.qso.on_rx(&decodes, env.now as i64) {
@@ -1698,5 +1723,176 @@ mod split_tests {
         let mut r = rig(14_074_000, Some(14_250_000), Some(true));
         r.vfo = Some(1);
         assert_eq!(audio_plan(&r, rx, 2526.0), None);
+    }
+}
+
+#[cfg(test)]
+mod round5_tests {
+    use super::*;
+
+    const T: i64 = 1_800_000_000;
+
+    fn row(text: &str, slot: i64, snr: i16, audio: f32) -> ListRow {
+        ListRow {
+            d: msg::parse(text, slot, snr, 0.1, audio),
+            row: 1,
+            rf_hz: 0.0,
+            country: None,
+            flag: "",
+            continent: None,
+            cq_zone: None,
+            itu_zone: None,
+            path: None,
+            badges: Badges::default(),
+            to_me: false,
+            cq_ok: true,
+            ours: false,
+        }
+    }
+
+    /// One frame at `now`, the radio unkeyed, with `feed` decoded.
+    fn frame(tx: &mut Tx, s: &mut TxSettings, now: f64, feed: Vec<TxHeard>) -> TxOut {
+        let amp = AmpStatus::default();
+        let mut outside = crate::outside::Outside::default();
+        let station = StationSettings::default();
+        let heard = station::Heard::default();
+        let rig = RigStatus::default();
+        let env = Env {
+            now,
+            link: None,
+            rig: Some(&rig),
+            amp: &amp,
+            device: None,
+            outside: &mut outside,
+            rx_dial: Some((14_074_000.0, false)),
+            bar_off: None,
+            bar_moved: false,
+            bar_ours: true,
+            station: &station,
+            decoding_ft8: true,
+            slot_decoded: None,
+        };
+        tx.frame(s, env, feed, &heard, &|_, _| Badges::default())
+    }
+
+    #[test]
+    fn reply_mid_qso_leaves_the_station_in_hand_for_the_new_one() {
+        let mut tx = Tx::default();
+        let s = TxSettings::default();
+        tx.qso.cfg.my_call = "AJ3G".into();
+        tx.reply(&s, &row("CQ K1ABC FN42", T + 15, -12, 800.0), (T + 30) as f64);
+        assert_eq!(tx.qso.dx_call(), Some("K1ABC"));
+        assert!(tx.qso.busy());
+        // Our call to K1ABC is on the air when W9XYZ is picked.
+        tx.over = Some(Over {
+            mode: TxMode::Ft8,
+            slot_utc: T + 30,
+            text: "K1ABC AJ3G FN20".into(),
+            audio_hz: 1500.0,
+            asked: Instant::now(),
+            keyed_seen: true,
+            end_utc: (T + 30) as f64 + 13.1,
+        });
+        tx.reply(&s, &row("CQ W9XYZ EN52", T, -7, 1200.0), (T + 35) as f64);
+        // W9XYZ is worked at once, in the slot after theirs, with their
+        // report; K1ABC is not queued again.
+        assert_eq!(tx.qso.dx_call(), Some("W9XYZ"));
+        assert_eq!(tx.qso.step(), qso::Step::TxGrid);
+        assert_eq!(tx.qso.reports().0, Some(-7));
+        assert!(!tx.tx_even);
+        assert_eq!(tx.qso.queue().count(), 0);
+        assert_eq!(
+            tx.qso.transcript().last().map(|l| (l.note, l.text.as_str())),
+            Some((true, "Left K1ABC for W9XYZ"))
+        );
+        // The scope's mark follows.
+        assert_eq!(tx.dx_mark().map(|m| (m.0, m.1)), Some(("W9XYZ".into(), 1200.0)));
+        // The over to K1ABC runs out: it is not a call to W9XYZ.
+        let mut s = TxSettings::default();
+        frame(&mut tx, &mut s, (T + 44) as f64, Vec::new());
+        assert!(tx.over.is_none());
+        assert_eq!(tx.qso.dx_call(), Some("W9XYZ"));
+        assert_eq!(tx.qso.calls(), 0);
+        // + still queues, leaving W9XYZ in hand.
+        tx.queue(&row("CQ N0DEF EM48", T + 45, -3, 600.0));
+        assert_eq!(tx.qso.dx_call(), Some("W9XYZ"));
+        assert_eq!(tx.qso.queue().map(|q| q.call.as_str()).collect::<Vec<_>>(), vec!["N0DEF"]);
+    }
+
+    #[test]
+    fn reply_to_the_station_in_hand_or_when_idle_leaves_no_line() {
+        let mut tx = Tx::default();
+        let s = TxSettings::default();
+        tx.qso.cfg.my_call = "AJ3G".into();
+        tx.reply(&s, &row("CQ K1ABC FN42", T + 15, -12, 800.0), (T + 30) as f64);
+        tx.reply(&s, &row("CQ K1ABC FN42", T + 45, -10, 800.0), (T + 60) as f64);
+        assert!(tx.qso.transcript().iter().all(|l| !l.text.starts_with("Left")));
+        tx.qso.stop();
+        tx.reply(&s, &row("CQ W9XYZ EN52", T + 45, -7, 1200.0), (T + 60) as f64);
+        assert_eq!(tx.qso.dx_call(), Some("W9XYZ"));
+        assert!(tx.qso.transcript().iter().all(|l| !l.text.starts_with("Left")));
+    }
+
+    fn heard(slot: i64, audio: f32, snr: f32) -> TxHeard {
+        TxHeard {
+            slot_utc: slot,
+            snr_db: snr,
+            dt: 0.1,
+            audio_hz: audio,
+            text: "CQ K1ABC FN42".into(),
+            rf_hz: 0.0,
+            row: 0,
+        }
+    }
+
+    #[test]
+    fn auto_remembers_strong_stations_for_five_minutes() {
+        let mut tx = Tx::default();
+        let mut s = TxSettings { freq: FreqMode::Auto, audio_hz: 1500.0, ..Default::default() };
+        tx.tx_even = true;
+        // Two in our (even) period: strong at 1000 Hz, weak at 2000 Hz.
+        frame(
+            &mut tx,
+            &mut s,
+            (T + 14) as f64,
+            vec![heard(T, 1000.0, -2.0), heard(T, 2000.0, -15.0)],
+        );
+        let spans = |o: &TxOut| o.busy.iter().map(|b| b.0).collect::<Vec<_>>();
+        let o = frame(&mut tx, &mut s, (T + 100) as f64, Vec::new());
+        assert_eq!(spans(&o), vec![995.0, 1995.0]);
+        // After 2 minutes the weak one is gone; the strong one stays to 5.
+        let o = frame(&mut tx, &mut s, (T + 220) as f64, vec![heard(T + 210, 500.0, -20.0)]);
+        assert_eq!(spans(&o), vec![495.0, 995.0]);
+        let o = frame(&mut tx, &mut s, (T + 301) as f64, Vec::new());
+        assert_eq!(spans(&o), vec![495.0]);
+        // The other period is not counted.
+        tx.tx_even = false;
+        assert!(frame(&mut tx, &mut s, (T + 302) as f64, Vec::new()).busy.is_empty());
+    }
+
+    #[test]
+    fn auto_steers_around_undecoded_energy_in_our_period() {
+        let mut tx = Tx::default();
+        let mut s = TxSettings { freq: FreqMode::Auto, audio_hz: 1500.0, ..Default::default() };
+        tx.tx_even = true;
+        // A slot (even) with a strong undecoded signal at 1480 Hz, heard by
+        // the receiver's audio.
+        let rate = sdr::AUDIO_RATE;
+        let a: Vec<f32> = (0..(16.0 * rate) as usize)
+            .map(|i| {
+                let t = i as f64 / rate;
+                let n = ((i as u64).wrapping_mul(6364136223846793005) >> 41) as f32
+                    / (1u64 << 23) as f32
+                    - 0.5;
+                0.2 * n + 0.1 * (std::f64::consts::TAU * 1490.0 * t).sin() as f32
+            })
+            .collect();
+        tx.occ.push(&a, T as f64);
+        let o = frame(&mut tx, &mut s, (T + 16) as f64, Vec::new());
+        assert!(o.busy.iter().any(|&(a, b)| a <= 1490.0 && b >= 1490.0), "{:?}", o.busy);
+        assert!(!(1430.0..1500.0).contains(&s.audio_hz), "AUTO stayed on it at {}", s.audio_hz);
+        // Only in our own period.
+        tx.tx_even = false;
+        assert!(frame(&mut tx, &mut s, (T + 17) as f64, Vec::new()).busy.is_empty());
     }
 }

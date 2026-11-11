@@ -420,7 +420,8 @@ impl Qso {
         self.transcript.push(Line { utc: now_utc, tx: true, text: text.into(), note: false, done: false });
     }
 
-    fn note(&mut self, text: String, now_utc: i64) {
+    /// A plain line in the transcript.
+    pub(crate) fn note(&mut self, text: String, now_utc: i64) {
         self.transcript.push(Line { utc: now_utc, tx: false, text, note: true, done: false });
     }
 
@@ -886,14 +887,8 @@ impl Qso {
         }
     }
 
-    /// REPLY while a contact is under way: put the station at the head of
-    /// the queue rather than abandon the one in hand.
-    pub(crate) fn queue_front(&mut self, q: Queued) {
-        self.queue.retain(|x| !x.call.eq_ignore_ascii_case(&q.call));
-        self.queue.push_front(q);
-    }
-
-    /// True while a contact is under way (REPLY then queues).
+    /// True while a contact is under way (REPLY on another station then
+    /// leaves it, decision 114).
     pub(crate) fn busy(&self) -> bool {
         self.dx.is_some() && !matches!(self.step, Step::Idle | Step::Confirming)
     }
