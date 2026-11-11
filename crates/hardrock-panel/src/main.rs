@@ -1681,6 +1681,10 @@ impl eframe::App for App {
         } else {
             self.decode.running_kind().map(|k| k.label())
         });
+        // Beaconing WSPR: GLOBE asks who heard it every cycle (decision 93).
+        self.globe.set_beacon(
+            self.saved.show_tx && self.saved.tx.mode == tx::TxMode::Wspr && self.tx.enabled,
+        );
         // A line picked in DECODE: that station and its path on GLOBE.
         if let Some((call, hz)) = self.decode.globe_pick.take() {
             self.globe.select_call(&call, hz);
@@ -1705,7 +1709,8 @@ impl eframe::App for App {
         if self.show_globe {
             self.globe_window(ctx, rig.as_ref(), transmitting, xvtr);
         } else {
-            self.globe.idle();
+            // Shut, GLOBE still fetches who heard the station (decision 93).
+            self.globe.idle(&mut self.saved.globe, &self.saved.station);
         }
 
         self.saved.meters = Some(self.view.saved());

@@ -1,8 +1,11 @@
 //! WSPR HEARD ME: who heard AJ3G's WSPR beacon in the last hour.
 //!
-//! Asked of wspr.live first (https://wspr.live, the public, read-only
-//! ClickHouse mirror of the WSPRnet database), where most WSPR reception
-//! reports are, and of WSPRnet's own spot search when wspr.live is down. The
+//! Asked of both WSPRnet's own spot search and wspr.live
+//! (https://wspr.live, the public, read-only ClickHouse mirror of the WSPRnet
+//! database) every poll, since a spot can be on wsprnet.org minutes before
+//! (or without ever) reaching the mirror (decision 93). The two answers, and
+//! PSK Reporter's WSPR receptions, are merged by `merge`: one report per
+//! receiver per two-minute cycle per band, WSPRnet's record winning. The
 //! WSPRnet half is ported from SDRoxide's "who heard us" poll
 //! (`sdroxide-net/src/wsprnet.rs`, https://github.com/dividebysandwich/sdroxide,
 //! GPL-3.0-or-later): its query, its percent-encoding and its defensive
@@ -33,8 +36,84 @@ pub(crate) struct WsprReport {
     pub power_dbm: Option<f32>,
     /// The distance the site worked out, km.
     pub km: Option<f64>,
-    /// The site the report came from: "wspr.live" or "WSPRnet".
+    /// The sites the report came from, as `site_label` names them:
+    /// "WSPRnet", "wspr.live", "PSK Reporter" or "WSPRnet + live" and the
+    /// like when more than one had it.
     pub site: &'static str,
+}
+
+/// The name for the sites that had a report: WSPRnet, wspr.live and PSK
+/// Reporter, in that order of trust.
+pub(crate) fn site_label(net: bool, live: bool, pskr: bool) -> &'static str {
+    match (net, live, pskr) {
+        (true, true, true) => "WSPRnet + live + PSKR",
+        (true, true, false) => "WSPRnet + live",
+        (true, false, true) => "WSPRnet + PSKR",
+        (false, true, true) => "wspr.live + PSKR",
+        (true, false, false) => "WSPRnet",
+        (false, true, false) => "wspr.live",
+        _ => "PSK Reporter",
+    }
+}
+
+/// Which sites a `site_label` names: (WSPRnet, wspr.live, PSK Reporter).
+pub(crate) fn site_flags(site: &str) -> (bool, bool, bool) {
+    (site.contains("WSPRnet"), site.contains("live"), site.contains("PSK"))
+}
+
+/// The two-minute WSPR cycle a time is in, as the cycle's start.
+pub(crate) fn cycle(utc: f64) -> f64 {
+    (utc / 120.0).floor() * 120.0
+}
+
+/// What makes two reports the same: the receiver, the cycle and the band.
+fn key(r: &Reception) -> (String, i64, Option<&'static str>) {
+    (r.call.to_ascii_uppercase(), cycle(r.utc) as i64, r.band())
+}
+
+/// One list of who heard the beacon (decision 93): WSPRnet's reports, then
+/// wspr.live's, then PSK Reporter's WSPR receptions (`pskr`, any mode given;
+/// only WSPR is taken), kept once per receiver per cycle per band. The
+/// first site's record wins, so WSPRnet's figures stand; a later site only
+/// adds its name to `site` and fills what the first left blank. Newest
+/// first.
+pub(crate) fn merge(
+    net: &[WsprReport],
+    live: &[WsprReport],
+    pskr: &[Reception],
+) -> Vec<WsprReport> {
+    let mut out: Vec<WsprReport> = Vec::new();
+    let add = |w: WsprReport, out: &mut Vec<WsprReport>| {
+        let k = key(&w.rec);
+        match out.iter_mut().find(|x| key(&x.rec) == k) {
+            Some(x) => {
+                let (a, b, c) = site_flags(x.site);
+                let (d, e, f) = site_flags(w.site);
+                x.site = site_label(a || d, b || e, c || f);
+                x.drift_hz = x.drift_hz.or(w.drift_hz);
+                x.power_dbm = x.power_dbm.or(w.power_dbm);
+                x.km = x.km.or(w.km);
+                x.rec.snr = x.rec.snr.or(w.rec.snr);
+            }
+            None => out.push(w),
+        }
+    };
+    for w in net.iter().chain(live) {
+        add(w.clone(), &mut out);
+    }
+    for r in pskr.iter().filter(|r| super::field::norm_mode(&r.mode) == "WSPR") {
+        let mut rec = r.clone();
+        rec.call = rec.call.to_ascii_uppercase();
+        rec.mode = "WSPR".into();
+        rec.src = Source::WsprHeard;
+        rec.utc = cycle(rec.utc);
+        add(
+            WsprReport { rec, drift_hz: None, power_dbm: None, km: None, site: "PSK Reporter" },
+            &mut out,
+        );
+    }
+    out.sort_by(|a, b| b.rec.utc.total_cmp(&a.rec.utc));
+    out
 }
 
 /// The callsign as it may go into a query, uppercased: letters, digits and
@@ -187,6 +266,7 @@ pub(crate) fn parse_wsprnet(t: &str) -> Result<Vec<WsprReport>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::station::grid_to_latlon;
 
     /// A reply in the shape ClickHouse's FORMAT JSON gives (the container
     /// can't reach wspr.live, so not a saved live reply): 64-bit integers
@@ -242,6 +322,81 @@ mod tests {
         assert_eq!(r[0].rec.utc % 120.0, 0.0);
         assert_eq!((r[0].drift_hz, r[0].km, r[0].site), (Some(-1.0), Some(5400.0), "WSPRnet"));
         assert!(parse_wsprnet("{}").is_err());
+    }
+
+    fn rep(call: &str, utc: f64, mhz: f64, snr: f32, site: &'static str) -> WsprReport {
+        report(call, "IO91wm", mhz * 1e6, Some(snr as f64), utc, None, Some(37.0), None, site)
+            .unwrap()
+    }
+
+    #[test]
+    fn both_sites_and_psk_reporter_merge_to_one_report_per_receiver_cycle_and_band() {
+        let t = 1_785_242_040.0;
+        let net = vec![rep("G4XYZ", t, 14.097071, -22.0, "WSPRnet")];
+        let mut live = vec![
+            // The same spot, another figure: WSPRnet's stands.
+            rep("g4xyz", t + 30.0, 14.097070, -21.0, "wspr.live"),
+            // The same receiver on another band: its own report.
+            rep("G4XYZ", t, 7.040100, -18.0, "wspr.live"),
+            // Only wspr.live had it.
+            rep("DL1ABC", t - 120.0, 14.097050, -25.0, "wspr.live"),
+        ];
+        live[2].drift_hz = Some(-1.0);
+        let pskr = vec![
+            Reception {
+                call: "dl1abc".into(),
+                grid: "JO62".into(),
+                pos: grid_to_latlon("JO62").unwrap(),
+                rf_hz: 14_097_050.0,
+                mode: "WSPR".into(),
+                snr: Some(-24.0),
+                // Within the cycle, not at its start.
+                utc: t - 120.0 + 47.0,
+                src: Source::PskReporter,
+                row: None,
+                from: None,
+            },
+            Reception {
+                call: "K1ABC".into(),
+                grid: "FN42".into(),
+                pos: grid_to_latlon("FN42").unwrap(),
+                rf_hz: 14_075_000.0,
+                mode: "FT8".into(),
+                snr: Some(-10.0),
+                utc: t,
+                src: Source::PskReporter,
+                row: None,
+                from: None,
+            },
+            Reception {
+                call: "VK3TDX".into(),
+                grid: "QF22".into(),
+                pos: grid_to_latlon("QF22").unwrap(),
+                rf_hz: 14_097_060.0,
+                mode: "wspr".into(),
+                snr: Some(-27.0),
+                utc: t + 10.0,
+                src: Source::PskReporter,
+                row: None,
+                from: None,
+            },
+        ];
+        let m = merge(&net, &live, &pskr);
+        let find = |c: &str, b: &str| {
+            m.iter().find(|w| w.rec.call == c && w.rec.band() == Some(b)).unwrap()
+        };
+        assert_eq!(m.len(), 4, "{m:#?}");
+        let g = find("G4XYZ", "20");
+        assert_eq!((g.site, g.rec.snr, g.rec.rf_hz), ("WSPRnet + live", Some(-22.0), 14_097_071.0));
+        assert_eq!(find("G4XYZ", "40").site, "wspr.live");
+        let d = find("DL1ABC", "20");
+        assert_eq!((d.site, d.rec.snr, d.drift_hz), ("wspr.live + PSKR", Some(-25.0), Some(-1.0)));
+        let v = find("VK3TDX", "20");
+        assert_eq!((v.site, v.rec.src, v.rec.utc), ("PSK Reporter", Source::WsprHeard, t));
+        // Newest first.
+        assert!(m.windows(2).all(|p| p[0].rec.utc >= p[1].rec.utc));
+        assert_eq!(site_flags("WSPRnet + live + PSKR"), (true, true, true));
+        assert_eq!(site_flags("wspr.live"), (false, true, false));
     }
 
     #[test]
