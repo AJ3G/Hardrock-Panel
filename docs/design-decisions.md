@@ -1070,3 +1070,7 @@ AJ3G's transcript with CT7AUT showed `064230 TX CT7AUT AJ3G FM18` above `064230 
 
 AJ3G asked for an indicator as the mouse moves through the waterfall or the spectrum. A thin line now runs through both at the pointer's frequency, with a small boxed readout beside the pointer: the frequency to the hertz (as the scope shows it, transverter and calibration included) and the strongest level within a drawn column either side, in the scale chosen (S-units, dBm or both). The box flips to the other side at the edges. No level is read while a transmission's picture is held, since those levels aren't the band's.
 
+## 99. TX: the QSO transcript as SDRoxide shows it (11 Nov 2026)
+
+AJ3G sent SDRoxide's transcript as the way it makes most sense: a dot and the message on each line, ours in the TX colour and theirs in green, and the contact closed by a boxed "■ QSO with KH6DC complete — logged". The panel's had a UTC and TX/RX on every line and a plain closing line. Now each line is a dot and the message (ours orange, theirs green, notes such as "CT7AUT is working KJ7NO" dimmed with a small dot), the UTC on hover, a run of the same message of ours sent again folded into one line with "×N", and the logged contact in a green box.
+

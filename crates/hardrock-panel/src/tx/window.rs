@@ -105,6 +105,25 @@ fn caption(ui: &mut egui::Ui, t: &str) {
     ui.label(RichText::new(t).size(10.5).color(theme::CYAN_DIM()).strong());
 }
 
+/// The transcript's lines with each run of the same message of ours sent
+/// again folded into its last, and how many times it went.
+fn transcript_runs(lines: &[super::qso::Line]) -> Vec<(&super::qso::Line, usize)> {
+    let mut out: Vec<(&super::qso::Line, usize)> = Vec::new();
+    for l in lines {
+        if let Some((last, n)) = out.last_mut()
+            && l.tx
+            && last.tx
+            && last.text == l.text
+        {
+            *last = l;
+            *n += 1;
+            continue;
+        }
+        out.push((l, 1));
+    }
+    out
+}
+
 fn mono(t: impl Into<String>) -> RichText {
     RichText::new(t.into()).monospace().size(12.0)
 }
@@ -1032,17 +1051,35 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, sp
             .auto_shrink([false, false])
             .max_height(shown_h)
             .show(ui, |ui| {
-                for l in tx.qso.transcript() {
-                    let t = crate::decode::hms(l.utc as f64).replace(':', "");
-                    let (tag, col) = if l.note {
-                        ("  ", theme::CYAN_DIM())
+                // As SDRoxide shows it (decision 99): a dot and the message,
+                // ours in the TX colour and theirs in green, a repeat of
+                // ours counted rather than written again, notes dimmed,
+                // and the logged contact boxed. The UTC is on hover.
+                for (l, n) in transcript_runs(tx.qso.transcript()) {
+                    let t = crate::decode::hms(l.utc as f64);
+                    if l.done {
+                        egui::Frame::new()
+                            .stroke(egui::Stroke::new(1.0, theme::GREEN()))
+                            .fill(theme::GREEN().gamma_multiply(0.12))
+                            .inner_margin(egui::Margin::symmetric(5, 2))
+                            .corner_radius(2)
+                            .show(ui, |ui| {
+                                ui.label(mono(format!("■ {}", l.text)).color(theme::GREEN()));
+                            })
+                            .response
+                            .on_hover_text(format!("{t} UTC"));
+                        continue;
+                    }
+                    let (dot, col) = if l.note {
+                        ("·", theme::CYAN_DIM())
                     } else if l.tx {
-                        ("TX", tx_ink())
+                        ("●", tx_ink())
                     } else {
-                        ("RX", theme::GREEN())
+                        ("●", theme::GREEN())
                     };
-                    let col = if l.done { theme::TEXT_STRONG() } else { col };
-                    ui.label(mono(format!("{t} {tag} {}", l.text)).color(col));
+                    let text = if n > 1 { format!("{dot} {}  ×{n}", l.text) } else { format!("{dot} {}", l.text) };
+                    let hover = if n > 1 { format!("{t} UTC, last of {n}") } else { format!("{t} UTC") };
+                    ui.label(mono(text).color(col)).on_hover_text(hover);
                 }
             });
         let next = tx.hand.clone().or_else(|| tx.qso.plan_tx());
@@ -1359,6 +1396,22 @@ mod tests {
         let g = slot_groups(&rows);
         assert_eq!(g.iter().map(|t| t.0).collect::<Vec<_>>(), vec![45, 30, 15]);
         assert_eq!(g[1].1, vec![0, 2]);
+    }
+
+    #[test]
+    fn repeats_of_our_message_fold_into_one_line_with_a_count() {
+        use super::super::qso::Line;
+        let l = |utc, tx, text: &str| Line { utc, tx, text: text.into(), note: false, done: false };
+        let lines = [
+            l(0, true, "KH6DC AJ3G FM18"),
+            l(30, true, "KH6DC AJ3G FM18"),
+            l(45, false, "AJ3G KH6DC -02"),
+            l(60, true, "KH6DC AJ3G R-13"),
+            l(90, true, "KH6DC AJ3G R-13"),
+            l(120, true, "KH6DC AJ3G 73"),
+        ];
+        let runs: Vec<(i64, usize)> = transcript_runs(&lines).iter().map(|(l, n)| (l.utc, *n)).collect();
+        assert_eq!(runs, [(30, 2), (45, 1), (90, 2), (120, 1)]);
     }
 
     #[test]

@@ -758,7 +758,7 @@ impl Qso {
             start_utc: dx.started_utc,
             end_utc: now_utc,
         });
-        let text = format!("QSO with {} complete: logged", dx.call);
+        let text = format!("QSO with {} complete — logged", dx.call);
         self.transcript.push(Line { utc: now_utc, tx: false, text, note: false, done: true });
         self.logged = true;
     }
