@@ -7,19 +7,19 @@
 //! After SDRoxide's logbook window (`sdroxide-ui/src/app/logbook.rs`,
 //! https://github.com/dividebysandwich/sdroxide, GPL-3.0-or-later).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align2, Color32, FontId, RichText, Sense, Vec2};
 
-use super::lookup::{self, Batch, Msg};
+use super::lookup::{self, Batch, FillBatch, FillMsg, Msg, Plan, Source, Want};
 use super::{
     Credentials, LogSettings, Logbook, LookupService, QsoRecord, Service, adif, adif_band,
     adif_today, upload,
 };
-use crate::station::StationSettings;
+use crate::station::{Heard, StationSettings};
 use crate::{chrome, theme};
 
 /// What the window asks of the rest of the panel.
@@ -196,8 +196,18 @@ pub(crate) struct LogUi {
     status: Option<(String, bool)>,
     /// DEL pressed once: press again to delete.
     confirm_delete: Option<Instant>,
-    /// FILL MISSING's lookups, and the calls they are for.
-    batch: Option<Batch>,
+    /// FILL MISSING, while its lookups run.
+    fill: Option<FillRun>,
+    /// When the log's grid-less calls were last looked for among the
+    /// stations decoded ([`LogUi::heard_again`]).
+    heard_at: Option<Instant>,
+    /// The calls with a QSO that has no grid, for the log generation.
+    gridless: Option<(u64, Vec<String>)>,
+    /// The .adi files offered by FILE's drop-down, found when it opens.
+    found_files: Vec<PathBuf>,
+    /// BROWSE…'s file dialog, open on its own thread.
+    #[cfg(windows)]
+    browse: Option<Receiver<Option<PathBuf>>>,
     /// LOOKUP in the form.
     form_lookup: Option<Batch>,
     eqsl: Option<Receiver<EqslDone>>,
@@ -209,6 +219,29 @@ pub(crate) struct LogUi {
     items: Vec<Item>,
     built: Option<(u64, String)>,
 }
+
+/// A FILL MISSING run: its lookups, and the tally for the report at the end.
+struct FillRun {
+    batch: FillBatch,
+    tally: Tally,
+}
+
+/// What a FILL MISSING run has done so far.
+#[derive(Default)]
+struct Tally {
+    /// QSOs given a country, zones or continent by cty.dat.
+    offline: usize,
+    /// Grids filled, by where they came from.
+    grids: BTreeMap<Source, usize>,
+    /// Sources that couldn't be used, and why.
+    failed: Vec<String>,
+    /// No QRZ.com or HamQTH login was set.
+    no_login: bool,
+}
+
+/// How often the log looks for its grid-less calls among the stations
+/// decoded: the file is saved at most this often for it.
+const HEARD_EVERY: Duration = Duration::from_secs(15);
 
 impl LogUi {
     fn say(&mut self, msg: impl Into<String>, problem: bool) {
@@ -232,11 +265,22 @@ impl LogUi {
 
     /// Anything running on another thread.
     fn busy(&self) -> bool {
-        self.batch.is_some()
+        self.fill.is_some()
             || self.form_lookup.is_some()
             || self.eqsl.is_some()
             || self.lotw.is_some()
             || self.confirms.is_some()
+            || self.browsing()
+    }
+
+    #[cfg(windows)]
+    fn browsing(&self) -> bool {
+        self.browse.is_some()
+    }
+
+    #[cfg(not(windows))]
+    fn browsing(&self) -> bool {
+        false
     }
 
     /// The QSOs a send acts on: those selected, or else every one not yet
@@ -250,28 +294,54 @@ impl LogUi {
     }
 
     /// Take in what the jobs on other threads have finished.
-    fn poll(&mut self, log: &mut Logbook) {
-        if let Some(b) = &mut self.batch {
+    fn poll(&mut self, log: &mut Logbook, heard: &Heard) {
+        let mut finished = false;
+        if let Some(f) = &mut self.fill {
             loop {
-                match b.rx.try_recv() {
-                    Ok(Msg::Found(i)) => {
-                        b.done += 1;
-                        log.modify(|r| r.call == i.call && lookup::fill_missing(r, &i));
+                match f.batch.rx.try_recv() {
+                    Ok(FillMsg::Call { call, found }) => {
+                        f.batch.done += 1;
+                        let grids = &mut f.tally.grids;
+                        log.modify(|r| {
+                            if r.call != call {
+                                return false;
+                            }
+                            let mut changed = false;
+                            for (src, i) in &found {
+                                let had = !r.grid.trim().is_empty();
+                                changed |= lookup::fill_missing(r, i);
+                                if !had && !r.grid.trim().is_empty() {
+                                    *grids.entry(*src).or_default() += 1;
+                                }
+                            }
+                            changed
+                        });
                     }
-                    Ok(Msg::NotFound(_)) => b.done += 1,
-                    Ok(Msg::Failed(e)) => {
-                        self.batch = None;
-                        self.say(format!("FILL MISSING stopped: {e}"), true);
-                        break;
+                    Ok(FillMsg::SourceFailed(src, e)) => {
+                        f.tally.failed.push(format!("{} left out: {e}", src.label()));
                     }
-                    Ok(Msg::Done) | Err(TryRecvError::Disconnected) => {
-                        let n = b.done;
-                        self.batch = None;
-                        self.say(format!("FILL MISSING: {n} calls looked up"), false);
+                    Ok(FillMsg::Done) | Err(TryRecvError::Disconnected) => {
+                        finished = true;
                         break;
                     }
                     Err(TryRecvError::Empty) => break,
                 }
+            }
+        }
+        if finished && let Some(f) = self.fill.take() {
+            self.finish_fill(f, log, heard);
+        }
+        #[cfg(windows)]
+        if let Some(rx) = &self.browse {
+            match rx.try_recv() {
+                Ok(p) => {
+                    self.browse = None;
+                    if let Some(p) = p {
+                        self.file = p.display().to_string();
+                    }
+                }
+                Err(TryRecvError::Disconnected) => self.browse = None,
+                Err(TryRecvError::Empty) => {}
             }
         }
         if let Some(b) = &self.form_lookup {
@@ -369,6 +439,44 @@ impl LogUi {
         }
     }
 
+    /// FILL MISSING's end: the grids no service gave, from the log and the
+    /// stations decoded, and the report.
+    fn finish_fill(&mut self, mut f: FillRun, log: &mut Logbook, heard: &Heard) {
+        f.batch.stop();
+        for (src, n) in fill_grids_offline(log, |c| heard.get(c).map(|st| st.grid.clone())) {
+            *f.tally.grids.entry(src).or_default() += n;
+        }
+        let missing = log.calls_without_grid();
+        let (msg, bad) = fill_report(&f.tally, &missing);
+        self.say(msg, bad);
+    }
+
+    /// Stations decoded sending a grid that QSOs in the log lack: fill
+    /// them (empty grids only), saving once for all of them, at most every
+    /// [`HEARD_EVERY`] (AJ3G: "If its missing and that station is heard again
+    /// fill the data.").
+    fn heard_again(&mut self, log: &mut Logbook, heard: &Heard) {
+        if self.heard_at.is_some_and(|t| t.elapsed() < HEARD_EVERY) || self.fill.is_some() {
+            return;
+        }
+        self.heard_at = Some(Instant::now());
+        if self.gridless.as_ref().is_none_or(|(g, _)| *g != log.generation()) {
+            self.gridless = Some((log.generation(), log.calls_without_grid()));
+        }
+        let Some((_, calls)) = &self.gridless else { return };
+        let grids: HashMap<String, String> = calls
+            .iter()
+            .filter_map(|c| heard.get(c).map(|st| (c.clone(), st.grid.clone())))
+            .collect();
+        if grids.is_empty() {
+            return;
+        }
+        let done = log.fill_grids(&grids);
+        if let Some(m) = heard_note(&done) {
+            self.say(m, false);
+        }
+    }
+
     /// The list for the log as it is, rebuilt when the log or the search
     /// changes.
     fn refresh(&mut self, log: &Logbook) {
@@ -413,8 +521,10 @@ impl LogUi {
 }
 
 /// FILL MISSING: the country file's country, zones and continent at once,
-/// then a lookup of every call still missing something.
-fn fill_missing(ui_state: &mut LogUi, log: &mut Logbook, s: &LogSettings) {
+/// then the services for every call still missing something (a grid from
+/// QRZ.com, HamQTH or callook.info, in that order), then the log's and the
+/// decodes' grids for what they didn't give (decision 75).
+fn fill_missing(ui_state: &mut LogUi, log: &mut Logbook, s: &LogSettings, heard: &Heard) {
     let offline = {
         let snapshot: Vec<QsoRecord> = log.records().to_vec();
         let mut filled = snapshot;
@@ -438,30 +548,130 @@ fn fill_missing(ui_state: &mut LogUi, log: &mut Logbook, s: &LogSettings) {
         }
         n
     };
-    let mut calls: Vec<String> =
-        log.records().iter().filter(|r| lookup::wants_lookup(r)).map(|r| r.call.clone()).collect();
-    calls.sort();
-    calls.dedup();
-    match s.lookup_login() {
-        Ok(_) if calls.is_empty() => ui_state.say(
-            format!("FILL MISSING: {offline} QSOs filled from cty.dat; nothing left to look up"),
-            false,
-        ),
-        Ok((service, login)) => {
-            let secs = (calls.len() as f32 * lookup::pace(service).as_secs_f32()).round();
-            ui_state.say(
-                format!(
-                    "FILL MISSING: {offline} QSOs filled from cty.dat; looking up {} calls on {} (about {secs:.0} s)",
-                    calls.len(),
-                    service.label()
-                ),
-                false,
-            );
-            ui_state.batch = Some(Batch::start(service, login, calls));
-        }
-        Err(e) => ui_state
-            .say(format!("FILL MISSING: {offline} QSOs filled from cty.dat. {e}"), offline == 0),
+    let plan = Plan::of(s);
+    let wants: Vec<Want> =
+        wants(log.records()).into_iter().filter(|w| w.worth_asking(&plan)).collect();
+    let run = FillRun {
+        tally: Tally { offline, no_login: !plan.has_login(), ..Tally::default() },
+        batch: FillBatch::start(plan.clone(), wants.clone()),
+    };
+    if wants.is_empty() {
+        ui_state.finish_fill(run, log, heard);
+        return;
     }
+    let first = match (&plan.qrz, &plan.hamqth) {
+        (Some(_), _) => Source::Qrz,
+        (None, Some(_)) => Source::HamQth,
+        (None, None) => Source::Callook,
+    };
+    let secs = wants.len() as f32 * pace_of(first);
+    ui_state.say(
+        format!(
+            "FILL MISSING: {offline} QSOs filled from cty.dat; looking up {} calls (about {:.0} s)",
+            wants.len(),
+            secs.round()
+        ),
+        false,
+    );
+    ui_state.fill = Some(run);
+}
+
+fn pace_of(s: Source) -> f32 {
+    match s {
+        Source::Qrz => lookup::pace(LookupService::Qrz).as_secs_f32(),
+        Source::HamQth => lookup::pace(LookupService::HamQth).as_secs_f32(),
+        _ => 1.0,
+    }
+}
+
+/// Each call in the log that lacks something, and what.
+fn wants(recs: &[QsoRecord]) -> Vec<Want> {
+    let mut by: BTreeMap<&str, Want> = BTreeMap::new();
+    for r in recs {
+        let any = lookup::wants_lookup(r);
+        let grid = r.grid.trim().is_empty() && !r.call.contains('/');
+        if r.call.is_empty() || !(any || grid) {
+            continue;
+        }
+        let w = by.entry(r.call.as_str()).or_insert_with(|| Want {
+            call: r.call.clone(),
+            any: false,
+            grid: false,
+        });
+        w.any |= any;
+        w.grid |= grid;
+    }
+    by.into_values().collect()
+}
+
+/// The grids no service gave: each grid-less call's grid elsewhere in the
+/// log, then the one it was decoded with (`heard`). Returns how many QSOs
+/// each filled.
+fn fill_grids_offline(
+    log: &mut Logbook,
+    heard: impl Fn(&str) -> Option<String>,
+) -> Vec<(Source, usize)> {
+    let mut out = Vec::new();
+    let calls = log.calls_without_grid();
+    let from_log: HashMap<String, String> =
+        calls.iter().filter_map(|c| log.grid_in_log(c).map(|g| (c.clone(), g))).collect();
+    let n: usize = log.fill_grids(&from_log).iter().map(|d| d.2).sum();
+    if n > 0 {
+        out.push((Source::Log, n));
+    }
+    let from_heard: HashMap<String, String> =
+        log.calls_without_grid().into_iter().filter_map(|c| heard(&c).map(|g| (c, g))).collect();
+    let n: usize = log.fill_grids(&from_heard).iter().map(|d| d.2).sum();
+    if n > 0 {
+        out.push((Source::Heard, n));
+    }
+    out
+}
+
+/// FILL MISSING's report: grids filled and from where, the calls still
+/// without one, what couldn't be used, and the login hint. And whether it is
+/// a problem (nothing could be done).
+fn fill_report(f: &Tally, missing: &[String]) -> (String, bool) {
+    let total: usize = f.grids.values().sum();
+    let mut m =
+        format!("FILL MISSING: {} QSOs filled from cty.dat; {total} grids filled", f.offline);
+    if total > 0 {
+        let parts: Vec<String> =
+            f.grids.iter().map(|(s, n)| format!("{} {n}", s.label())).collect();
+        m.push_str(&format!(" ({})", parts.join(", ")));
+    }
+    if !missing.is_empty() {
+        const SHOWN: usize = 8;
+        let mut list = missing.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(" ");
+        if missing.len() > SHOWN {
+            list.push_str(&format!(" and {} more", missing.len() - SHOWN));
+        }
+        m.push_str(&format!("; no grid found for {list}"));
+    }
+    for e in &f.failed {
+        m.push_str(&format!(". {e}"));
+    }
+    if f.no_login {
+        m.push_str(
+            ". No QRZ.com or HamQTH login: set one in SETTINGS → Logbook for grids outside the \
+             US (callook.info, the log and the decodes were still used)",
+        );
+    }
+    let bad = !f.failed.is_empty() || (f.offline == 0 && total == 0 && f.no_login);
+    (m, bad)
+}
+
+/// LOG's note for grids filled from decodes: "grid FN20 for K1ABC from a
+/// decode, 3 QSOs".
+fn heard_note(done: &[(String, String, usize)]) -> Option<String> {
+    let (c, g, n) = done.first()?;
+    let qsos = if *n == 1 { "1 QSO".to_string() } else { format!("{n} QSOs") };
+    let mut m = format!("grid {g} for {c} from a decode, {qsos}");
+    if done.len() > 1 {
+        let more: usize = done[1..].iter().map(|d| d.2).sum();
+        m.push_str(&format!("; and {} more calls ({more} QSOs)", done.len() - 1));
+    }
+    Some(m)
 }
 
 /// Look `call` up for the form.
@@ -553,10 +763,102 @@ fn file_or_default(ui_state: &LogUi, log: &Logbook) -> Option<PathBuf> {
     Some(dir.join(format!("hardrock-panel-export-{}.adi", adif_today())))
 }
 
-fn import(ui_state: &mut LogUi, log: &mut Logbook, path: PathBuf) {
+fn import(ui_state: &mut LogUi, log: &mut Logbook, s: &mut LogSettings, path: PathBuf) {
     match log.import_file(&path) {
-        Ok(rep) => ui_state.say(format!("Imported {}: {}", path.display(), rep.summary()), false),
+        Ok(rep) => {
+            s.note_import(&path);
+            ui_state.say(format!("Imported {}: {}", path.display(), rep.summary()), false)
+        }
         Err(e) => ui_state.say(format!("Import: {e}"), true),
+    }
+}
+
+/// The .adi files worth offering in FILE's drop-down, each once, the ones
+/// that exist: WSJT-X's log, the files imported lately, then the .adi files
+/// directly in the log's folder (the panel's exports) and the operator's
+/// Documents and Downloads folders, newest first in each. Never the master
+/// log itself. Looked for when the drop-down opens, not every frame.
+fn adif_files(s: &LogSettings, log: &Logbook) -> Vec<PathBuf> {
+    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let mut fixed = Vec::new();
+    if let Some(d) = env("LOCALAPPDATA") {
+        fixed.push(d.join("WSJT-X").join("wsjtx_log.adi"));
+    }
+    if let Some(h) = env("HOME") {
+        fixed.push(h.join(".local/share/WSJT-X/wsjtx_log.adi"));
+    }
+    fixed.extend(s.recent_imports.iter().map(PathBuf::from));
+    let mut dirs = Vec::new();
+    if let Some(d) = log.path().and_then(|p| p.parent()) {
+        dirs.push(d.to_path_buf());
+    }
+    if let Some(home) = env("USERPROFILE").or_else(|| env("HOME")) {
+        dirs.push(home.join("Documents"));
+        dirs.push(home.join("Downloads"));
+    }
+    find_adif(&fixed, &dirs, log.path())
+}
+
+/// [`adif_files`]' search: `fixed` where they exist, then each of `dirs`'
+/// .adi and .adif files (not below it), newest first; leaving out `master`.
+fn find_adif(
+    fixed: &[PathBuf],
+    dirs: &[PathBuf],
+    master: Option<&std::path::Path>,
+) -> Vec<PathBuf> {
+    const MOST: usize = 40;
+    let is_adif = |p: &std::path::Path| {
+        p.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("adi") || e.eq_ignore_ascii_case("adif"))
+    };
+    let mut out: Vec<PathBuf> = Vec::new();
+    let add = |p: PathBuf, out: &mut Vec<PathBuf>| {
+        if Some(p.as_path()) != master && !out.contains(&p) && out.len() < MOST {
+            out.push(p);
+        }
+    };
+    for p in fixed {
+        if p.is_file() {
+            add(p.clone(), &mut out);
+        }
+    }
+    for d in dirs {
+        let Ok(rd) = std::fs::read_dir(d) else { continue };
+        let mut here: Vec<(std::time::SystemTime, PathBuf)> = rd
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                let m = e.metadata().ok().filter(|m| m.is_file())?;
+                is_adif(&p).then(|| (m.modified().unwrap_or(std::time::UNIX_EPOCH), p))
+            })
+            .collect();
+        here.sort_by_key(|h| std::cmp::Reverse(h.0));
+        for (_, p) in here {
+            add(p, &mut out);
+        }
+    }
+    out
+}
+
+/// BROWSE…: the system's file dialog, on its own thread so the panel keeps
+/// drawing while it is open.
+#[cfg(windows)]
+fn browse(ui_state: &mut LogUi) {
+    let (tx, rx) = channel();
+    let start = PathBuf::from(ui_state.file.trim().trim_matches('"'));
+    let spawned = std::thread::Builder::new().name("log-browse".into()).spawn(move || {
+        let mut d = rfd::FileDialog::new()
+            .set_title("ADIF file to import")
+            .add_filter("ADIF", &["adi", "adif"])
+            .add_filter("All files", &["*"]);
+        if let Some(dir) = start.parent().filter(|d| d.is_dir()) {
+            d = d.set_directory(dir);
+        }
+        let _ = tx.send(d.pick_file());
+    });
+    match spawned {
+        Ok(_) => ui_state.browse = Some(rx),
+        Err(e) => ui_state.say(format!("couldn't open the file dialog: {e}"), true),
     }
 }
 
@@ -582,8 +884,10 @@ fn export(ui_state: &mut LogUi, log: &Logbook) {
 }
 
 /// The LOG window, when `open`; and every frame, open or not, whatever the
-/// lookups and uploads have finished. `dial` is where the radio is and its
-/// mode, for + NEW ENTRY.
+/// lookups and uploads have finished, and grids the log lacks from the
+/// stations decoded (`heard`). `dial` is where the radio is and its mode, for
+/// + NEW ENTRY.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn show(
     ctx: &egui::Context,
     open: &mut bool,
@@ -592,8 +896,10 @@ pub(crate) fn show(
     s: &mut LogSettings,
     st: &StationSettings,
     dial: Option<(u64, Option<&str>)>,
+    heard: &Heard,
 ) -> LogOut {
-    ui_state.poll(log);
+    ui_state.poll(log, heard);
+    ui_state.heard_again(log, heard);
     let mut out = LogOut::default();
     if ui_state.busy() {
         crate::repaint::after(ctx, Duration::from_millis(250));
@@ -611,7 +917,7 @@ pub(crate) fn show(
                     .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(11))
                     .show(ui, |ui| {
                         chrome::window_body_bg(ui);
-                        body(ui, true, log, ui_state, s, st, dial, &mut out);
+                        body(ui, true, log, ui_state, s, st, dial, heard, &mut out);
                     });
                 ui.ctx().input(|i| i.viewport().close_requested())
             },
@@ -635,7 +941,7 @@ pub(crate) fn show(
             .constrain_to(ctx.content_rect().with_min_y(40.0))
             .show(ctx, |ui| {
                 chrome::window_body_bg(ui);
-                body(ui, false, log, ui_state, s, st, dial, &mut out);
+                body(ui, false, log, ui_state, s, st, dial, heard, &mut out);
             });
     }
     out
@@ -654,6 +960,7 @@ fn body(
     s: &mut LogSettings,
     st: &StationSettings,
     dial: Option<(u64, Option<&str>)>,
+    heard: &Heard,
     out: &mut LogOut,
 ) {
     // A file dropped on the window is imported.
@@ -666,11 +973,11 @@ fn body(
             .collect()
     });
     for p in dropped {
-        import(u, log, p);
+        import(u, log, s, p);
     }
     top_bar(ui, popped, log, out);
     ui.add_space(4.0);
-    toolbar(ui, log, u, s, st, dial);
+    toolbar(ui, log, u, s, st, dial, heard);
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label(caps("FILE"));
@@ -684,6 +991,7 @@ fn body(
             "IMPORT reads this file. ADIF writes the selected QSOs, or all of them, to it; left \
              empty, ADIF writes hardrock-panel-export-<date>.adi beside the log",
         );
+        file_picker(ui, log, u, s);
         ui.add_space(12.0);
         ui.label(caps("FIND"));
         chrome::field(
@@ -707,6 +1015,46 @@ fn body(
     }
     ui.add_space(4.0);
     list(ui, log, u);
+}
+
+/// FILE's drop-down of .adi files found, and (Windows) BROWSE…. Picking one
+/// puts it in the FILE box (AJ3G, 11 Nov 2026).
+fn file_picker(ui: &mut egui::Ui, log: &Logbook, u: &mut LogUi, s: &LogSettings) {
+    let mut picked = None;
+    let r = ui.menu_button("▾", |ui| {
+        if u.found_files.is_empty() {
+            u.found_files = adif_files(s, log);
+        }
+        if u.found_files.is_empty() {
+            ui.label(RichText::new("No .adi files found").size(11.0).weak());
+        }
+        for p in &u.found_files {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let dir = p.parent().map(|d| d.display().to_string()).unwrap_or_default();
+            if ui.button(RichText::new(name).size(11.5)).on_hover_text(dir).clicked() {
+                picked = Some(p.clone());
+                ui.close();
+            }
+        }
+    });
+    r.response.on_hover_text(
+        "ADIF files found: WSJT-X's log, recent imports, the panel's exports, and those in your \
+         Documents and Downloads folders",
+    );
+    if r.inner.is_none() {
+        // Shut: look again when it next opens.
+        u.found_files.clear();
+    }
+    #[cfg(windows)]
+    if chrome::chip_enabled(ui, u.browse.is_none(), false, "BROWSE…")
+        .on_hover_text("Pick the ADIF file with Windows' file dialog")
+        .clicked()
+    {
+        browse(u);
+    }
+    if let Some(p) = picked {
+        u.file = p.display().to_string();
+    }
 }
 
 fn top_bar(ui: &mut egui::Ui, popped: bool, log: &Logbook, out: &mut LogOut) {
@@ -740,9 +1088,10 @@ fn toolbar(
     ui: &mut egui::Ui,
     log: &mut Logbook,
     u: &mut LogUi,
-    s: &LogSettings,
+    s: &mut LogSettings,
     st: &StationSettings,
     dial: Option<(u64, Option<&str>)>,
+    heard: &Heard,
 ) {
     let nsel = u.selected.len();
     ui.horizontal_wrapped(|ui| {
@@ -791,7 +1140,7 @@ fn toolbar(
             if f.is_empty() {
                 u.say("Type the file to import in the FILE box, or drop it on this window", true);
             } else {
-                import(u, log, PathBuf::from(f));
+                import(u, log, s, PathBuf::from(f));
             }
         }
         let what = if nsel > 0 { format!("ADIF ({nsel})") } else { "ADIF".to_string() };
@@ -802,23 +1151,27 @@ fn toolbar(
             export(u, log);
         }
         ui.add_space(10.0);
-        if let Some(b) = &u.batch {
-            let label = format!("STOP {}/{}", b.done, b.total);
-            if chrome::chip(ui, true, label).on_hover_text("Stop FILL MISSING's lookups").clicked() {
-                b.stop();
-                u.batch = None;
-                u.say("FILL MISSING stopped", false);
+        if let Some(f) = &u.fill {
+            let label = format!("STOP {}/{}", f.batch.done, f.batch.total);
+            if chrome::chip(ui, true, label).on_hover_text("Stop FILL MISSING's lookups").clicked()
+                && let Some(f) = u.fill.take()
+            {
+                // What was found so far stays; the log's and the decodes'
+                // grids still fill the rest.
+                u.finish_fill(f, log, heard);
             }
         } else if chrome::chip(ui, false, "FILL MISSING")
-            .on_hover_text(format!(
+            .on_hover_text(
                 "Fill every QSO's empty name, QTH, state, county, grid, zones, DXCC and country: \
-                 country, zones and continent from cty.dat at once, the rest from {}, one call at a \
-                 time. What you entered is never changed",
-                s.lookup.label()
-            ))
+                 country, zones and continent from cty.dat at once, the rest from QRZ.com XML and \
+                 HamQTH (with a login in SETTINGS → Logbook), one call at a time. A grid still \
+                 missing comes from callook.info for a US call, then from the same call's other \
+                 QSOs, then from the grid it was decoded with. Only the callsign is sent. What \
+                 you entered is never changed",
+            )
             .clicked()
         {
-            fill_missing(u, log, s);
+            fill_missing(u, log, s, heard);
         }
         ui.add_space(10.0);
         let send_what = if nsel > 0 { format!("{nsel} selected") } else { "every QSO not sent yet".into() };
@@ -1378,4 +1731,164 @@ pub(crate) fn settings_ui(ui: &mut egui::Ui, s: &mut LogSettings) {
         });
         ui.end_row();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn qso(call: &str, grid: &str, start: i64) -> QsoRecord {
+        QsoRecord {
+            call: call.into(),
+            grid: grid.into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            start_utc: start,
+            ..QsoRecord::default()
+        }
+    }
+
+    #[test]
+    fn missing_grids_come_from_the_log_then_the_decodes() {
+        let mut log = Logbook::in_memory();
+        log.add(qso("K1ABC", "", 1000));
+        log.add(qso("K1ABC", "FN42", 500));
+        log.add(qso("K1ABC", "FN43", 900));
+        log.add(qso("DL1ABC", "", 1000));
+        log.add(qso("DL1ABC", "", 1100));
+        log.add(qso("G4XYZ", "", 1000));
+        log.add(qso("W1AW/KH6", "", 1000));
+        let heard = |c: &str| match c {
+            "DL1ABC" => Some("JO62".to_string()),
+            "K1ABC" => Some("EM00".to_string()),
+            "W1AW/KH6" => Some("BL11".to_string()),
+            _ => None,
+        };
+        let got = fill_grids_offline(&mut log, heard);
+        assert_eq!(got, [(Source::Log, 1), (Source::Heard, 2)]);
+        let grid = |c: &str| {
+            log.records().iter().filter(|r| r.call == c).map(|r| r.grid.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            grid("K1ABC"),
+            ["FN43", "FN42", "FN43"],
+            "the latest in the log, before decodes"
+        );
+        assert_eq!(grid("DL1ABC"), ["JO62", "JO62"]);
+        assert_eq!(grid("G4XYZ"), [""]);
+        assert_eq!(grid("W1AW/KH6"), [""], "a portable call keeps no grid");
+        assert_eq!(log.calls_without_grid(), ["G4XYZ"]);
+    }
+
+    #[test]
+    fn calls_wanting_something_are_listed_once() {
+        let mut full = qso("OK1RR", "JO70", 0);
+        full.name = "Petr".into();
+        full.qth = "Neratovice".into();
+        full.country = "Czech Republic".into();
+        (full.dxcc, full.cq_zone, full.itu_zone) = (Some(503), Some(15), Some(28));
+        let recs = [qso("W1AW", "", 0), qso("W1AW", "FN31", 1), full, qso("DL/W1AW", "", 0)];
+        let w = wants(&recs);
+        assert_eq!(
+            w,
+            [
+                Want { call: "DL/W1AW".into(), any: true, grid: false },
+                Want { call: "W1AW".into(), any: true, grid: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_report_says_where_grids_came_from_and_what_is_missing() {
+        let mut t = Tally { offline: 4, no_login: true, ..Tally::default() };
+        t.grids.insert(Source::Callook, 2);
+        t.grids.insert(Source::Heard, 1);
+        let missing: Vec<String> = (0..10).map(|i| format!("G{i}ABC")).collect();
+        let (m, bad) = fill_report(&t, &missing);
+        assert!(m.contains("3 grids filled (callook.info 2, decodes 1)"), "{m}");
+        assert!(m.contains("no grid found for G0ABC G1ABC"), "{m}");
+        assert!(m.contains("and 2 more"), "{m}");
+        assert!(m.contains("SETTINGS → Logbook"), "{m}");
+        assert!(!bad);
+        let (m, bad) = fill_report(&Tally { no_login: true, ..Tally::default() }, &[]);
+        assert!(bad, "{m}");
+        let (m, _) = fill_report(&Tally::default(), &[]);
+        assert!(!m.contains("SETTINGS"), "{m}");
+    }
+
+    #[test]
+    fn a_decode_note_names_the_grid_and_count() {
+        assert_eq!(heard_note(&[]), None);
+        let one = [("K1ABC".to_string(), "FN20".to_string(), 3)];
+        assert_eq!(heard_note(&one).as_deref(), Some("grid FN20 for K1ABC from a decode, 3 QSOs"));
+        let two = [one[0].clone(), ("G4XYZ".into(), "IO91".into(), 1)];
+        assert_eq!(
+            heard_note(&two).as_deref(),
+            Some("grid FN20 for K1ABC from a decode, 3 QSOs; and 1 more calls (1 QSOs)")
+        );
+    }
+
+    #[test]
+    fn heard_again_fills_and_saves_once() {
+        let dir = std::env::temp_dir().join(format!("hrp-log-heard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("log.adi");
+        let mut log = Logbook::load(&path);
+        log.add(qso("K1ABC", "", 1000));
+        log.add(qso("K1ABC", "", 2000));
+        log.add(qso("K1ABC", "FN31", 3000));
+        let mut heard = Heard::default();
+        heard.note("K1ABC", "FN20", 5000.0);
+        heard.note("G4XYZ", "IO91", 5000.0);
+        let mut u = LogUi::default();
+        let gen0 = log.generation();
+        u.heard_again(&mut log, &heard);
+        assert_eq!(log.generation(), gen0 + 1, "one save for the lot");
+        let grids: Vec<&str> = log.records().iter().map(|r| r.grid.as_str()).collect();
+        assert_eq!(grids, ["FN20", "FN20", "FN31"]);
+        assert_eq!(u.status.as_ref().unwrap().0, "grid FN20 for K1ABC from a decode, 2 QSOs");
+        let again = Logbook::load(&path);
+        assert_eq!(again.records()[0].grid, "FN20", "saved");
+        // Not again until HEARD_EVERY has passed.
+        log.add(qso("K1ABC", "", 4000));
+        u.heard_again(&mut log, &heard);
+        assert_eq!(log.records()[3].grid, "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adif_files_are_found_shallowly_without_the_master() {
+        let dir = std::env::temp_dir().join(format!("hrp-log-find-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("deeper")).unwrap();
+        for f in ["a.adi", "b.ADIF", "c.txt", "master.adi", "deeper/d.adi"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let wsjtx = dir.join("deeper/d.adi");
+        let master = dir.join("master.adi");
+        let found = find_adif(
+            &[wsjtx.clone(), dir.join("gone.adi")],
+            &[dir.clone(), dir.join("nowhere")],
+            Some(&master),
+        );
+        assert_eq!(found[0], wsjtx, "the named files first");
+        let mut rest: Vec<String> =
+            found[1..].iter().map(|p| p.file_name().unwrap().to_string_lossy().into()).collect();
+        rest.sort();
+        assert_eq!(rest, ["a.adi", "b.ADIF"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recent_imports_keep_the_last_eight() {
+        let mut s = LogSettings::default();
+        for i in 0..10 {
+            s.note_import(std::path::Path::new(&format!("/x/{i}.adi")));
+        }
+        s.note_import(std::path::Path::new("/x/5.adi"));
+        assert_eq!(s.recent_imports.len(), 8);
+        assert_eq!(s.recent_imports[0], "/x/5.adi");
+        assert_eq!(s.recent_imports.iter().filter(|p| *p == "/x/5.adi").count(), 1);
+    }
 }

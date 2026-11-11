@@ -831,9 +831,18 @@ fetched while GLOBE is open. **CLEAR** empties both.
 beside the panel's settings, which any logger can read. QSOs from the TX
 window go in by themselves; **+ NEW ENTRY** adds one by hand. **IMPORT** reads
 ADIF from WSJT-X, Log4OM and others, skipping ones already there; **ADIF**
-exports the selection or the whole log. **FILL MISSING** fills empty fields
-from the country file, then HamQTH (or QRZ.com once you subscribe and tick it
-under SETTINGS → Logbook). **eQSL ↑** and **LoTW ↑** upload only when you press
+exports the selection or the whole log. Type the file in **FILE**, drop it on
+the window, pick it from **▾** (WSJT-X's log, your recent imports, the panel's
+exports, and the .adi files in Documents and Downloads) or, on Windows, find
+it with **BROWSE…**. **FILL MISSING** fills empty fields from the country
+file, then QRZ.com XML (once you subscribe and tick it under SETTINGS →
+Logbook) and HamQTH. A missing grid comes from those, then callook.info for a
+US call, then the same call's other QSOs, then the grid the station was
+decoded with; the status line says how many grids came from where and which
+calls have none. Only the callsign is sent. With no QRZ.com or HamQTH login
+only US grids can be found online. A station decoded sending its grid (FT8,
+WSPR) also fills the QSOs with it that have none, by itself. Nothing you
+entered is ever changed. **eQSL ↑** and **LoTW ↑** upload only when you press
 them; LoTW needs ARRL's TQSL installed with your certificate. **QSL ✔**
 downloads confirmations. The logins are kept in the panel's settings file as
 plain text.

@@ -1655,6 +1655,8 @@ impl eframe::App for App {
             &mut self.saved.log,
             &self.saved.station,
             dial,
+            // Grids the log lacks, from stations decoded (decision 75).
+            &self.decode.heard,
         );
         if let Some(p) = o.pop {
             self.saved.log.popped = p;
