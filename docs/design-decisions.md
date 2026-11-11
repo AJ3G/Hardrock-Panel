@@ -865,3 +865,16 @@ The transmit plan's items 2 and 3 (AJ3G, 10 Nov 2026).
 
 **Not done yet:** occupancy from the scope's own spectrum for AUTO (decodes only for now), a sound for "calling you", REPLY on DECODE's own rows, WSPR's own decodes in the TX list (they are on GLOBE).
 
+## 71. TX window, round 2 (11 Nov 2026)
+
+**Why.** What AJ3G asked for while testing the FT8 TX window on the air.
+
+- **Our own overs aren't decoded.** The DUO's I/Q keeps flowing while it transmits, so DECODE heard AJ3G's "UN7GBX AJ3G -18" back at +25 dB in the slot he sent it, flagged NEW with a REPLY button. `main.rs` notes each frame whether the radio is keyed (`RigStatus::transmitting`, which includes the panel's TUNE path); `decode.rs` keeps those spans for 10 minutes (`KeyedLog`) and drops a WSJT slot whole, before its rows, ALL.TXT, spots, GLOBE and TX see it, when the radio was keyed for more than 1 s of it (a poll's lag or the unkey's tail can touch the next slot). SKIM WIDE's slots are dropped the same way, so a skimmed WSPR dial can't spot our own beacon. DECODE's slot line says "transmitting · decodes dropped".
+- **One heading per slot** in the TX list: rows are grouped by slot, newest first, our over first in its slot, however late a slot's decodes come.
+- **The DX's offset** beside their call in the QSO box ("1737 Hz", nothing more, from each decode of theirs); in WSPR the beacon's offset. `Tx::dx_mark()` gives the call, audio Hz and RF Hz for the scope's mark (wired by the scope's side).
+- **Call after RR73** (`TxSettings::call_after_rr73`, on by default): in Wait CQ, the DX sending RR73, RRR, 73 or R73 to the station they are working resumes our calls from the open step (Tx1, or Tx2 with Skip Tx1) with a transcript note. While we are already calling them (Tx1/Tx2), the same sign-off no longer sends us to Wait CQ.
+- **The window resizes freely**: the columns are laid out in exactly the room left (`UiBuilder::max_rect`), each with its own scroll area, and nothing sets a minimum from the available size (egui's `Resize` keeps a window at least as big as last frame's content, so content sized from the room it was given could never shrink). The window stays within the screen.
+- **The transcript** is a scroll area of the whole QSO, stuck to its newest line, with a grip to drag its height (`TxSettings::transcript_h`, 16 lines to start); the room the QSO panel doesn't need goes to it.
+- **REPLY, a double-click and CALL CQ turn ENABLE TX on** in FT8, as pressing it does (the watchdog starts over). WSPR still starts only from ENABLE TX. No interlock changed: ENABLE TX only lets the scheduler try, and every check runs as before.
+- **The drive beside each LEVEL**: `tune::planned_watts` at that level, "— W" before the radio's power step is read.
+- **WSPR's list**: `decode.rs` feeds WSPR decodes to TX as it does FT8's (`WsprHeard`); the list shows HEARD (UTC, SNR, drift, call, grid, dBm, km, heading, offset) and HEARD ME (reporter, SNR, km, MHz, site), newest 2 minute cycle first, one report per receiver per cycle with wspr.live/WSPRnet's preferred to PSK Reporter's. HEARD ME reads GLOBE's last fetch through `Globe::heard_me()`; GLOBE fetches only while it is open. CLEAR empties the list and hides earlier reports.

@@ -565,10 +565,7 @@ impl KeyedLog {
 
     /// How long the radio was keyed between `t0` and `t1`, s.
     fn overlap(&self, t0: f64, t1: f64) -> f64 {
-        self.0
-            .iter()
-            .map(|&(a, b)| (b.unwrap_or(f64::INFINITY).min(t1) - a.max(t0)).max(0.0))
-            .sum()
+        self.0.iter().map(|&(a, b)| (b.unwrap_or(f64::INFINITY).min(t1) - a.max(t0)).max(0.0)).sum()
     }
 
     /// Whether a slot from `t0` lasting `len` s was transmitted over.

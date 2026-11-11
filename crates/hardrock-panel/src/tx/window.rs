@@ -512,8 +512,9 @@ fn wspr_list(ui: &mut egui::Ui, tx: &mut Tx, c: &Ctx<'_>) {
         if me.is_empty() {
             ui.label(
                 RichText::new(
-                    "No reports of your beacon yet. They come from wspr.live or WSPRnet with GLOBE's WSPR HEARD \
-                     ME on, and from PSK Reporter with its PSK REPORTER on; the sites take a few minutes.",
+                    "No reports of your beacon yet. GLOBE fetches them while it is open: from wspr.live or \
+                     WSPRnet with its WSPR HEARD ME on, and from PSK Reporter with its PSK REPORTER on. The \
+                     sites take a few minutes.",
                 )
                 .size(11.5)
                 .color(theme::TEXT()),
