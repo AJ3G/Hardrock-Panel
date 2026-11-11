@@ -136,15 +136,134 @@ pub(crate) fn fmt_report(db: i16) -> String {
     if db < 0 { format!("-{:02}", -db) } else { format!("+{db:02}") }
 }
 
+/// A callsign token without the angle brackets a hashed call is written in.
+fn bare(t: &str) -> &str {
+    t.strip_prefix('<').and_then(|x| x.strip_suffix('>')).unwrap_or(t)
+}
+
+/// A callsign the 28-bit call field holds as it is (`W1AW`, `JA1ABC/P`).
+/// Any other valid call (`EK/RX3DPK`, `PJ4/K1ABC`, `W1AW/QRP`) is
+/// non-standard: spelled out only in a Type 4 message, hashed elsewhere.
+fn is_std(call: &str) -> bool {
+    wsjt77::is_standard_callsign(call)
+}
+
+/// A non-standard call that a message can still carry.
+fn is_nonstd(call: &str) -> bool {
+    !is_std(call) && wsjt77::is_valid_callsign(call)
+}
+
+/// A signal report, `-10` or `+05`, or with R before it.
+fn is_report(t: &str) -> bool {
+    let t = t.strip_prefix('R').unwrap_or(t);
+    t.len() >= 2
+        && (t.starts_with('-') || t.starts_with('+'))
+        && t[1..].bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `text` as WSJT-X sends it when one of its calls is non-standard, with the
+/// call that travels as a hash in brackets; any other message as it is.
+///
+/// FT8's ordinary message (Type 1) has room for two standard calls only; a
+/// call such as `EK/RX3DPK` is spelled out only in the Type 4 message,
+/// which holds the other call as a 12-bit hash and no grid or report. So,
+/// as WSJT-X's Generate Std Msgs does (AJ3G, 11 Nov 2026: `EK/RX3DPK AJ3G
+/// FM18` was refused):
+/// - `CQ EK/RX3DPK`: Type 4, no grid (nor a word such as DX: no room).
+/// - A grid or a report to a non-standard call: Type 1 with that call
+///   hashed, `<EK/RX3DPK> AJ3G FM18`, `<EK/RX3DPK> AJ3G R-10`. The far
+///   station knows its own hash.
+/// - A grid from a non-standard call (ours): Type 4, `<W1AW> PJ4/K1ABC`, so
+///   the far station hears it spelled out before any hash of it.
+/// - A report from a non-standard call: Type 1, `W1AW <PJ4/K1ABC> -10`.
+/// - RRR, RR73, 73 or nothing after the calls: Type 4, the non-standard call
+///   spelled out and the other hashed, `EK/RX3DPK <AJ3G> RR73`.
+pub(crate) fn wsjtx_form(text: &str) -> String {
+    let up = text.trim().to_ascii_uppercase();
+    let t: Vec<&str> = up.split_whitespace().collect();
+    let hash = |c: &str| format!("<{c}>");
+    let out = match t.as_slice() {
+        ["CQ", call, ..] if is_nonstd(bare(call)) => Some(format!("CQ {}", bare(call))),
+        ["CQ", m, call, ..] if !is_std(bare(m)) && is_nonstd(bare(call)) => {
+            Some(format!("CQ {}", bare(call)))
+        }
+        [a, b, rest @ ..] if rest.len() <= 1 => {
+            let (a, b) = (bare(a), bare(b));
+            let p = rest.first().copied().unwrap_or("");
+            match (is_nonstd(a), is_nonstd(b), is_std(a), is_std(b)) {
+                // To a non-standard call.
+                (true, false, _, true) => Some(match p {
+                    "" | "RRR" | "RR73" | "73" => format!("{a} {} {p}", hash(b)),
+                    p if is_grid4(p) || is_report(p) => format!("{} {b} {p}", hash(a)),
+                    _ => up.clone(),
+                }),
+                // From one.
+                (false, true, true, _) => Some(match p {
+                    "" | "RRR" | "RR73" | "73" => format!("{} {b} {p}", hash(a)),
+                    p if is_grid4(p) => format!("{} {b}", hash(a)),
+                    p if is_report(p) => format!("{a} {} {p}", hash(b)),
+                    _ => up.clone(),
+                }),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    out.map_or(up, |o| o.trim_end().to_string())
+}
+
+/// Where the 28-bit call field's hashed calls start (WSJT-X's `NTOKENS`):
+/// below are DE, QRZ and the CQ forms, then 2^22 hashes, then spelled-out
+/// calls. mfsk-core reads this range but its `pack28` never writes it.
+const NTOKENS: u32 = 2_063_592;
+
+/// A Type 1 message with one call carried as its 22-bit hash: packed with a
+/// stand-in call where the hash goes, which is then written over, so the
+/// grid and report fields stay mfsk-core's to encode. WSJT-X hashes the
+/// whole call, `/QRP` and all, so the hash is taken here, not through
+/// mfsk-core's table, which drops a `/P` or `/R` first. As SDRoxide's
+/// `pack77_hashed` (sdroxide-digi/src/modem.rs).
+fn pack77_hashed(c1: &str, c2: &str, payload: &str, first_hashed: bool) -> Option<[u8; 77]> {
+    const STAND_IN: &str = "K1ABC";
+    let (hashed, a, b) = if first_hashed { (c1, STAND_IN, c2) } else { (c2, c1, STAND_IN) };
+    if !wsjt77::is_valid_callsign(hashed) || !is_std(if first_hashed { c2 } else { c1 }) {
+        return None;
+    }
+    let mut bits = wsjt77::pack77(a, b, payload)?;
+    let n28 = NTOKENS + mfsk_core::msg::hash_table::ihashcall(hashed, 22);
+    let start = if first_hashed { 0 } else { 29 };
+    for i in 0..28 {
+        bits[start + i] = ((n28 >> (27 - i)) & 1) as u8;
+    }
+    Some(bits)
+}
+
+/// The Type 4 message: the non-standard call spelled out, the other as its
+/// 12-bit hash, in the order written. mfsk-core always puts the hash first
+/// (bit 70, `iflip`, 0); a reply that addresses the non-standard call needs
+/// it first, as SDRoxide does.
+fn pack77_type4(a: &str, b: &str, payload: &str) -> Option<[u8; 77]> {
+    let nonstd_first = is_nonstd(a) && is_std(b);
+    let (non, other) = if nonstd_first { (a, b) } else { (b, a) };
+    if !is_nonstd(non) || !is_std(other) {
+        return None;
+    }
+    let mut bits = wsjt77::pack77_type4(non, other, payload, false)?;
+    bits[70] = u8::from(nonstd_first);
+    Some(bits)
+}
+
 /// Pack `text` into FT8's 77 bits: a standard message
 /// (`<call> <call> [grid|report|R report|RRR|RR73|73]`, `CQ [mod] <call>
-/// [grid]`), a message with one non-standard call, or free text of up to 13
+/// [grid]`), the same with a non-standard call in WSJT-X's forms
+/// ([`wsjtx_form`]: written either way), or free text of up to 13
 /// characters. `None` when it can't be sent as it is (the panel then says
 /// so and sends nothing).
 pub(crate) fn pack(text: &str) -> Option<[u8; 77]> {
-    let text = text.trim().to_ascii_uppercase();
+    let text = wsjtx_form(text);
     let t: Vec<&str> = text.split_whitespace().collect();
-    let std = |c: &str| wsjt77::is_standard_callsign(c);
+    let std = |c: &str| is_std(c);
+    let br = |c: &str| c.starts_with('<');
     match t.as_slice() {
         ["CQ", call] if std(call) => wsjt77::pack77("CQ", call, ""),
         ["CQ", call, grid] if std(call) && is_grid4(grid) => wsjt77::pack77("CQ", call, grid),
@@ -152,13 +271,15 @@ pub(crate) fn pack(text: &str) -> Option<[u8; 77]> {
             // A directed CQ: "CQ DX", "CQ POTA" ride in the first call field.
             wsjt77::pack77(&format!("CQ {m}"), call, grid)
         }
-        ["CQ", call] | ["CQ", call, _] => wsjt77::pack77_type4(call, "", "", true),
+        ["CQ", call] if is_nonstd(call) => wsjt77::pack77_type4(call, "", "", true),
         [a, b] if std(a) && std(b) => wsjt77::pack77(a, b, ""),
         [a, b, r] if std(a) && std(b) => wsjt77::pack77(a, b, r),
-        [a, b, r] if std(a) ^ std(b) && matches!(*r, "RRR" | "RR73" | "73") => {
-            let (non, s) = if std(a) { (*b, *a) } else { (*a, *b) };
-            wsjt77::pack77_type4(non, s, r, false)
+        // Type 4: one call spelled out, the other hashed.
+        [a, b] | [a, b, "RRR" | "RR73" | "73"] if br(a) ^ br(b) => {
+            pack77_type4(bare(a), bare(b), t.get(2).copied().unwrap_or(""))
         }
+        // Type 1 with one call hashed.
+        [a, b, r] if br(a) ^ br(b) => pack77_hashed(bare(a), bare(b), r, br(a)),
         _ if text.len() <= 13 => wsjt77::pack77_free_text(&text),
         _ => None,
     }
@@ -225,5 +346,61 @@ mod tests {
         assert_eq!(fmt_report(3), "+03");
         // Too long for free text and not a standard message.
         assert!(pack("THIS IS FAR TOO LONG TO SEND").is_none());
+    }
+
+    /// What a station that has heard `calls` reads `text` as.
+    fn heard_as(text: &str, calls: &[&str]) -> Option<String> {
+        let mut ht = mfsk_core::msg::hash_table::CallsignHashTable::new();
+        for c in calls {
+            ht.insert(c);
+        }
+        wsjt77::unpack77_with_hash(&pack(text)?, &ht)
+    }
+
+    #[test]
+    fn a_qso_with_a_compound_call_goes_out_in_wsjtxs_forms() {
+        // AJ3G answering "CQ EK/RX3DPK": what the sequencer writes, what
+        // goes out, and what a station that knows both calls reads.
+        let both = ["EK/RX3DPK", "AJ3G"];
+        for (written, sent) in [
+            ("CQ EK/RX3DPK", "CQ EK/RX3DPK"),
+            ("EK/RX3DPK AJ3G FM18", "<EK/RX3DPK> AJ3G FM18"),
+            ("EK/RX3DPK AJ3G -10", "<EK/RX3DPK> AJ3G -10"),
+            ("EK/RX3DPK AJ3G R-10", "<EK/RX3DPK> AJ3G R-10"),
+            ("EK/RX3DPK AJ3G RR73", "EK/RX3DPK <AJ3G> RR73"),
+            ("EK/RX3DPK AJ3G RRR", "EK/RX3DPK <AJ3G> RRR"),
+            ("EK/RX3DPK AJ3G 73", "EK/RX3DPK <AJ3G> 73"),
+            // The other way: EK/RX3DPK's side of it.
+            ("AJ3G EK/RX3DPK", "<AJ3G> EK/RX3DPK"),
+            ("AJ3G EK/RX3DPK FN20", "<AJ3G> EK/RX3DPK"),
+            ("AJ3G EK/RX3DPK +05", "AJ3G <EK/RX3DPK> +05"),
+            ("AJ3G EK/RX3DPK R+05", "AJ3G <EK/RX3DPK> R+05"),
+            ("AJ3G EK/RX3DPK RR73", "<AJ3G> EK/RX3DPK RR73"),
+            ("AJ3G EK/RX3DPK 73", "<AJ3G> EK/RX3DPK 73"),
+        ] {
+            assert_eq!(wsjtx_form(written), sent, "{written}");
+            // Written plainly or in brackets, it packs the same.
+            assert_eq!(pack(written), pack(sent), "{written}");
+            assert_eq!(heard_as(written, &both).as_deref(), Some(sent), "{written}");
+        }
+        // The far station knows its own call's hash, so the first reply
+        // resolves for it before it has heard ours spelled out.
+        assert_eq!(
+            heard_as("EK/RX3DPK AJ3G FM18", &["EK/RX3DPK"]).as_deref(),
+            Some("<EK/RX3DPK> AJ3G FM18")
+        );
+        // A station that knows neither still reads the spelled-out call.
+        assert_eq!(heard_as("EK/RX3DPK AJ3G RR73", &[]).as_deref(), Some("EK/RX3DPK <...> RR73"));
+        // WSJT-X hashes the whole call, a /QRP suffix and all.
+        assert_eq!(
+            heard_as("W1AW/QRP AJ3G -12", &["W1AW/QRP"]).as_deref(),
+            Some("<W1AW/QRP> AJ3G -12")
+        );
+        // A directed CQ from a compound call loses its word: no room.
+        assert_eq!(wsjtx_form("CQ DX EK/RX3DPK FM18"), "CQ EK/RX3DPK");
+        // Two non-standard calls can't be sent.
+        assert!(pack("EK/RX3DPK PJ4/K1ABC -10").is_none());
+        // Standard messages are as they were.
+        assert_eq!(wsjtx_form("JA1ABC AJ3G -12"), "JA1ABC AJ3G -12");
     }
 }

@@ -785,7 +785,8 @@ impl Tx {
             // A station that answered our CQ is now the one worked.
             self.note_dx_seen();
             if let Some(c) = self.qso.dx_call().map(str::to_string)
-                && self.lines[0].split_whitespace().next() != Some(c.as_str())
+                && self.lines[0].split_whitespace().next().map(|t| t.trim_matches(['<', '>']))
+                    != Some(c.as_str())
             {
                 if let Some(e) = self.parity.get(&c) {
                     self.tx_even = !e;
@@ -819,6 +820,8 @@ impl Tx {
                 }
                 let plan = if s.auto_seq { self.qso.plan_tx() } else { self.hand.clone() };
                 let Some(text) = plan else { return Ok(false) };
+                // As it goes out: a non-standard call in WSJT-X's form.
+                let text = msg::wsjtx_form(&text);
                 if !env.decoding_ft8 {
                     return Err("DECODE isn't running FT8, so the sequencer can't hear replies.".into());
                 }

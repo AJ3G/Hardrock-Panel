@@ -8,8 +8,8 @@
 //! Every block of audio carries the UTC time of its first sample, from the
 //! system clock (see [`crate::slot`]); every result is stamped in UTC from it.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -157,6 +157,8 @@ const LIVE_STEP: usize = 12_000;
 pub struct WsjtDecoder {
     feed: Feed<()>,
     results: Receiver<WsjtSlot>,
+    /// Calls registered before each slot is decoded ([`Self::seed_calls`]).
+    seeds: Arc<Mutex<Vec<String>>>,
 }
 
 /// Larger than this between where a block was expected to start and its time
@@ -237,6 +239,8 @@ impl WsjtDecoder {
         );
 
         let calls = cfg.my_calls;
+        let seeds = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seeded = seeds.clone();
         feed.threads.push(
             std::thread::Builder::new()
                 .name(format!("wsjt-{}-decode", mode.label()))
@@ -254,6 +258,13 @@ impl WsjtDecoder {
                             },
                         };
                         let t = Instant::now();
+                        // The calls in hand now (the station being worked)
+                        // go to the front of the table before each slot,
+                        // as SDRoxide's `ApHints::calls` do.
+                        {
+                            let s = seeded.lock().unwrap_or_else(|e| e.into_inner());
+                            session.seed(&s.iter().map(String::as_str).collect::<Vec<_>>());
+                        }
                         let (slot_utc, decodes, is_live) = match msg {
                             SlotMsg::Live(at, audio) => {
                                 let slot_utc = at.round() as i64;
@@ -325,7 +336,18 @@ impl WsjtDecoder {
                 })
                 .expect("spawn wsjt decode thread"),
         );
-        WsjtDecoder { feed, results }
+        WsjtDecoder { feed, results, seeds }
+    }
+
+    /// Callsigns to register before each slot is decoded, replacing the last
+    /// ones given: the operator's and the station in a QSO with us, so a
+    /// message naming either by its hash resolves even when its full form
+    /// was never heard (a non-standard call, most of all).
+    pub fn seed_calls(&self, calls: &[String]) {
+        let mut s = self.seeds.lock().unwrap_or_else(|e| e.into_inner());
+        if s.as_slice() != calls {
+            *s = calls.to_vec();
+        }
     }
 
     /// Audio at the configured rate whose first sample was heard at `utc`

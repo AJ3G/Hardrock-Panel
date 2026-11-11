@@ -192,6 +192,9 @@ struct App {
     /// TUNE was started with the amplifier showing a trip, which keying
     /// clears; it doesn't stop that TUNE until it has cleared (#6).
     trip_carried: bool,
+    /// The amplifier's last good readings, which an over in progress rides
+    /// a short silence on (#6).
+    amp_hold: tune::AmpHold,
     /// Why the tone wouldn't play, last time.
     tone_error: Option<String>,
     /// Since when the radio has been seen transmitting.
@@ -305,6 +308,7 @@ impl App {
             tone: audio::Tone::default(),
             sounds: audio::output_devices(),
             trip_carried: false,
+            amp_hold: tune::AmpHold::default(),
             tone_asked: None,
             tx_sources: (String::new(), None),
             tone_error: None,
@@ -388,7 +392,21 @@ impl App {
             // Cleared, by this keying or otherwise: any trip from now is new.
             self.trip_carried = false;
         }
+        let now = Instant::now();
+        self.amp_hold.note(amp, now);
         let (Some(link), Some(r), Some(t)) = (&self.rig, rig, tuning) else { return };
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): an over in
+        // progress is judged by the amplifier's last readings for up to 5 s
+        // of silence (the HR500 skips replies while keyed), and stopped
+        // after that; see `tune::AmpHold`.
+        let held = match self.amp_hold.over_view(amp, now) {
+            Ok(v) => v,
+            Err(why) => {
+                link.tune_stop(Some(why));
+                return;
+            }
+        };
+        let amp = &held;
         if outside {
             // SAFETY INTERLOCK (docs/safety-interlocks.md, #8 with #6): an
             // outside program's transmission is watched as TUNE is, at the
@@ -836,6 +854,10 @@ impl App {
             at,
             self.outside.wsjtx.as_ref(),
         );
+        // Hashed calls naming us or the station in hand resolve (decision 72).
+        let mut calls: Vec<String> = self.saved.station.call().into_iter().collect();
+        calls.extend(self.tx.qso.dx_call().map(str::to_string));
+        self.decode.seed_calls(&calls);
         // The scope's slot lines follow the decoder's slots (decision 51).
         self.scope.decode_slots(self.decode.slots());
         // And its labels, DECODE's decodes (decision 54).
@@ -1297,6 +1319,11 @@ impl eframe::App for App {
         self.sync_xvtr(ctx, xvtr);
         let transmitting =
             rig.as_ref().is_some_and(|r| r.connected && r.transmitting()) || amp_keyed(&amp_raw);
+        if let Some(l) = &self.link {
+            // The link gives unanswered reads longer while the radio is
+            // keyed (#6).
+            l.set_transmitting(rig.as_ref().is_some_and(|r| r.connected && r.transmitting()));
+        }
         self.log_tx_sources(rig.as_ref(), &amp_raw);
         self.run_receiver(ctx, &amp_raw, rig.as_ref(), transmitting, xvtr);
         self.keep_tune(&amp_raw, rig.as_ref());

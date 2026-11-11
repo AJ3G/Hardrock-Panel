@@ -881,6 +881,17 @@ The transmit plan's items 2 and 3 (AJ3G, 10 Nov 2026).
 - **The drive beside each LEVEL**: `tune::planned_watts` at that level, "— W" before the radio's power step is read.
 - **WSPR's list**: `decode.rs` feeds WSPR decodes to TX as it does FT8's (`WsprHeard`); the list shows HEARD (UTC, SNR, drift, call, grid, dBm, km, heading, offset) and HEARD ME (reporter, SNR, km, MHz, site), newest 2 minute cycle first, one report per receiver per cycle with wspr.live/WSPRnet's preferred to PSK Reporter's. HEARD ME reads GLOBE's last fetch through `Globe::heard_me()`; GLOBE fetches only while it is open. CLEAR empties the list and hides earlier reports.
 
+## 72. Amplifier silence mid-over, compound calls in FT8, and the decoder's hash table (11 Nov 2026)
+
+**Why.** AJ3G, 11 Nov 2026: "amplifier is not connected" warnings were cutting his QSOs and CQs, which SDRoxide never did; the TX window refused `EK/RX3DPK AJ3G FM18`; and replies to compound-call stations decoded as `<...> KG7FST DM09` where SDRoxide resolved them.
+
+**What.**
+- **Interlock #6, a short silence mid-over (AJ3G approved the plan).** The HR500 often leaves its status query unanswered while keyed. The link (`hardrock::link`, `link_lost`) now calls the amplifier lost while transmitting only after 5 s with no answer, as well as four misses; at rest, four misses as before. The panel tells the link every frame whether the radio is keyed (`AmpLink::set_transmitting`); the link also counts the amplifier's own TX light (or, on old firmware, its drive) from the last answer, whichever says so first. `AmpStatus::readings_at` gives the readings' age. In the panel (`tune::AmpHold`), an over already keyed is judged by the last readings for up to 5 s from when they were taken, so a trip, SWR, over-drive or band mismatch they show still stops it; after 5 s it stops. Starting needs readings no older than 3.5 s (`tune::LIVE_MAX`), about what the link took to give up at rest before. See docs/safety-interlocks.md #6.
+- **Compound calls in FT8 TX** (`tx/msg.rs`, `wsjtx_form`, `pack`): WSJT-X's forms. A grid or report to a non-standard call is a Type 1 message with that call as its 22-bit hash, written into the call field by hand as SDRoxide does (mfsk-core 0.10's `pack28` has none), hashing the whole call as WSJT-X does; RRR, RR73, 73 and a bare pair are Type 4, the non-standard call spelled out and the other hashed, in the order written (bit 70, which mfsk-core always leaves for hash-first); a grid from our own compound call goes as Type 4 without it so the far station hears our call spelled out; CQ is Type 4 (no grid, no CQ word). The sequencer's templates produce these forms, so the Tx lines and the transcript show the brackets.
+- **The decoder learns every call** (`decoders::wsjt`, `learn`): standard or not, never `...`; and the panel registers its own call and the TX window's DX call before each slot (`WsjtDecoder::seed_calls`), as SDRoxide's `ApHints::calls`.
+
+**Not done:** mfsk-core's hash table drops a `/P` or `/R` before hashing where WSJT-X hashes the whole call, so a hashed `W1AW/P` from elsewhere may still read `<...>`.
+
 ## 73. GLOBE: 3D arcs, one place per station, SHOW, the mode in use and CLEAR (11 Nov 2026)
 
 AJ3G's round-2 GLOBE items (11 Nov 2026).
@@ -890,18 +901,6 @@ AJ3G's round-2 GLOBE items (11 Nov 2026).
 - **SHOW: I HEARD · HEARD ME · BOTH** (`GlobeSettings::heard_view`, BOTH to start, remembered): the stations decoded, the reports of AJ3G (PSK Reporter, WSPR HEARD ME), or all. The SOURCES chips still pick within it. It and the mode below pick the stations, paths and HEARD list; PROP still takes every mode and way the SOURCES chips allow, since a path's evidence about the sky doesn't depend on which way or in which mode it was heard.
 - **The mode in use.** `Globe::set_mode`, from main.rs each frame: the TX window's mode while it is open, else DECODE's running mode. GLOBE shows only that mode's stations (`field::norm_mode` compares upper case without the submode, so DECODE's "FST4-60" matches PSK Reporter's "FST4"; a report with no mode is shown); the others are hidden, not erased. **ALL MODES** shows every mode. A mode that is not a WSJT mode, or none running, shows every mode.
 - **CLEAR** wipes the stations and paths (decodes and heard-me) now and rebuilds PROP. PSK Reporter and WSPR answer with the whole last hour each time, so `History` keeps the clear time and refuses a heard-me report from before it; DECODE's own lines are kept whatever their slot time, a decode landing a second after CLEAR being new.
-
-## 75. LOG: grids for FILL MISSING and from decodes; picking the ADIF file (11 Nov 2026)
-
-**Why.** AJ3G: "Fill Missing does not add missing grid squares … you should use online resource to fill in the data", and "If its missing and that station is heard again fill the data." With no HamQTH login FILL MISSING ran only cty.dat, which has no grids. And typing a path to import was awkward.
-
-**What.**
-- **FILL MISSING's order for a grid** (`logbook/lookup.rs`, `FillBatch`): QRZ.com XML when switched on with a login, HamQTH when it has a login (the second asked only for a grid the first didn't give), callook.info for a US call (FCC data, no login, `https://callook.info/<CALL>/json`), then with no network the same call's latest grid elsewhere in the log and the grid DECODE heard it send this run (`station::Heard`). A service with a position and no grid gives the 6-character grid it is in. Only the callsign goes to a service (with that service's own login). Each source is paced (QRZ.com 1 s, HamQTH 1.5 s, callook.info 1 s) and each call is asked once per source in a run; a source that fails is left out for the rest of the run and the others go on. Empty fields only, never `/` calls' grids.
-- **The report** in LOG's status line: QSOs filled from cty.dat, grids filled by source, the calls still without one (the first eight), sources left out and why, and, with no QRZ.com or HamQTH login, a pointer to SETTINGS → Logbook.
-- **Heard again:** every 15 s the log's grid-less calls are looked up in DECODE's heard table (FT8 decodes with a grid, WSPR decodes); QSOs with no grid are filled and the file is saved once for all of them, with a note such as "grid FN20 for K1ABC from a decode, 3 QSOs". Hooked in through `logbook::show`, which now takes `&decode.heard`.
-- **FILE's ▾ drop-down** lists the .adi files found when it opens: WSJT-X's `wsjtx_log.adi`, the last eight imports (kept in the settings), the .adi files beside the log (the panel's exports), and those directly in Documents and Downloads, newest first. **BROWSE…** (Windows only, the `rfd` crate with no default features, on its own thread) opens the system's file dialog. Either fills the FILE box.
-
-**Not done:** QRZ.com's free (non-XML) pages are not scraped; the form's LOOKUP still asks only the service chosen in SETTINGS.
 
 ## 74. The scope over a transmission: the band dimmed, our own signal in the TX colour (11 Nov 2026)
 
@@ -919,3 +918,15 @@ AJ3G's round-2 GLOBE items (11 Nov 2026).
 **Also, the same day.**
 - **The TUNE strip says which path each key takes** (AJ3G, 11 Nov 2026). TX TUNE reads *TX TUNE (USB audio)*: a 1 kHz tone through the radio's USB audio at the slider's share of menu 34, the path FT8 and WSPR take. Its slider is *TX TUNE level*, its value a share of menu 34 with the ≈ watts beside it (`tune::planned_watts`). RIG TUNE, which has no slider, shows the power it keys at on its key: *RIG TUNE (carrier 8.3 W)*, menu 34's watts from the power step (`tune::carrier_label`; `tune.rs`).
 - **The scope's GPU line** no longer repeats the GPU spectrum's frames a second: *FFT on the GPU* and the GPU's load (AJ3G, 11 Nov 2026).
+
+## 75. LOG: grids for FILL MISSING and from decodes; picking the ADIF file (11 Nov 2026)
+
+**Why.** AJ3G: "Fill Missing does not add missing grid squares … you should use online resource to fill in the data", and "If its missing and that station is heard again fill the data." With no HamQTH login FILL MISSING ran only cty.dat, which has no grids. And typing a path to import was awkward.
+
+**What.**
+- **FILL MISSING's order for a grid** (`logbook/lookup.rs`, `FillBatch`): QRZ.com XML when switched on with a login, HamQTH when it has a login (the second asked only for a grid the first didn't give), callook.info for a US call (FCC data, no login, `https://callook.info/<CALL>/json`), then with no network the same call's latest grid elsewhere in the log and the grid DECODE heard it send this run (`station::Heard`). A service with a position and no grid gives the 6-character grid it is in. Only the callsign goes to a service (with that service's own login). Each source is paced (QRZ.com 1 s, HamQTH 1.5 s, callook.info 1 s) and each call is asked once per source in a run; a source that fails is left out for the rest of the run and the others go on. Empty fields only, never `/` calls' grids.
+- **The report** in LOG's status line: QSOs filled from cty.dat, grids filled by source, the calls still without one (the first eight), sources left out and why, and, with no QRZ.com or HamQTH login, a pointer to SETTINGS → Logbook.
+- **Heard again:** every 15 s the log's grid-less calls are looked up in DECODE's heard table (FT8 decodes with a grid, WSPR decodes); QSOs with no grid are filled and the file is saved once for all of them, with a note such as "grid FN20 for K1ABC from a decode, 3 QSOs". Hooked in through `logbook::show`, which now takes `&decode.heard`.
+- **FILE's ▾ drop-down** lists the .adi files found when it opens: WSJT-X's `wsjtx_log.adi`, the last eight imports (kept in the settings), the .adi files beside the log (the panel's exports), and those directly in Documents and Downloads, newest first. **BROWSE…** (Windows only, the `rfd` crate with no default features, on its own thread) opens the system's file dialog. Either fills the FILE box.
+
+**Not done:** QRZ.com's free (non-XML) pages are not scraped; the form's LOOKUP still asks only the service chosen in SETTINGS.

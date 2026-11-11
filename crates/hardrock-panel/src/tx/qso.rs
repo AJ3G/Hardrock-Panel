@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use super::msg::{Decode, fmt_report, is_grid4};
+use super::msg::{Decode, fmt_report, is_grid4, wsjtx_form};
 
 /// Give up waiting for a picked station to call CQ after this long, s.
 const WAIT_CQ_S: i64 = 300;
@@ -142,17 +142,21 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Fill a template.
+    /// Fill a template, in WSJT-X's form when a call is non-standard
+    /// (`<EK/RX3DPK> AJ3G FM18`, see [`wsjtx_form`]), so the transcript
+    /// shows what goes out.
     pub(crate) fn fill(&self, tmpl: &str, dx: &str, report: Option<i16>) -> String {
         let grid: String = self.my_grid.chars().take(4).collect::<String>().to_ascii_uppercase();
         let rpt = report.map(fmt_report).unwrap_or_default();
-        tmpl.replace("{MYCALL}", &self.my_call.to_ascii_uppercase())
+        let text = tmpl
+            .replace("{MYCALL}", &self.my_call.to_ascii_uppercase())
             .replace("{MYGRID}", &grid)
             .replace("{DX}", dx)
             .replace("{REPORT}", &rpt)
             .split_whitespace()
             .collect::<Vec<_>>()
-            .join(" ")
+            .join(" ");
+        wsjtx_form(&text)
     }
 }
 
@@ -815,7 +819,8 @@ impl Qso {
             // A hand-picked line that is a sign-off closes the exchange as
             // the sequencer's own would.
             let p = classify(&m);
-            if self.dx.as_ref().is_some_and(|d| m.starts_with(&format!("{} ", d.call)))
+            let to = super::msg::parse(&m, 0, 0, 0.0, 0.0).to;
+            if self.dx.as_ref().is_some_and(|d| to.as_deref() == Some(d.call.as_str()))
                 && matches!(p, Payload::Rr73 | Payload::B73 | Payload::Rrr)
                 && self.dx.as_ref().is_some_and(|d| d.rpt_rcvd.is_some())
             {
@@ -975,6 +980,53 @@ mod tests {
         assert_eq!(q.plan_tx().as_deref(), Some("K1ABC AJ3G RR73"));
         q.note_tx_sent(90);
         assert!(q.take_completed().is_none());
+    }
+
+    #[test]
+    fn a_qso_with_a_compound_call_runs_in_wsjtxs_forms() {
+        // Answering "CQ EK/RX3DPK": each message is sent as WSJT-X would,
+        // and their replies (as the decoder resolves them) move it on.
+        let mut q = Qso::new(cfg());
+        let cq = d("CQ EK/RX3DPK");
+        assert_eq!(cq.from.as_deref(), Some("EK/RX3DPK"));
+        q.start_qso("EK/RX3DPK", None, -14, false, 0);
+        assert_eq!(q.plan_tx().as_deref(), Some("<EK/RX3DPK> AJ3G FN20"));
+        q.note_tx_sent(15);
+        assert!(q.on_rx(&[d("AJ3G <EK/RX3DPK> -10")], 30));
+        assert_eq!(q.plan_tx().as_deref(), Some("<EK/RX3DPK> AJ3G R-14"));
+        q.note_tx_sent(45);
+        q.on_rx(&[d("<AJ3G> EK/RX3DPK RR73")], 60);
+        let l = q.take_completed().expect("logged on their RR73");
+        assert_eq!((l.call.as_str(), l.rst_sent, l.rst_rcvd), ("EK/RX3DPK", Some(-14), Some(-10)));
+        assert_eq!(q.plan_tx().as_deref(), Some("EK/RX3DPK <AJ3G> 73"));
+        // The standard messages, every one of which packs.
+        let m = q.std_msgs(false);
+        assert_eq!(m[0], "<EK/RX3DPK> AJ3G FN20");
+        assert_eq!(m[1], "<EK/RX3DPK> AJ3G -14");
+        assert_eq!(m[2], "<EK/RX3DPK> AJ3G R-14");
+        assert_eq!(m[3], "EK/RX3DPK <AJ3G> RR73");
+        assert_eq!(m[4], "EK/RX3DPK <AJ3G> 73");
+        assert_eq!(q.std_msgs(true)[3], "EK/RX3DPK <AJ3G> RRR");
+        for t in &m {
+            assert!(super::super::msg::pack(t).is_some(), "{t}");
+        }
+    }
+
+    #[test]
+    fn calling_cq_with_a_compound_call_of_our_own() {
+        let c = Config { my_call: "PJ4/AJ3G".into(), my_grid: "FK52".into(), ..Default::default() };
+        let mut q = Qso::new(c);
+        q.call_cq();
+        assert_eq!(q.plan_tx().as_deref(), Some("CQ PJ4/AJ3G"));
+        q.note_tx_sent(0);
+        q.on_rx(&[d("<PJ4/AJ3G> K1ABC FN42")], 15);
+        assert_eq!(q.plan_tx().as_deref(), Some("K1ABC <PJ4/AJ3G> -10"));
+        q.note_tx_sent(30);
+        q.on_rx(&[d("<PJ4/AJ3G> K1ABC R-08")], 45);
+        assert_eq!(q.plan_tx().as_deref(), Some("<K1ABC> PJ4/AJ3G RR73"));
+        q.note_tx_sent(60);
+        assert!(q.take_completed().is_some());
+        assert_eq!(q.std_msgs(false)[0], "<K1ABC> PJ4/AJ3G");
     }
 
     #[test]

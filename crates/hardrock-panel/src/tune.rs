@@ -11,10 +11,10 @@
 //! The checks here are safety interlock #6, with the link's own time limit,
 //! watchdog and SWR stop behind them, and #7 for TUNE's tone.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, RichText};
-use hardrock::{AmpStatus, Band};
+use hardrock::{AmpAlerts, AmpReadings, AmpStatus, Band};
 use rigcat::{Keying, RigStatus};
 
 use crate::radio::z;
@@ -50,6 +50,16 @@ const PRESETS_CAPTION: &str = "ELAD FDM-DUO TX PWR";
 /// How long a power key shows as clicked while the radio's read-back is
 /// awaited, s.
 const POWER_WAIT_S: f64 = 3.0;
+
+/// How old the amplifier's readings may be for TUNE or an over to start:
+/// about how long the link takes to give up on unanswered reads at rest
+/// (four status reads of 400 ms, another read between each, about 3.2 s),
+/// so a start needs readings as live as it always did, even while the link
+/// is giving a transmission more time.
+pub(crate) const LIVE_MAX: Duration = Duration::from_millis(3500);
+/// How old the last readings may be and still stand for an over already
+/// keyed (see [`AmpHold`]).
+pub(crate) const HOLD_MAX: Duration = Duration::from_secs(5);
 
 /// The hover for the button that sets `code` (from SDRoxide's).
 fn preset_hover(code: u8) -> String {
@@ -99,7 +109,25 @@ pub(crate) fn planned_watts(rig: &RigStatus, keying: Keying, drive: f32) -> Opti
 /// whether the amplifier is in line or not, and a new trip stops it
 /// ([`tune_must_stop`]). Outside programs and stored CW messages are still
 /// refused while it shows ([`key_blocked`]).
+///
+/// The readings must be live (no older than [`LIVE_MAX`]): only an over
+/// already keyed may go on with held ones ([`AmpHold`]).
 pub(crate) fn tune_blocked(amp: &AmpStatus, rig: &RigStatus, watts: Option<f32>) -> Option<String> {
+    if let Some(age) = amp.readings_at.map(|t| t.elapsed())
+        && amp.readings.is_some()
+        && age > LIVE_MAX
+    {
+        return Some(format!(
+            "The amplifier hasn't answered for {:.0} s, so its state can't be checked.",
+            age.as_secs_f32()
+        ));
+    }
+    amp_blocked(amp, rig, watts)
+}
+
+/// [`tune_blocked`] without its age check, for an over in progress, which
+/// judges by [`AmpHold`]'s readings.
+fn amp_blocked(amp: &AmpStatus, rig: &RigStatus, watts: Option<f32>) -> Option<String> {
     if !rig.connected {
         return Some("The radio isn't connected.".into());
     }
@@ -215,6 +243,9 @@ pub(crate) fn tone_blocked(rig: &RigStatus, device: Option<&str>) -> Option<Stri
 /// have refused it, and also: drive past the limit in line, or SWR at or past
 /// the warning on the amplifier (in line) or the radio.
 ///
+/// `amp` is the amplifier as [`AmpHold::over_view`] gives it: during a
+/// few seconds of unanswered reads, the last readings it gave.
+///
 /// `carried_trip` is a trip the amplifier already showed when this TUNE
 /// started and hasn't cleared since: that one doesn't stop it, since keying
 /// is what clears it. Any other trip does.
@@ -228,7 +259,7 @@ pub(crate) fn tune_must_stop(
     if amp.alerts.tripped && !carried_trip {
         return Some("The amplifier tripped.".into());
     }
-    let blocked = tune_blocked(amp, rig, watts);
+    let blocked = amp_blocked(amp, rig, watts);
     if blocked.is_some() {
         return blocked;
     }
@@ -244,6 +275,62 @@ pub(crate) fn tune_must_stop(
         return Some(format!("The radio's SWR reached {s:.1}:1."));
     }
     None
+}
+
+/// The amplifier's last good readings, for an over already keyed.
+///
+/// SAFETY INTERLOCK (docs/safety-interlocks.md, #6): the HR500 often leaves
+/// its queries unanswered while it transmits, and the link may drop and
+/// reopen. An over (TUNE, RIG TUNE, a TX window over or an outside
+/// program's) in progress is then not stopped for the missing readings
+/// alone: it is judged by the last readings the amplifier gave, for up to
+/// [`HOLD_MAX`] from when it gave them. A trip, SWR at or past the warning,
+/// over-drive or a band mismatch that the amplifier reports still stops it
+/// at once, held readings being judged as live ones are. After
+/// [`HOLD_MAX`] with no answer the over stops, as it did at once before
+/// (AJ3G, 11 Nov 2026: a link hiccup was cutting his QSOs and CQs).
+/// Starting one still needs live readings ([`tune_blocked`]).
+#[derive(Default)]
+pub(crate) struct AmpHold {
+    last: Option<(AmpReadings, AmpAlerts, Instant)>,
+}
+
+impl AmpHold {
+    /// Keep the amplifier's readings when it is connected and has them.
+    /// Once a frame, keyed or not, so an over starts with them in hand.
+    pub(crate) fn note(&mut self, amp: &AmpStatus, now: Instant) {
+        if let Some(r) = amp.readings.filter(|_| amp.connected) {
+            self.last = Some((r, amp.alerts, amp.readings_at.unwrap_or(now)));
+        }
+    }
+
+    /// The amplifier as an over in progress judges it: as reported while
+    /// it is connected with readings, else with the held readings while they
+    /// are no older than [`HOLD_MAX`]. `Err` with why the over must stop
+    /// once they are older.
+    pub(crate) fn over_view(&self, amp: &AmpStatus, now: Instant) -> Result<AmpStatus, String> {
+        let Some((r, alerts, at)) = self.last else {
+            // Never had readings: judged as reported (and refused there).
+            return Ok(amp.clone());
+        };
+        let age = now.saturating_duration_since(at);
+        if age > HOLD_MAX {
+            return Err(format!(
+                "The amplifier hasn't answered for {:.0} s, so its state can't be checked.",
+                age.as_secs_f32()
+            ));
+        }
+        if amp.connected && amp.readings.is_some() {
+            return Ok(amp.clone());
+        }
+        Ok(AmpStatus {
+            connected: true,
+            readings: Some(r),
+            readings_at: Some(at),
+            alerts,
+            ..amp.clone()
+        })
+    }
 }
 
 /// What the strip needs that the radio's status doesn't carry.
@@ -492,7 +579,7 @@ pub(crate) fn tune_strip(ui: &mut egui::Ui, rig: &RigStatus, args: &mut TuneArgs
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hardrock::{AmpAlerts, AmpModel, AmpReadings};
+    use hardrock::AmpModel;
     use rigcat::elad;
 
     fn amp(ptt: bool, band: u8) -> AmpStatus {
@@ -644,6 +731,78 @@ mod tests {
         assert!(
             tune_must_stop(&amp(false, 5), &r, 3.0, w(&r), false).unwrap().contains("radio's SWR")
         );
+    }
+
+    #[test]
+    fn an_over_rides_out_a_short_silence_on_the_last_readings() {
+        let t0 = Instant::now();
+        let r = duo(14_074_000, 2);
+        let mut hold = AmpHold::default();
+        let live = AmpStatus { readings_at: Some(t0), ..amp(true, 5) };
+        hold.note(&live, t0);
+        // The link gives up: no readings, not connected.
+        let gone =
+            AmpStatus { connected: false, readings: None, readings_at: None, ..live.clone() };
+        let mut stop = |at: Duration| {
+            hold.note(&gone, t0 + at);
+            match hold.over_view(&gone, t0 + at) {
+                Ok(v) => tune_must_stop(&v, &r, 3.0, w(&r), false),
+                Err(why) => Some(why),
+            }
+        };
+        // Within 5 s of the last answer the over goes on.
+        assert_eq!(stop(Duration::from_secs(2)), None);
+        assert_eq!(stop(Duration::from_secs(5)), None);
+        // After that it stops, as before.
+        let why = stop(Duration::from_millis(5100)).unwrap();
+        assert!(why.contains("hasn't answered"), "{why}");
+    }
+
+    #[test]
+    fn a_link_holding_old_readings_is_judged_by_their_age() {
+        // Connected, the link still showing readings that are 6 s old.
+        let t0 = Instant::now();
+        let r = duo(14_074_000, 2);
+        let mut hold = AmpHold::default();
+        let held = AmpStatus { readings_at: Some(t0), ..amp(true, 5) };
+        hold.note(&held, t0 + Duration::from_secs(6));
+        assert!(hold.over_view(&held, t0 + Duration::from_secs(6)).is_err());
+        assert!(hold.over_view(&held, t0 + Duration::from_secs(3)).is_ok());
+        // And a start needs them live, whatever an over may do.
+        let stale = AmpStatus {
+            readings_at: Instant::now().checked_sub(Duration::from_secs(4)),
+            ..amp(true, 5)
+        };
+        assert!(tune_blocked(&stale, &r, w(&r)).unwrap().contains("hasn't answered"));
+        let fresh = AmpStatus { readings_at: Some(Instant::now()), ..amp(true, 5) };
+        assert_eq!(tune_blocked(&fresh, &r, w(&r)), None);
+        // With no readings at all, a start is refused as before.
+        let gone = AmpStatus { connected: false, readings: None, ..amp(true, 5) };
+        assert!(tune_blocked(&gone, &r, w(&r)).is_some());
+    }
+
+    #[test]
+    fn a_held_over_still_stops_at_once_for_what_the_amplifier_reports() {
+        let t0 = Instant::now();
+        let r = duo(14_074_000, 2);
+        let mut hold = AmpHold::default();
+        // The last answer before the silence reports trouble: each still
+        // stops the over while the readings are held.
+        let cases: [(&str, fn(&mut AmpStatus)); 4] = [
+            ("tripped", |a| a.alerts.tripped = true),
+            ("SWR", |a| a.readings.as_mut().unwrap().swr = 3.5),
+            ("Drive", |a| a.readings.as_mut().unwrap().drive_w = 9.0),
+            ("low-pass", |a| a.readings.as_mut().unwrap().band = Some(7)),
+        ];
+        for (word, f) in cases {
+            let mut last = AmpStatus { readings_at: Some(t0), ..amp(true, 5) };
+            f(&mut last);
+            hold.note(&last, t0);
+            let gone = AmpStatus { connected: false, readings: None, ..amp(true, 5) };
+            let v = hold.over_view(&gone, t0 + Duration::from_secs(2)).unwrap();
+            let why = tune_must_stop(&v, &r, 3.0, w(&r), false).unwrap();
+            assert!(why.contains(word), "{word}: {why}");
+        }
     }
 
     #[test]

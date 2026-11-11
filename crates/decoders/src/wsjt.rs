@@ -221,24 +221,62 @@ impl WsjtSession {
         WsjtSession::default()
     }
 
-    /// Register callsigns already known (the operator's own), so the first
-    /// hashed message naming them resolves.
+    /// Register callsigns already known (the operator's own, and the
+    /// station in a QSO with us), so the first hashed message naming them
+    /// resolves.
     pub fn seed(&mut self, calls: &[&str]) {
-        for c in calls.iter().filter(|c| !c.is_empty()) {
+        for c in calls.iter().filter_map(|c| hashable(c)) {
             Arc::make_mut(&mut self.hashes).insert(c);
         }
     }
 
-    /// Remember the standard callsigns in `message`, for the hashed forms
-    /// later messages use.
+    /// Remember the callsigns in `message`, standard or not, for the hashed
+    /// forms later messages use. A non-standard call matters most: it is the
+    /// one that has to travel hashed (`<EK/RX3DPK> KG7FST DM09`), and the
+    /// only time it is spelled out is in its own CQ or sign-off (`CQ
+    /// EK/RX3DPK`, a Type 4 message). Learning only standard calls left every
+    /// reply to such a station reading `<...>` (AJ3G, 11 Nov 2026), where
+    /// SDRoxide, which learns every call, resolved them.
     fn learn(&mut self, message: &str) {
-        for tok in message.split_whitespace() {
-            let t = tok.trim_matches(|c| c == '<' || c == '>');
-            if wsjt77::is_standard_callsign(t) {
-                Arc::make_mut(&mut self.hashes).insert(t);
-            }
+        for c in calls_in(message) {
+            Arc::make_mut(&mut self.hashes).insert(c);
         }
     }
+}
+
+/// The callsign in a token, brackets stripped, if it is one worth hashing:
+/// a valid call, standard or not; never the `...` of a hash no one has
+/// resolved.
+fn hashable(tok: &str) -> Option<&str> {
+    let t = tok.trim().trim_start_matches('<').trim_end_matches('>');
+    (t.len() >= 3
+        && t != "..."
+        && t.bytes().any(|b| b.is_ascii_digit())
+        && t.bytes().any(|b| b.is_ascii_alphabetic())
+        && wsjt77::is_valid_callsign(t))
+    .then_some(t)
+}
+
+/// The callsigns a decoded message carries, as SDRoxide takes its to and
+/// from: after `CQ` (and a word such as `DX` or `POTA`), the call; otherwise
+/// the first two words. Free text and a grid are not taken.
+fn calls_in(message: &str) -> Vec<&str> {
+    let t: Vec<&str> = message.split_whitespace().collect();
+    let words = match t.first() {
+        Some(&("CQ" | "QRZ" | "DE")) => t.get(1..t.len().min(3)).unwrap_or(&[]),
+        _ => t.get(..t.len().min(2)).unwrap_or(&[]),
+    };
+    words.iter().filter_map(|w| hashable(w)).filter(|c| !is_grid4(c)).collect()
+}
+
+/// A four-character Maidenhead grid, which can look like a call.
+fn is_grid4(t: &str) -> bool {
+    let b = t.as_bytes();
+    b.len() == 4
+        && (b'A'..=b'R').contains(&b[0])
+        && (b'A'..=b'R').contains(&b[1])
+        && b[2].is_ascii_digit()
+        && b[3].is_ascii_digit()
 }
 
 /// The audio band searched, Hz.
@@ -664,6 +702,58 @@ pub(crate) mod tests {
         assert_eq!(a.slot_utc, 1_700_000_010);
         let b = d.iter().find(|d| d.message == "K1ABC W9XYZ -12").expect("second");
         assert!((b.dt_s - 0.3).abs() < 0.1, "{b:?}");
+    }
+
+    #[test]
+    fn the_calls_in_a_message_are_learned_standard_or_not() {
+        assert_eq!(calls_in("CQ EK/RX3DPK"), ["EK/RX3DPK"]);
+        assert_eq!(calls_in("CQ DX ZS6ABC KG33"), ["ZS6ABC"]);
+        assert_eq!(calls_in("CQ AJ3G FN20"), ["AJ3G"]);
+        assert_eq!(calls_in("<EK/RX3DPK> KG7FST DM09"), ["EK/RX3DPK", "KG7FST"]);
+        assert_eq!(calls_in("<...> KG7FST DM09"), ["KG7FST"]);
+        assert_eq!(calls_in("PJ4/K1ABC <W9XYZ> RR73"), ["PJ4/K1ABC", "W9XYZ"]);
+        assert!(calls_in("TNX 73 GL").is_empty());
+    }
+
+    /// The bits of `<hashed> call grid`: a Type 1 message whose first call
+    /// travels as its 22-bit hash, as WSJT-X sends a reply to a station with
+    /// a non-standard call.
+    fn hashed_bits(hashed: &str, call: &str, grid: &str) -> [u8; 77] {
+        const NTOKENS: u32 = 2_063_592;
+        let mut bits = wsjt77::pack77("K1ABC", call, grid).unwrap();
+        let n28 = NTOKENS + mfsk_core::msg::hash_table::ihashcall(hashed, 22);
+        for i in 0..28 {
+            bits[i] = ((n28 >> (27 - i)) & 1) as u8;
+        }
+        bits
+    }
+
+    #[test]
+    fn a_reply_to_a_compound_call_resolves_once_its_cq_was_heard() {
+        let bits = hashed_bits("EK/RX3DPK", "KG7FST", "DM09");
+        let mut s = WsjtSession::new();
+        assert_eq!(wsjt77::unpack77_with_hash(&bits, &s.hashes).unwrap(), "<...> KG7FST DM09");
+        // Through the decoder: the CQ (Type 4) in one slot, the reply in
+        // the next.
+        let burst = |bits: &[u8; 77], hz| {
+            let tones = mfsk_core::ft8::wave_gen::message_to_tones(bits);
+            mfsk_core::ft8::wave_gen::tones_to_f32(&tones, hz, 0.3)
+        };
+        let cq = wsjt77::pack77_type4("EK/RX3DPK", "", "", true).unwrap();
+        let d =
+            decode_slot(WsjtMode::Ft8, &slot(WsjtMode::Ft8, &burst(&cq, 1100.0), 0.5), 0, &mut s);
+        assert!(d.iter().any(|d| d.message == "CQ EK/RX3DPK"), "{d:?}");
+        let audio = slot(WsjtMode::Ft8, &burst(&bits, 1300.0), 0.5);
+        let d = decode_slot(WsjtMode::Ft8, &audio, 15, &mut s);
+        assert!(d.iter().any(|d| d.message == "<EK/RX3DPK> KG7FST DM09"), "{d:?}");
+    }
+
+    #[test]
+    fn a_seeded_dx_call_resolves_from_the_first_slot() {
+        let mut s = WsjtSession::new();
+        s.seed(&["AJ3G", "EK/RX3DPK", "", "<...>"]);
+        let bits = hashed_bits("EK/RX3DPK", "AJ3G", "FN20");
+        assert_eq!(wsjt77::unpack77_with_hash(&bits, &s.hashes).unwrap(), "<EK/RX3DPK> AJ3G FN20");
     }
 
     #[test]
