@@ -1903,9 +1903,10 @@ fn status_bars(sc: &Scope, ui: &egui::Ui, a: Rect, b: Rect, cx: &Ctx, snap: &sdr
         // FFT % is the CPU spectrum thread's share of a core. With the
         // spectrum on the GPU that thread is idle, and the figure it left
         // read as the GPU's, frozen (AJ3G, 8 Nov 2026): say where the FFT
-        // runs instead, and how many frames a second it gives.
+        // runs instead. Its frame rate is not repeated here: the GPU's load
+        // is the figure (AJ3G, 11 Nov 2026).
         let fft = if sc.gpu_fft() {
-            format!("FFT on the GPU, {} frames/s", sc.frame_times.len())
+            "FFT on the GPU".to_string()
         } else {
             format!("FFT {:.0} % (CPU)", snap.spectrum_load * 100.0)
         };

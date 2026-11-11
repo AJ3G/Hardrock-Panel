@@ -384,8 +384,7 @@ brings it back over the panel.
 of one CPU core the panel's receiver (filtering and demodulation) takes, and
 moves with SPAN, not with the FFT's resolution. *FFT %* is the CPU spectrum's
 share of a core; with the spectrum on the graphics card it reads *FFT on the
-GPU* and the frames a second it draws instead, since the CPU then does no
-FFT. *GPU %* is this program's share of the graphics card, everything it
+GPU* instead, since the CPU then does no FFT. *GPU %* is this program's share of the graphics card, everything it
 draws there (FFT, waterfall, windows), read from Windows as Task Manager's GPU
 column reads it: a finer FFT resolution or a faster waterfall raises it.
 
