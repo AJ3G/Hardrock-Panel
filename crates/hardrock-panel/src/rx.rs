@@ -482,8 +482,10 @@ pub(crate) struct Rx {
     last_tx: f64,
     pub(crate) tx_plan: Option<scope::TxAt>,
     split: SplitState,
-    /// The mode and filter width last sent to the DUO.
+    /// The mode and filter width the DUO's filter was last set for.
     duo_sent: Option<(Mode, u32)>,
+    /// The receiver's mode and the DUO's, kept as one (decision 116).
+    modes: ModeSync,
     /// The radio's volume and the panel's kept as one.
     vol: VolSync,
     /// The DUO's VM before the panel muted it for an outside speaker, and
@@ -551,6 +553,7 @@ impl Default for Rx {
             tx_plan: None,
             split: SplitState::default(),
             duo_sent: None,
+            modes: ModeSync::default(),
             vol: VolSync::default(),
             vm_muted: None,
             restart: false,
@@ -1288,8 +1291,9 @@ impl Rx {
         self.asked_centre = Some((hz, Instant::now()));
     }
 
-    /// Set the receiver's mode and passband; at 192 kHz, also the DUO's mode
-    /// and receive filter, since its own audio is the one heard there.
+    /// Set the receiver's mode and passband, and the DUO's mode with it at
+    /// every SPAN; up to 192 kHz also its receive filter, since its own audio
+    /// is the one heard there (decision 116).
     pub(crate) fn set_mode(&mut self, m: Mode, pb: Option<(f32, f32)>, now: RadioNow<'_>) {
         self.mode = m;
         self.passband = pb.unwrap_or_else(|| m.default_passband());
@@ -1297,38 +1301,107 @@ impl Rx {
             p.set_mode(m);
             p.set_passband(self.passband.0, self.passband.1);
         }
-        self.sync_duo_mode(now);
+        self.sync_duo_mode(now, true);
     }
 
+    /// The passband alone: the DUO's filter follows it (up to 192 kHz), its
+    /// mode is left to [`Rx::keep_modes`].
     pub(crate) fn set_passband(&mut self, pb: (f32, f32), now: RadioNow<'_>) {
         self.passband = pb;
         if let Some(p) = &self.pipeline {
             p.set_passband(pb.0, pb.1);
         }
-        self.sync_duo_mode(now);
+        self.sync_duo_mode(now, false);
     }
 
-    fn sync_duo_mode(&mut self, now: RadioNow<'_>) {
-        if self.running != IqChoice::Elad || self.rate > DUO_AUDIO_MAX_RATE || now.transmitting {
+    /// The DUO's mode (when `mode` says the receiver's changed) and filter
+    /// to the receiver's.
+    fn sync_duo_mode(&mut self, now: RadioNow<'_>, mode: bool) {
+        if self.running != IqChoice::Elad {
             return;
         }
         let Some((link, r)) = now.cat() else { return };
-        let width = (self.passband.1 - self.passband.0).abs().round() as u32;
-        if self.duo_sent == Some((self.mode, width)) {
+        let name = rig_mode(self.mode);
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #9): the DUO's mode
+        // and filter are not changed while it transmits; a change made then
+        // is sent once the over is done (`keep_modes`). The link refuses
+        // them then anyway (#5).
+        let send_mode =
+            mode && self.modes.scope_changed(name, r.mode, now.transmitting, Instant::now());
+        if now.transmitting {
             return;
         }
         let proto = r.model.protocol();
-        let name = rig_mode(self.mode);
         let mut frames = Vec::new();
-        if r.mode != Some(name)
-            && let Some(f) = proto.set_mode(name)
-        {
-            frames.push(f);
+        if send_mode {
+            match proto.set_mode(name) {
+                Some(f) => {
+                    frames.push(f);
+                    tracing::info!(
+                        "mode: SCOPE changed the receiver to {name}; the radio is sent {name}"
+                    );
+                }
+                None => self.modes.asked = None,
+            }
         }
-        let filter = duo_filter(&proto.filters(name), self.mode, self.passband);
-        frames.extend(proto.set_filter(name, filter.unwrap_or(width)));
-        link.set(frames);
-        self.duo_sent = Some((self.mode, width));
+        // The DUO's own filter only shapes its own audio, which is muted
+        // above 192 kHz: left as it is there (decisions 22 and 116).
+        let width = (self.passband.1 - self.passband.0).abs().round() as u32;
+        if self.rate <= DUO_AUDIO_MAX_RATE && self.duo_sent != Some((self.mode, width)) {
+            let filter = duo_filter(&proto.filters(name), self.mode, self.passband);
+            frames.extend(proto.set_filter(name, filter.unwrap_or(width)));
+            self.duo_sent = Some((self.mode, width));
+        }
+        if !frames.is_empty() {
+            // Read back after each; refused while transmitting (#5).
+            link.set(frames);
+        }
+    }
+
+    /// Once a frame, after [`Rx::frame`]: the receiver follows a mode change
+    /// made on the radio (RADIO, or its own knob), and a change made on
+    /// SCOPE while the radio transmitted goes to the radio now (decision
+    /// 116). `data` is the running decoder's mode and passband at the
+    /// receiver's dial: taken when the radio goes to that mode, else the
+    /// mode's default passband. The echo of the panel's own change is not
+    /// taken as the radio's.
+    pub(crate) fn keep_modes(&mut self, now: RadioNow<'_>, data: Option<(Mode, (f32, f32))>) {
+        if self.running != IqChoice::Elad {
+            self.modes = ModeSync::default();
+            return;
+        }
+        let Some(r) = now.rig.filter(|r| r.connected) else {
+            self.modes = ModeSync::default();
+            return;
+        };
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #9): nothing either
+        // way while transmitting. The receiver is where the over is sent
+        // from (decision 116's TX check, #13), and the radio refuses changes
+        // then (#5).
+        if now.transmitting {
+            return;
+        }
+        if self.modes.due {
+            self.sync_duo_mode(now, true);
+        }
+        let Some(name) = self.modes.step(rig_mode(self.mode), r.mode, Instant::now()) else {
+            return;
+        };
+        let Some(m) = sdr_mode(name) else { return };
+        self.mode = m;
+        self.passband = follow_passband(m, data);
+        if let Some(p) = &self.pipeline {
+            p.set_mode(m);
+            p.set_passband(self.passband.0, self.passband.1);
+        }
+        // The DUO keeps the filter it has for its own mode.
+        let width = (self.passband.1 - self.passband.0).abs().round() as u32;
+        self.duo_sent = Some((m, width));
+        tracing::info!(
+            "mode: the radio changed to {name}; SCOPE's receiver follows ({:.0} to {:.0} Hz)",
+            self.passband.0,
+            self.passband.1
+        );
     }
 
     /// Swap slice `id` with A (decision 66): A goes to the slice's dial,
@@ -1546,6 +1619,103 @@ fn dial_line(cat: Option<u64>, centre: f64, rx: f64) -> String {
 /// output `picked`, or with "Default output" the device `playing`.
 fn sound_via_radio(picked: Option<&str>, playing: Option<&str>) -> bool {
     picked.or(playing).is_some_and(|d| crate::audio::radio_device(&[d.to_string()]).is_some())
+}
+
+/// How long a mode sent to the radio is waited for before the radio's own
+/// mode is taken again (decision 116).
+const MODE_WAIT: Duration = Duration::from_secs(3);
+
+/// The panel's receiver's mode against the radio's, by the radio's names
+/// (decision 116): whichever side changed last wins, and the read-back of a
+/// mode the panel sent is not taken as a change on the radio.
+#[derive(Default)]
+pub(crate) struct ModeSync {
+    /// The radio's mode as last read back and taken.
+    seen: Option<&'static str>,
+    /// A mode sent to the radio and not yet read back, and when.
+    asked: Option<(&'static str, Instant)>,
+    /// The receiver's mode changed while the radio transmitted: sent after.
+    due: bool,
+}
+
+impl ModeSync {
+    /// The receiver went to `want` on SCOPE, with the radio reading back
+    /// `radio`: whether to send the radio `want` now. Not while
+    /// transmitting; it is then due once the over is done.
+    pub(crate) fn scope_changed(
+        &mut self,
+        want: &'static str,
+        radio: Option<&'static str>,
+        transmitting: bool,
+        now: Instant,
+    ) -> bool {
+        if transmitting {
+            self.due = true;
+            return false;
+        }
+        self.due = false;
+        // Against a mode already on its way, not the read-back from before.
+        if self.asked.map(|(a, _)| a).or(radio) == Some(want) {
+            return false;
+        }
+        self.asked = Some((want, now));
+        true
+    }
+
+    /// Once a frame, not while transmitting: the radio reads back `radio`
+    /// and the receiver is in `ours`. The radio's mode when the receiver
+    /// must follow it: a change on the radio, or what it reads at the start.
+    pub(crate) fn step(
+        &mut self,
+        ours: &'static str,
+        radio: Option<&'static str>,
+        now: Instant,
+    ) -> Option<&'static str> {
+        let r = radio?;
+        if let Some((a, t)) = self.asked {
+            if a == r {
+                // Our own change, read back.
+                self.asked = None;
+                self.seen = Some(r);
+                return None;
+            }
+            if now.saturating_duration_since(t) < MODE_WAIT {
+                return None;
+            }
+            // Never taken: the radio's word stands.
+            self.asked = None;
+            self.seen = None;
+        }
+        if self.seen == Some(r) {
+            return None;
+        }
+        self.seen = Some(r);
+        (r != ours).then_some(r)
+    }
+}
+
+/// The receiver's passband when it follows the radio to `m`: the running
+/// decoder's (`data`) when it is in that mode, else the mode's default.
+pub(crate) fn follow_passband(m: Mode, data: Option<(Mode, (f32, f32))>) -> (f32, f32) {
+    data.filter(|(dm, _)| *dm == m).map_or_else(|| m.default_passband(), |(_, pb)| pb)
+}
+
+/// Why a data over (FT8, FT4 or WSPR) can't start with the panel's
+/// receiver in `scope` and the radio reading back `radio` (decision 116):
+/// they disagree, or are not a sideband. `None` when they agree on USB or
+/// LSB, or the radio's mode hasn't been read (TUNE's checks say so).
+pub(crate) fn data_modes_clash(scope: Mode, radio: Option<&str>) -> Option<String> {
+    let s = rig_mode(scope);
+    match radio? {
+        r if r != s => Some(format!(
+            "SCOPE's receiver is in {s} and the radio in {r}: set both to the same sideband \
+             (USB for FT8 and WSPR) before an over."
+        )),
+        "USB" | "LSB" => None,
+        r => Some(format!(
+            "SCOPE's receiver and the radio are in {r}: a data over needs USB (or LSB)."
+        )),
+    }
 }
 
 /// The radio's VM, 0 to 100, against the panel's volume, 0 to 1.
@@ -2160,6 +2330,87 @@ mod tests {
         assert!(!sound_via_radio(Some("Klipsch The Fives"), Some("FDM-DUO Audio")));
         assert!(!sound_via_radio(None, Some("Realtek Speakers")));
         assert!(!sound_via_radio(None, None));
+    }
+
+    /// Decision 116: a mode change on SCOPE goes to the radio, one on the
+    /// radio comes to SCOPE, and the read-back of SCOPE's own change is not
+    /// taken as the radio's, so the two never pull each other back.
+    #[test]
+    fn the_scope_and_the_radio_follow_each_others_mode() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut m = ModeSync::default();
+        // The radio's mode wins at the start.
+        assert_eq!(m.step("USB", Some("LSB"), t0), Some("LSB"));
+        assert_eq!(m.step("LSB", Some("LSB"), ms(10)), None);
+        // Radio to SCOPE: RADIO's mode key or the radio's knob.
+        assert_eq!(m.step("LSB", Some("USB"), ms(20)), Some("USB"));
+        assert_eq!(m.step("USB", Some("USB"), ms(30)), None);
+        // SCOPE to radio: sent once; the old read-back while it is on its
+        // way, and its echo, don't move the receiver back.
+        assert!(m.scope_changed("CW", Some("USB"), false, ms(40)));
+        assert_eq!(m.step("CW", Some("USB"), ms(60)), None);
+        assert_eq!(m.step("CW", Some("CW"), ms(200)), None);
+        assert_eq!(m.step("CW", Some("CW"), ms(300)), None);
+        // Two quick changes: the second is against the first, not the old
+        // read-back, and the first's echo is not taken.
+        assert!(m.scope_changed("LSB", Some("CW"), false, ms(400)));
+        assert!(m.scope_changed("CW", Some("CW"), false, ms(450)));
+        assert_eq!(m.step("CW", Some("LSB"), ms(500)), None);
+        assert_eq!(m.step("CW", Some("CW"), ms(600)), None);
+        // Already there: nothing sent.
+        assert!(!m.scope_changed("CW", Some("CW"), false, ms(700)));
+        // A mode the radio never takes: its word stands after a while.
+        assert!(m.scope_changed("AM", Some("CW"), false, ms(800)));
+        assert_eq!(m.step("AM", Some("CW"), ms(1000)), None);
+        assert_eq!(m.step("AM", Some("CW"), ms(800) + MODE_WAIT), Some("CW"));
+    }
+
+    /// Decision 116: nothing is sent while transmitting; the change goes
+    /// once the over is done.
+    #[test]
+    fn a_scope_mode_change_waits_for_the_over_to_end() {
+        let t0 = Instant::now();
+        let mut m = ModeSync::default();
+        assert_eq!(m.step("USB", Some("USB"), t0), None);
+        assert!(!m.scope_changed("LSB", Some("USB"), true, t0));
+        assert!(m.due);
+        assert!(m.scope_changed("LSB", Some("USB"), false, t0));
+        assert!(!m.due);
+        // `Rx::keep_modes` does nothing at all while transmitting.
+        let mut rx = Rx { running: IqChoice::Elad, mode: Mode::Usb, ..Rx::default() };
+        let r = RigStatus { connected: true, mode: Some("LSB"), ..RigStatus::default() };
+        rx.keep_modes(RadioNow { link: None, rig: Some(&r), transmitting: true }, None);
+        assert_eq!(rx.mode, Mode::Usb);
+        // Once the over is done, the radio's mode is taken.
+        rx.keep_modes(RadioNow { link: None, rig: Some(&r), transmitting: false }, None);
+        assert_eq!((rx.mode, rx.passband), (Mode::Lsb, Mode::Lsb.default_passband()));
+    }
+
+    /// Following the radio, the receiver takes the running decoder's
+    /// passband in its mode, else the mode's default.
+    #[test]
+    fn following_the_radio_keeps_the_decoders_passband() {
+        let ft8 = Some((Mode::Usb, (200.0, 3000.0)));
+        assert_eq!(follow_passband(Mode::Usb, ft8), (200.0, 3000.0));
+        assert_eq!(follow_passband(Mode::Lsb, ft8), Mode::Lsb.default_passband());
+        assert_eq!(follow_passband(Mode::Cw, None), Mode::Cw.default_passband());
+    }
+
+    /// Decision 116, interlock #13: a data over needs SCOPE and the radio
+    /// on the same sideband.
+    #[test]
+    fn a_data_over_needs_the_scope_and_the_radio_on_one_sideband() {
+        assert_eq!(data_modes_clash(Mode::Usb, Some("USB")), None);
+        assert_eq!(data_modes_clash(Mode::Lsb, Some("LSB")), None);
+        assert_eq!(data_modes_clash(Mode::Usb, None), None);
+        assert!(
+            data_modes_clash(Mode::Lsb, Some("USB"))
+                .unwrap()
+                .contains("in LSB and the radio in USB")
+        );
+        assert!(data_modes_clash(Mode::Usb, Some("CW")).is_some());
+        assert!(data_modes_clash(Mode::Cw, Some("CW")).unwrap().contains("needs USB"));
     }
 
     #[test]

@@ -302,6 +302,8 @@ pub(crate) struct Env<'a> {
     pub decoding_ft8: bool,
     /// The last slot DECODE has finished decoding, UTC s.
     pub slot_decoded: Option<i64>,
+    /// The panel's receiver's mode, while it runs on the radio's I/Q.
+    pub scope_mode: Option<sdr::Mode>,
 }
 
 /// The TX engine: the sequencer, the over on the air, and the decode list.
@@ -1062,6 +1064,13 @@ impl Tx {
         };
         // This slot is spent, whatever happens below.
         self.sent_slot = Some(t0);
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #13): no data over
+        // while SCOPE's receiver and the radio disagree on the mode, or are
+        // not on a sideband (decision 116; AJ3G sent FT8 in USB on RADIO).
+        let rig_mode = env.rig.filter(|r| r.connected).and_then(|r| r.mode);
+        if let Some(why) = env.scope_mode.and_then(|m| crate::rx::data_modes_clash(m, rig_mode)) {
+            return Err(why);
+        }
         let (Some(link), Some(r)) = (env.link, env.rig.filter(|r| r.connected)) else {
             return Err("The radio isn't connected.".into());
         };
@@ -1531,6 +1540,7 @@ mod round3_tests {
             station: &station,
             decoding_ft8: false,
             slot_decoded: None,
+            scope_mode: None,
         };
         tx.frame(s, env, Vec::new(), &heard, &|_, _| Badges::default())
     }
@@ -1570,6 +1580,51 @@ mod round3_tests {
         let o = frame(&mut tx, &mut s, Some(1433.0), false, false);
         assert_eq!(s.audio_hz, 900.0);
         assert_eq!(o.set_bar_off, Some(900.0));
+    }
+
+    /// SAFETY INTERLOCK #13 (decision 116): no over while SCOPE's receiver
+    /// and the radio disagree on the mode, or are not on a sideband.
+    #[test]
+    fn no_over_while_the_scope_and_the_radio_disagree_on_the_mode() {
+        let mut tx = Tx::default();
+        let s = TxSettings { mode: TxMode::Wspr, wspr_pct: 50, ..Default::default() };
+        let amp = AmpStatus::default();
+        let mut outside = crate::outside::Outside::default();
+        let station =
+            StationSettings { callsign: "AJ3G".into(), grid: "FN10".into(), ..Default::default() };
+        // A slot of ours, just opening.
+        let t0 = (0..100)
+            .map(|k| 1_800_000_000 + k * 120)
+            .find(|&t| sched::wspr_ours("AJ3G", t, 50))
+            .unwrap();
+        let mut try_with = |scope: Option<sdr::Mode>, radio: &'static str| {
+            let rig = RigStatus { connected: true, mode: Some(radio), ..RigStatus::default() };
+            tx.sent_slot = None;
+            let env = Env {
+                now: t0 as f64 + 0.2,
+                link: None,
+                rig: Some(&rig),
+                amp: &amp,
+                device: None,
+                outside: &mut outside,
+                rx_dial: Some((14_095_600.0, false)),
+                bar_off: None,
+                bar_moved: false,
+                bar_ours: true,
+                station: &station,
+                decoding_ft8: false,
+                slot_decoded: None,
+                scope_mode: scope,
+            };
+            tx.try_start(&s, env, "AJ3G").unwrap_err()
+        };
+        // AJ3G's case: the radio in USB, SCOPE's receiver in LSB.
+        assert!(try_with(Some(sdr::Mode::Lsb), "USB").contains("SCOPE's receiver is in LSB"));
+        assert!(try_with(Some(sdr::Mode::Cw), "CW").contains("needs USB"));
+        // Agreed, or no receiver on the radio's I/Q: past this check (and
+        // refused here only because the test has no link).
+        assert_eq!(try_with(Some(sdr::Mode::Usb), "USB"), "The radio isn't connected.");
+        assert_eq!(try_with(None, "USB"), "The radio isn't connected.");
     }
 
     #[test]

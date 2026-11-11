@@ -469,8 +469,14 @@ in stand-alone. If that fails, a yellow note says to power-cycle the DUO.
 *Receiver sound*: the computer's default output to start, or any other by
 name, VB-Cable's *CABLE Input* included, to feed an outside decoder. The
 scope has its volume and **Mute**. Up to 192 kHz the DUO plays its own audio
-too, and the panel sets the DUO's mode and filter to the receiver's; above
+too, and the panel sets the DUO's filter to the receiver's; above
 192 kHz the DUO mutes its own audio and the panel's receiver is the one heard.
+**One mode for both.** At any SPAN a mode picked on SCOPE goes to the DUO, and
+a mode set on RADIO or with the radio's knob comes to SCOPE's receiver (with
+the decoder's passband when DECODE runs that mode, such as 200–3000 Hz on
+USB for FT8). Whichever you changed last wins; nothing changes while you
+transmit, and a change made then goes once the over ends. The panel log
+says which side made each change.
 **NR**, beside MUTE, is the panel receiver's noise reduction: click the chip
 for on or off; its slider sets the level, 1 (light) to 4 (strong), and is
 kept between runs. It is an adaptive filter that keeps
@@ -836,6 +842,9 @@ it is on another mode). Use a dummy load for your first overs.
   until the radio's power setting has been read).
   Moving it during an over changes the drive at once; raised past the
   amplifier's drive limit, the over stops.
+- An over isn't started while SCOPE's receiver and the radio are in
+  different modes, or not in USB or LSB: the yellow line says which is in
+  what. They normally follow each other within a second.
 - An FT8 over picks its message once the slot before has been decoded
   (waiting up to a second for it), so a station's answer is replied to in
   your very next over.
@@ -1132,7 +1141,10 @@ panel won't switch the antenna, band or tuner:
 - The TX window keys only through the same checks as TUNE, at its own
   level, for no longer than its message, and the radio's link unkeys a data
   message after 116 s whatever happens. A WSPR beacon doesn't start while the
-  amplifier is warm.
+  amplifier is warm, and no over starts while SCOPE's receiver and the radio
+  are in different modes.
+- SCOPE's mode and the radio's aren't kept in step while you transmit; a
+  change waits for the over to end.
 - The HR500 often doesn't answer while it transmits. An over (TUNE, RIG
   TUNE, a TX window over, an outside program's) already keyed carries on
   through up to 5 s of that on the amplifier's last readings; a trip, high

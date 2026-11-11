@@ -529,6 +529,7 @@ impl App {
         self.saved.tx.prompt_log = !self.saved.log.auto_log;
         let device = self.tone_device();
         let decoding_ft8 = self.decode.running_kind() == Some(decode::Kind::Ft8);
+        let scope_mode = self.scope_tx_mode();
         let station = self.saved.station.clone();
         let env = tx::Env {
             now,
@@ -544,6 +545,7 @@ impl App {
             station: &station,
             decoding_ft8,
             slot_decoded: self.decode.last_slot_utc(),
+            scope_mode,
         };
         let log = &self.logbook;
         let badges = |call: &str, grid: Option<&str>| {
@@ -637,6 +639,9 @@ impl App {
             tune::tone_blocked(r, self.tone_device().as_deref())
                 .or_else(|| tune::key_blocked(amp, r, watts))
                 .or_else(|| (mode == tx::TxMode::Wspr).then(|| tx::too_hot(amp)).flatten())
+                // SAFETY INTERLOCK (docs/safety-interlocks.md, #13): as
+                // `Tx::try_start` checks it (decision 116).
+                .or_else(|| self.scope_tx_mode().and_then(|m| rx::data_modes_clash(m, r.mode)))
         });
         let band = rig.and_then(|r| r.freq_hz).and_then(band_of).map(|b| b.label());
         let mut open = true;
@@ -888,6 +893,20 @@ impl App {
             }
         }
         self.rx.frame(&mut self.saved.rx, &self.scope, now);
+        // The receiver's mode and the radio's kept as one (decision 116):
+        // following the radio, the receiver takes the running decoder's
+        // passband when it is that decoder's mode, as a DECODE pick sets it.
+        let dial =
+            scope::view::FreqMap { ppm: self.scope.settings().ppm, transverter_hz: xvtr as f64 }
+                .shown(self.rx.rx_hz)
+                .max(0.0)
+                .round() as u64;
+        let data = self.decode.running_kind().and_then(|k| {
+            k.digi().map(|d| (d.sdr_mode(dial), d.passband(dial))).or_else(|| {
+                k.audio_passband(self.saved.decode.audio_hz).map(|pb| (sdr::Mode::Usb, pb))
+            })
+        });
+        self.rx.keep_modes(now, data);
         if std::mem::take(&mut self.rx.restart) {
             self.rx.start(&self.saved.rx, &self.scope, now);
         }
@@ -1124,6 +1143,12 @@ impl App {
             self.decode.pick_row(id);
         }
         self.show_globe = open;
+    }
+
+    /// The panel's receiver's mode, while it listens to the radio's own I/Q
+    /// and so is where an over is worked out from (decision 116).
+    fn scope_tx_mode(&self) -> Option<sdr::Mode> {
+        (self.rx.active() && self.rx.source() == rx::IqChoice::Elad).then_some(self.rx.mode)
     }
 
     /// Where the panel is listening, as shown: its receiver when that is
