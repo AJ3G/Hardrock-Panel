@@ -861,6 +861,12 @@ QSO queues it first. Click a queued call to drop it.
   the bar and a row you click; **HOLD** moves only when you drag the bar or
   type the figure. Dragging the bar on AUTO switches it to MANUAL. The bar
   can't move while you transmit.
+- **Split**, as WSJT-X's Rig split: with the radio in split and VFO B where
+  the offset can't be sent from, the panel moves VFO B so the tone goes out
+  near 1 500 Hz (VFO B = the receive dial plus the offset less 1 500 Hz, in
+  500 Hz steps; mirrored on LSB) and your signal still lands on the bar. The
+  over goes once the radio reads VFO B back there, and only if it still reads
+  it there straight before keying; the panel log says each move.
 - The **TX watchdog** stops a run after 6 minutes with no reply and no touch,
   and a station is given up after 10 unanswered calls.
 - **Compound calls** (EK/RX3DPK, PJ4/K1ABC, W1AW/QRP) work as in WSJT-X: the
@@ -902,7 +908,9 @@ Reporter, merged, fetched with GLOBE open or shut. **CLEAR** empties both.
 **LOG** on the top bar opens the logbook, kept as `hardrock-panel-log.adi`
 beside the panel's settings, which any logger can read. QSOs from the TX
 window go in by themselves; **+ NEW ENTRY** adds one by hand. **IMPORT** reads
-ADIF from WSJT-X, Log4OM and others, skipping ones already there; **ADIF**
+ADIF from WSJT-X, Log4OM and others: a QSO already there isn't added again,
+but its empty fields are filled from the file's (never one already set), and
+the status line says "N added, M filled in, K already in the log"; **ADIF**
 exports the selection or the whole log. Type the file in **FILE**, drop it on
 the window, pick it from **▾** (WSJT-X's log, your recent imports, the panel's
 exports, and the .adi files in Documents and Downloads) or, on Windows, find

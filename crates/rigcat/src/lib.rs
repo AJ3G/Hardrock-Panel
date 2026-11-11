@@ -240,6 +240,15 @@ impl RigStatus {
         }
     }
 
+    /// The dial the radio transmits from, Hz, as last read: VFO B in split
+    /// while it receives on A (A while it receives on B), else the receive
+    /// VFO. `None` until read.
+    pub fn tx_dial_hz(&self) -> Option<u64> {
+        let rx_b = self.vfo == Some(1);
+        let tx_b = rx_b != self.split.unwrap_or(false);
+        if tx_b { self.freq_b_hz } else { self.freq_hz }.filter(|&hz| hz > 0)
+    }
+
     /// The radio's last answer for `cmd`, without the letters.
     pub fn value(&self, cmd: &str) -> Option<&str> {
         self.values.get(cmd).map(|s| s.as_str())

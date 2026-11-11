@@ -161,13 +161,81 @@ fn import_skips_what_the_log_has_within_two_minutes() {
         <call:6>W1AW/1 <mode:3>FT8 <qso_date:8>20261110 <time_on:4>2131 <band:3>20m <swl:1>Y <eor>\n\
         <mode:3>FT8 <qso_date:8>20261110 <time_on:4>2131 <band:3>20m <eor>\n";
     let rep = log.import_text(doc);
-    // 21:16:30 is within 2 min of 21:15:00 (a dupe); 21:20 isn't; 40 m is
-    // another band; the second VK3TDX is a minute after the first in the same
-    // file.
-    assert_eq!(rep, ImportReport { added: 3, dupes: 2, unreadable: 1, swl: 1, assumed: None });
+    // 21:16:30 is within 2 min of 21:15:00 (the same QSO, whose grid it
+    // fills in); 21:20 isn't; 40 m is another band; the second VK3TDX is a
+    // minute after the first in the same file.
+    assert_eq!(
+        rep,
+        ImportReport { added: 3, filled: 1, dupes: 1, unreadable: 1, swl: 1, assumed: None }
+    );
     assert_eq!(log.records().len(), 4);
-    // Importing the same file again adds nothing.
-    assert_eq!(log.import_text(doc).added, 0);
+    // Importing the same file again adds nothing, and has nothing to fill.
+    let again = log.import_text(doc);
+    assert_eq!((again.added, again.filled, again.dupes), (0, 0, 5));
+}
+
+/// Decision 107: a QSO already in the log takes the import's fields where
+/// its own are blank, never over one it has, and the log is saved once.
+#[test]
+fn import_fills_blank_fields_of_a_qso_already_in_the_log() {
+    let mut log = Logbook::in_memory();
+    let mut have = qso("JA1ABC", "20m", "FT8", T);
+    have.name = "Taro".into();
+    log.add(have);
+    let mut bare = qso("VK3TDX", "20m", "FT8", T + 600);
+    bare.rst_sent.clear();
+    log.add(bare);
+    let before = log.generation();
+    let doc = "<eoh>\n\
+        <call:6>JA1ABC <gridsquare:6>PM95ab <name:4>Hiro <qth:5>Tokyo <rst_sent:3>-20 \
+        <lotw_qsl_rcvd:1>Y <lotw_qslrdate:8>20261111 <app_x_note:3>abc \
+        <mode:3>FT8 <qso_date:8>20261110 <time_on:6>211540 <band:3>20m <eor>\n\
+        <call:6>VK3TDX <rst_sent:3>-07 <mode:3>FT8 <qso_date:8>20261110 <time_on:4>2125 <band:3>20m <eor>\n\
+        <call:6>VK3TDX <rst_sent:3>-09 <mode:3>FT8 <qso_date:8>20261110 <time_on:4>2125 <band:3>20m <eor>\n\
+        <call:5>W1ABC <mode:3>FT8 <qso_date:8>20261110 <time_on:4>2140 <band:3>20m <eor>\n";
+    let rep = log.import_text(doc);
+    assert_eq!((rep.added, rep.filled, rep.dupes), (1, 2, 1));
+    assert_eq!(rep.summary(), "1 added, 2 filled in, 1 already in the log");
+    assert_eq!(log.generation(), before + 1, "saved once");
+    let ja = log.records().iter().find(|r| r.call == "JA1ABC").unwrap();
+    // Blank: filled. Set: kept.
+    assert_eq!((ja.grid.as_str(), ja.qth.as_str()), ("PM95ab", "Tokyo"));
+    assert_eq!((ja.name.as_str(), ja.rst_sent.as_str()), ("Taro", "-12"));
+    assert_eq!(ja.start_utc, T);
+    assert!(ja.lotw.rcvd && ja.lotw.rcvd_on == "20261111");
+    assert!(ja.extra.iter().any(|(k, v)| k.eq_ignore_ascii_case("app_x_note") && v == "abc"));
+    // The first fills the blank report; the second has nothing left to add.
+    let vk = log.records().iter().find(|r| r.call == "VK3TDX").unwrap();
+    assert_eq!(vk.rst_sent, "-07");
+    assert_eq!(log.records().len(), 3);
+    // Nothing new: nothing saved.
+    let g = log.generation();
+    let rep = log.import_text(doc);
+    assert_eq!((rep.added, rep.filled, rep.dupes), (0, 0, 4));
+    assert_eq!(log.generation(), g);
+}
+
+#[test]
+fn fill_blanks_never_overwrites_and_keeps_mode_and_submode_together() {
+    let mut have = qso("JA1ABC", "20m", "", T);
+    have.freq_hz = 0.0;
+    have.dxcc = Some(339);
+    let mut from = qso("JA1ABC", "20m", "MFSK", T);
+    from.submode = "FT4".into();
+    from.rst_sent = "-01".into();
+    from.dxcc = Some(1);
+    from.cq_zone = Some(25);
+    assert!(have.fill_blanks(&from));
+    assert_eq!((have.mode.as_str(), have.submode.as_str()), ("MFSK", "FT4"));
+    assert_eq!((have.freq_hz, have.dxcc, have.cq_zone), (14_075_000.0, Some(339), Some(25)));
+    assert_eq!(have.rst_sent, "-12");
+    // Again: nothing left to fill.
+    assert!(!have.fill_blanks(&from));
+    // A submode only under the same mode.
+    let mut ssb = qso("JA1ABC", "20m", "SSB", T);
+    (ssb.dxcc, ssb.cq_zone) = (Some(339), Some(25));
+    assert!(!ssb.fill_blanks(&from));
+    assert!(ssb.submode.is_empty());
 }
 
 #[test]
