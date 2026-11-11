@@ -12,6 +12,9 @@ sdr.workspace = true
 num-complex.workspace = true
 rustfft.workspace = true
 crossbeam-channel.workspace = true
+# The wide skimmer's decodes: their own low-priority threads (decision 110).
+elad-iq.workspace = true
+rayon.workspace = true
 tracing.workspace = true
 mfsk-core.workspace = true
 mfsk-jtty.workspace = true

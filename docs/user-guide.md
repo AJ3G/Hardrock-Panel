@@ -757,6 +757,20 @@ For the WSJT modes:
   WSPRnet too when SPOTS' WSPRnet is ticked: each two-minute slot with
   stations in it, on the dial they were heard on. For CW, PSK31 and RTTY,
   turn on SKIM CW/PSK/RTTY as well.
+- **Scrolling a wide span keeps the skimmed slots.** A dial that stays in
+  the span while you scroll or retune goes on decoding undisturbed, so its
+  slot in progress still comes out; only dials that came into view start
+  fresh (from their next slot), and one that scrolled out still gives the
+  slot it finished, and is picked up again if it comes back within a slot.
+  Labels already on the scope stay at their frequency and fade as usual.
+- **The skimmer stays in the background.** Its decoders run below normal
+  priority and take turns, at most three slots at a time (fewer on a
+  machine of four cores or less), so the scope, the receiver and DECODE's
+  own slot carry on smoothly when a dozen dials end their slots at once at
+  6.144 MHz. Its slots may come out a few seconds after DECODE's. If it ever
+  cannot keep up with the I/Q, the line above the list says "skimmer
+  behind" (for a minute after) and the panel log says how many blocks were
+  dropped, at most once a minute.
 - **Labels name the mode** for FT8 and FT4 as for the keyboard modes
   ("W9ML FT4"). Clicking an FT8 or FT4 label goes to its dial as that mode's
   DATA key does: USB, the passband and the radio's filter, DECODE in that

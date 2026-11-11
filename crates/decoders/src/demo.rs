@@ -559,7 +559,7 @@ mod tests {
         let rate = 48_000.0;
         let centre = DEMO_DIAL_HZ + 10_000.0;
         let mut d = DemoFt8::new();
-        let sk = crate::skim::WideSkimmer::spawn(WsjtMode::Ft8, &[DEMO_DIAL_HZ], &[]);
+        let mut sk = crate::skim::WideSkimmer::spawn(WsjtMode::Ft8, &[DEMO_DIAL_HZ], &[]);
         let slot = 1_700_000_040.0; // even: 1_700_000_040 / 15 is even
         assert_eq!((slot / 15.0) as i64 % 2, 0);
         let start = slot - 1.0;
@@ -603,7 +603,7 @@ mod tests {
         let rate = 48_000.0;
         let centre = DEMO_DIAL_HZ + 10_000.0;
         let mut d = DemoFt8::ft4();
-        let sk = crate::skim::WideSkimmer::spawn(WsjtMode::Ft4, &[DEMO_FT4_DIAL_HZ], &[]);
+        let mut sk = crate::skim::WideSkimmer::spawn(WsjtMode::Ft4, &[DEMO_FT4_DIAL_HZ], &[]);
         let slot = 1_700_000_040.0;
         assert_eq!((slot / 7.5) as i64 % 2, 0);
         let start = slot - 1.0;
@@ -643,7 +643,7 @@ mod tests {
     fn lane_audio(st: &DemoAudio, start: f64, secs: f64, mut sink: impl FnMut(&[f32], f64)) {
         let rate = 48_000.0;
         let centre = st.dial_hz - 10_000.0;
-        let mut lane = crate::skim::SsbLane::new(rate, st.dial_hz - centre);
+        let mut lane = crate::skim::SoloLane::new(rate, st.dial_hz - centre);
         let mut rng = 11u32;
         let mut audio = Vec::new();
         for b in 0..(secs * 10.0) as usize {

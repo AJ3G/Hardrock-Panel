@@ -407,8 +407,10 @@ pub(crate) struct Decode {
     /// A line to bring into view (picked from a scope label).
     scroll_to: Option<u64>,
     /// SKIM WIDE's decoders, and what they heard, newest first.
-    wide: Vec<Arc<WideSkimmer>>,
+    wide: Option<WideSkimmer>,
     wide_spots: VecDeque<SkimSpot>,
+    /// Whether SKIM WIDE has fallen behind the I/Q (decision 110).
+    wide_behind: Behind,
     /// JTTY's messages and their lines: (message, row id), newest first.
     jtty_rows: VecDeque<(u64, u64)>,
     /// SKIM CW/PSK/RTTY's skimmer, and the exclusions it was given.
@@ -662,7 +664,7 @@ impl Decode {
         taps.set_iq("skim", None);
         self.stop_autoid(taps);
         self.worker = None;
-        self.wide.clear();
+        self.wide = None;
         self.started_utc = None;
     }
 
@@ -722,7 +724,7 @@ impl Decode {
             _ => None,
         };
         let now = decoders::slot::utc_now();
-        let wide = s.skim && !self.wide.is_empty();
+        let wide = s.skim && self.wide.is_some();
         let mut feed = match wsjt {
             Some(m) => skim_feed(&self.rows, &self.wide_spots, m, now),
             // Another mode: the skimmers' FT8 and FT4 alone.
@@ -869,39 +871,47 @@ impl Decode {
 
     /// SKIM WIDE (decision 54): run a skimmer on every other dial of the
     /// mode in the span, and on the other of FT8 and FT4's dials there
-    /// (AJ3G: FT4 on the band unlabelled from FT8), started again whenever
-    /// the dials change, and take what they heard.
+    /// (AJ3G: FT4 on the band unlabelled from FT8), and take what they
+    /// heard. When the span moves, only the dials that came into it or left
+    /// it change; the rest decode on undisturbed (decision 111).
     fn wide_frame(&mut self, s: &DecodeSettings, st: &StationSettings, rx: &Rx, at: Where) {
-        let want = self.worker.as_ref().map_or_else(Vec::new, |(kind, _)| {
-            wide_dials(*kind, s, at.dial_hz, at.xvtr_hz, rx.centre(), rx.rate())
+        let kind = self.worker.as_ref().map(|(kind, _)| *kind);
+        let want = kind.map_or_else(Vec::new, |kind| {
+            wide_dials(kind, s, at.dial_hz, at.xvtr_hz, rx.centre(), rx.rate())
         });
-        let same = self.wide.len() == want.len()
-            && self.wide.iter().zip(&want).all(|(w, (m, d))| w.mode() == *m && w.dials() == &d[..]);
-        if !same {
-            rx.taps.set_iq("skim", None);
-            self.wide.clear();
-            let mine: Vec<String> = st.call().into_iter().collect();
-            for (mode, dials) in want {
-                tracing::info!("{} skimmer started on {dials:?}", mode.label());
-                self.wide.push(Arc::new(WideSkimmer::spawn(mode, &dials, &mine)));
+        // Off, or nothing in the span and nothing left to finish: stopped.
+        let on = kind.is_some_and(|k| wide_on(k, s));
+        if want.is_empty() && (!on || self.wide.as_ref().is_none_or(|w| w.is_idle())) {
+            if self.wide.take().is_some() {
+                rx.taps.set_iq("skim", None);
+                tracing::info!("wide skimmer stopped");
             }
-            if !self.wide.is_empty() {
-                let f = self.wide.clone();
+        } else {
+            if self.wide.is_none() {
+                let mine: Vec<String> = st.call().into_iter().collect();
+                let w = WideSkimmer::new(&mine);
+                let f = w.input();
                 rx.taps.set_iq(
                     "skim",
-                    Some(Box::new(move |b| {
-                        for w in &f {
-                            w.push_iq(b.iq, b.rate, b.center, b.utc);
-                        }
-                    })),
+                    Some(Box::new(move |b| f.push_iq(b.iq, b.rate, b.center, b.utc))),
                 );
+                self.wide = Some(w);
+            }
+            if let Some(w) = &mut self.wide {
+                w.set_dials(&want);
             }
         }
-        for w in &self.wide {
-            let wsjt = Some(w.mode());
-            for r in w.results() {
+        let lane_dropped = self.wide.as_ref().map_or(0, |w| w.lane_dropped());
+        if let Some(line) = self.wide_behind.note(decoders::slot::utc_now(), lane_dropped) {
+            tracing::warn!("{line}");
+        }
+        let results = self.wide.as_mut().map_or_else(Vec::new, |w| w.results());
+        {
+            for r in results {
+                let mode = r.mode;
+                let wsjt = Some(mode);
                 // Our own over, heard back (decision 71).
-                if self.keyed.spoils(r.slot.slot_utc as f64, w.mode().period_s()) {
+                if self.keyed.spoils(r.slot.slot_utc as f64, mode.period_s()) {
                     continue;
                 }
                 // Skimmed WSPR goes to WSPRnet as DECODE's own does, a slot
@@ -909,7 +919,7 @@ impl Decode {
                 // is ticked (AJ3G, 8 Nov 2026: "every two minutes or so if
                 // there was a decode it should be sent"). Only slots with
                 // stations in them: a dial skimmed is not one listened to.
-                if w.mode() == WsjtMode::Wspr && !r.slot.decodes.is_empty() {
+                if mode == WsjtMode::Wspr && !r.slot.decodes.is_empty() {
                     let cal = decoders::FreqCal { ppm: at.ppm };
                     let spots = r
                         .slot
@@ -949,7 +959,7 @@ impl Decode {
                     };
                     self.skim_log.add(skimlog::Line {
                         utc: d.slot_utc as f64,
-                        mode: w.mode().label(),
+                        mode: mode.label(),
                         source: skimlog::Source::Wide,
                         rf_hz: cal.rf_of_audio(r.dial_hz, d.audio_hz as f64, false) + at.xvtr_hz,
                         snr: d.snr_db,
@@ -967,7 +977,7 @@ impl Decode {
                         &call,
                         grid.as_deref(),
                         cal.rf_of_audio(r.dial_hz, d.audio_hz as f64, false) + at.xvtr_hz,
-                        w.mode().label(),
+                        mode.label(),
                         Some(d.snr_db),
                         d.slot_utc as f64,
                         crate::globe::field::Source::Skim,
@@ -1567,6 +1577,55 @@ fn wsjt_bands(xvtr_hz: f64) -> Vec<(f64, f64)> {
         .collect()
 }
 
+/// Whether the wide skimmer runs beside DECODE's `kind`: with SKIM on, in
+/// FT8 and FT4 only with SKIM WIDE too.
+fn wide_on(kind: Kind, s: &DecodeSettings) -> bool {
+    s.skim && (s.skim_wide || !matches!(kind, Kind::Ft8 | Kind::Ft4))
+}
+
+/// SKIM WIDE falling behind the I/Q (decision 110): the blocks its lane
+/// thread had no room for, logged at most once a minute and shown for a
+/// minute after the last.
+#[derive(Default)]
+struct Behind {
+    /// Blocks dropped so far, and as many as were logged.
+    seen: u64,
+    logged: u64,
+    last_log: Option<f64>,
+    last_drop: Option<f64>,
+}
+
+impl Behind {
+    /// The skimmer has dropped `total` blocks by `now` (UTC s). Returns a
+    /// line for the log, at most once a minute.
+    fn note(&mut self, now: f64, total: u64) -> Option<String> {
+        if total < self.seen {
+            // A new skimmer, counting from nothing.
+            self.seen = total;
+            self.logged = total;
+        }
+        if total > self.seen {
+            self.seen = total;
+            self.last_drop = Some(now);
+        }
+        if self.seen > self.logged && self.last_log.is_none_or(|t| now - t >= 60.0) {
+            let n = self.seen - self.logged;
+            self.logged = self.seen;
+            self.last_log = Some(now);
+            return Some(format!(
+                "SKIM WIDE behind: {n} blocks of I/Q dropped ({} in all)",
+                self.seen
+            ));
+        }
+        None
+    }
+
+    /// Whether it dropped a block in the last minute.
+    fn is_behind(&self, now: f64) -> bool {
+        self.last_drop.is_some_and(|t| now - t < 60.0)
+    }
+}
+
 /// The wide skimmers' modes and dials for DECODE's `kind`, with the
 /// receiver at `dial_hz` in a span `rate` wide around `centre` (all the
 /// radio's own Hz; the modes' dials are as shown, so the converter's
@@ -1588,15 +1647,13 @@ fn wide_dials(
     // skimmed the same way, beside FT8 and FT4 (AJ3G, 8 Nov 2026: "Can it be
     // made so WSPR Spots are also SKIMMED?"): its dial in the span, but not
     // the receiver's while DECODE itself runs WSPR there.
-    let modes: &[Kind] = match kind {
-        Kind::Ft8 if s.skim_wide => &[Kind::Ft8, Kind::Ft4, Kind::Wspr],
-        Kind::Ft4 if s.skim_wide => &[Kind::Ft4, Kind::Ft8, Kind::Wspr],
-        Kind::Ft8 | Kind::Ft4 => return Vec::new(),
-        _ => &[Kind::Ft8, Kind::Ft4, Kind::Wspr],
-    };
-    if !s.skim || rate <= 0.0 {
+    if !wide_on(kind, s) || rate <= 0.0 {
         return Vec::new();
     }
+    let modes: &[Kind] = match kind {
+        Kind::Ft4 => &[Kind::Ft4, Kind::Ft8, Kind::Wspr],
+        _ => &[Kind::Ft8, Kind::Ft4, Kind::Wspr],
+    };
     modes
         .iter()
         .filter_map(|&k| {
@@ -2083,12 +2140,15 @@ fn body(
         _ => format!("receiver audio, 48 kHz · {} at {:.3} kHz", rx.mode.label(), rx.rx_hz / 1e3),
     };
     let dropped = d.worker.as_ref().map_or(0, |(_, w)| w.dropped())
-        + d.wide.iter().map(|w| w.dropped()).sum::<u64>()
+        + d.wide.as_ref().map_or(0, |w| w.dropped())
         + d.keys.as_ref().map_or(0, |k| k.dropped());
     let mut line = format!("From the {src} · {dropped} blocks dropped");
-    for w in &d.wide {
-        let dials: Vec<String> = w.dials().iter().map(|&h| format!("{:.3}", h / 1e6)).collect();
-        line.push_str(&format!(" · skimming {} {} MHz too", w.mode().label(), dials.join(", ")));
+    for (mode, dials) in d.wide.as_ref().map_or_else(Vec::new, |w| w.dials()) {
+        let dials: Vec<String> = dials.iter().map(|&h| format!("{:.3}", h / 1e6)).collect();
+        line.push_str(&format!(" · skimming {} {} MHz too", mode.label(), dials.join(", ")));
+    }
+    if d.wide_behind.is_behind(decoders::slot::utc_now()) {
+        line.push_str(" · skimmer behind");
     }
     match (d.last_slot, d.keyed_drop) {
         (last, Some(k)) if last.is_none_or(|(slot, ..)| k > slot) => {
@@ -2665,6 +2725,26 @@ mod tests {
         assert_eq!(d.scroll_to, Some(2));
         d.pick_row(42);
         assert_eq!(d.selected, HashSet::from([2]));
+    }
+
+    #[test]
+    fn a_skimmer_behind_is_logged_once_a_minute_and_shown_for_one() {
+        let mut b = Behind::default();
+        assert_eq!(b.note(0.0, 0), None);
+        assert!(!b.is_behind(0.0));
+        // Drops: logged at once, then not again within the minute.
+        assert!(b.note(10.0, 3).unwrap().contains("3 blocks"));
+        assert!(b.is_behind(10.0));
+        assert_eq!(b.note(20.0, 5), None);
+        assert_eq!(b.note(69.0, 9), None);
+        // A minute on: the six since, in one line.
+        assert!(b.note(70.0, 9).unwrap().contains("6 blocks"));
+        assert_eq!(b.note(200.0, 9), None);
+        assert!(b.is_behind(128.0));
+        assert!(!b.is_behind(130.0));
+        // A new skimmer counts from nothing: nothing to log until it drops.
+        assert_eq!(b.note(300.0, 0), None);
+        assert!(b.note(301.0, 1).unwrap().contains("1 blocks"));
     }
 
     #[test]

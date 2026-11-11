@@ -931,9 +931,11 @@ name = "decoders"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "elad-iq",
  "mfsk-core 0.10.0",
  "mfsk-core 0.13.1",
  "num-complex",
+ "rayon",
  "rustfft",
  "sdr",
  "tracing",

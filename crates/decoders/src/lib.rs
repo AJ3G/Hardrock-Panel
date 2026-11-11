@@ -6,12 +6,16 @@
 //!   WEFAX and more), ported from SDRoxide.
 //! * [`resample`]: from the `sdr` crate's 48 kHz audio and wide I/Q to the
 //!   rates the decoders want.
-//! * [`skim`]: the wide skimmer, FT8 or FT4 on every other dial in the I/Q.
+//! * [`skim`]: the wide skimmer, FT8, FT4 and WSPR on every other dial in the
+//!   I/Q, through one shared [`channelizer`], its decodes kept in the
+//!   [`background`].
 //! * [`keyskim`]: the keyboard skimmer, CW, PSK31 and RTTY across the I/Q,
 //!   with [`morse`] (CW's timing decoder) and [`callsign`].
 //! * [`demo`]: FT8, CW, PSK31 and RTTY stations for the panel's demo band.
 pub mod autoid;
+pub mod background;
 pub mod callsign;
+pub mod channelizer;
 pub mod demo;
 pub mod freq;
 pub mod image;
