@@ -1813,9 +1813,25 @@ pub(crate) fn window(
             .collapsible(false)
             .default_pos([(ctx.content_rect().width() - 660.0).max(20.0), 120.0])
             .default_size([640.0, 560.0])
+            .min_size([420.0, 320.0])
             .show(ctx, |ui| {
                 chrome::window_body_bg(ui);
-                body(ui, false, d, s, st, rx, wsjtx_on, &mut out);
+                // Its size is the operator's: the body is drawn in a child
+                // that is not allocated in the window, clipped to the room
+                // dragged out for it, so a long line or a transmission's
+                // rows never widen the window, which egui does to fit its
+                // contents and which moved it sideways during TX (AJ3G,
+                // 11 Nov 2026). Only that room counts as the window's size.
+                let area = ui.available_rect_before_wrap();
+                let area = egui::Rect::from_min_size(area.min, area.size().max(egui::Vec2::ZERO));
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(area)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                child.set_clip_rect(area.intersect(ui.clip_rect()));
+                body(&mut child, false, d, s, st, rx, wsjtx_on, &mut out);
+                ui.advance_cursor_after_rect(area);
             });
     }
     out

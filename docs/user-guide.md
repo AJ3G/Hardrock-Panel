@@ -633,7 +633,9 @@ I/Q), and the decoder's audio (RTTY's mark and space on USB, NAVTEX on its
 1700 Hz centre). The line under the mode keys says what it did. Olivia, THOR
 and HFDL have no calling frequency: tune to them by hand. Nothing is changed
 while the radio transmits; the line says so. **POP OUT** puts DECODE in a
-window of its own, **DOCK** brings it back.
+window of its own, **DOCK** brings it back. Docked, the window keeps the size
+you drag it to: a long line or a transmission never widens or moves it, and
+what doesn't fit is clipped or scrolls.
 
 - **WSJT**: FT8, FT4, WSPR, JT65, JT9, FST4-60 and Q65-30A, from the
   receiver's audio in UTC slots. Each decode shows its UTC, SNR, DT (a
