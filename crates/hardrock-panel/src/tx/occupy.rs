@@ -11,7 +11,8 @@
 //! quietest quarter of the bins). Averaging over the slot is what makes it
 //! "signal for a good part of the slot": a short click or a lone noise
 //! spike does not lift a bin's average 6 dB, while an FT8 signal of about
-//! −10 dB SNR or better does. A slot the radio was keyed in (our own over
+//! −10 dB SNR or better does. Each span keeps its peak's height over the
+//! floor, so AUTO can count stronger energy more (decision 118). A slot the radio was keyed in (our own over
 //! coming back) or only partly heard is dropped.
 
 use std::collections::VecDeque;
@@ -40,6 +41,9 @@ const MIN_FRAMES: u32 = 80;
 const KEEP_SLOTS: usize = 8;
 /// How long a slot's energy counts as busy, s (as a weak decode does).
 pub(crate) const KEEP_S: i64 = freq::KEEP_S;
+
+/// A busy span: audio Hz from and to, and its peak's dB over the floor.
+pub(crate) type Span = (f32, f32, f32);
 
 /// The occupancy meter: shared between the receiver's audio tap and TX.
 #[derive(Clone, Default)]
@@ -70,8 +74,9 @@ struct Meter {
     frames: u32,
     spoiled: bool,
     sum: Vec<f32>,
-    /// Finished slots: their start and busy spans, audio Hz.
-    done: VecDeque<(i64, Vec<(f32, f32)>)>,
+    /// Finished slots: their start and busy spans (audio Hz, and dB over
+    /// the floor at the span's peak).
+    done: VecDeque<(i64, Vec<Span>)>,
 }
 
 /// The first and last bins measured: AUTO's audio range.
@@ -134,16 +139,18 @@ impl Occupancy {
         }
     }
 
-    /// The busy spans (audio Hz) of the slots of one parity (`even`) kept
-    /// and no older than [`KEEP_S`] at `now`, UTC s.
-    pub(crate) fn spans(&self, even: bool, now: f64) -> Vec<(f32, f32)> {
+    /// The busy spans of the slots of one parity (`even`) kept and no
+    /// older than [`KEEP_S`] at `now`, UTC s: (slot start, audio Hz from,
+    /// to, dB over the floor at the peak), for AUTO's weighting by age
+    /// and strength (decision 118).
+    pub(crate) fn spans(&self, even: bool, now: f64) -> Vec<(i64, f32, f32, f32)> {
         let m = self.lock();
         m.done
             .iter()
             .filter(|(t, _)| {
                 sched::is_even(*t, sched::FT8_PERIOD) == even && *t as f64 >= now - KEEP_S as f64
             })
-            .flat_map(|(_, s)| s.iter().copied())
+            .flat_map(|(t, s)| s.iter().map(|&(a, b, db)| (*t, a, b, db)))
             .collect()
     }
 }
@@ -208,8 +215,9 @@ impl Meter {
 
 /// The busy spans, audio Hz, of a slot's per-bin power (`power[0]` is bin
 /// `first`): runs of bins [`OVER_DB`] above the floor (the
-/// [`FLOOR_Q`] quantile). None when there is no floor (silence).
-pub(crate) fn spans_of(power: &[f32], first: usize) -> Vec<(f32, f32)> {
+/// [`FLOOR_Q`] quantile), each with its peak's dB over the floor. None
+/// when there is no floor (silence).
+pub(crate) fn spans_of(power: &[f32], first: usize) -> Vec<Span> {
     let mut sorted: Vec<f32> = power.to_vec();
     sorted.sort_by(f32::total_cmp);
     let Some(&floor) = sorted.get((sorted.len() as f32 * FLOOR_Q) as usize) else {
@@ -222,20 +230,25 @@ pub(crate) fn spans_of(power: &[f32], first: usize) -> Vec<(f32, f32)> {
     let edge = |k: usize, hi: bool| {
         ((first + k) as f64 * BIN_HZ + if hi { 0.5 } else { -0.5 } * BIN_HZ) as f32
     };
+    let peak = |a: usize, b: usize| {
+        let p = power[a..=b].iter().copied().fold(0.0, f32::max);
+        10.0 * (p / floor).log10()
+    };
     let mut out = Vec::new();
     let mut run: Option<usize> = None;
     for (k, &p) in power.iter().enumerate() {
         match (p > over, run) {
             (true, None) => run = Some(k),
             (false, Some(a)) => {
-                out.push((edge(a, false), edge(k - 1, true)));
+                out.push((edge(a, false), edge(k - 1, true), peak(a, k - 1)));
                 run = None;
             }
             _ => {}
         }
     }
     if let Some(a) = run {
-        out.push((edge(a, false), edge(power.len() - 1, true)));
+        let b = power.len() - 1;
+        out.push((edge(a, false), edge(b, true), peak(a, b)));
     }
     out
 }
@@ -289,8 +302,8 @@ mod tests {
         feed(&o, 30.0, 16.0, Some(1000.0), 0.05);
         let s = o.spans(true, 46.0);
         assert!(!s.is_empty(), "nothing busy");
-        assert!(s.iter().all(|&(a, b)| a >= 980.0 && b <= 1070.0), "{s:?}");
-        assert!(s.iter().any(|&(a, b)| a <= 1010.0 && b >= 1040.0), "{s:?}");
+        assert!(s.iter().all(|&(t, a, b, _)| t == 30 && a >= 980.0 && b <= 1070.0), "{s:?}");
+        assert!(s.iter().any(|&(_, a, b, db)| a <= 1010.0 && b >= 1040.0 && db > OVER_DB), "{s:?}");
         // The other parity has nothing; nor, after two minutes, this one.
         assert!(o.spans(false, 46.0).is_empty());
         assert!(o.spans(true, 30.0 + KEEP_S as f64 + 1.0).is_empty());
@@ -320,7 +333,12 @@ mod tests {
         p[11] = 10.0;
         p[50] = 3.0; // under 6 dB
         p[99] = 5.0;
-        assert_eq!(spans_of(&p, 20), vec![(295.0, 315.0), (1185.0, 1195.0)]);
+        let s = spans_of(&p, 20);
+        assert_eq!(
+            s.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>(),
+            vec![(295.0, 315.0), (1185.0, 1195.0)]
+        );
+        assert!((s[0].2 - 10.0).abs() < 0.01 && (s[1].2 - 6.99).abs() < 0.01, "{s:?}");
         assert!(spans_of(&[0.0; 10], 20).is_empty());
     }
 }

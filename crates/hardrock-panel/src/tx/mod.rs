@@ -273,8 +273,9 @@ const TAIL_S: f64 = 0.25;
 pub(crate) struct TxOut {
     /// Put the scope's bar this far from the receiver's dial, Hz.
     pub set_bar_off: Option<f64>,
-    /// The busy parts AUTO steers around, audio Hz from the receiver's dial.
-    pub busy: Vec<(f32, f32)>,
+    /// How busy AUTO finds each part of the passband (decision 118):
+    /// audio Hz from the receiver's dial, from and to, and 0 to 1.
+    pub busy: Vec<(f32, f32, f32)>,
     /// The QSO under way, for GLOBE: call, grid, keyed now.
     pub strobe: Option<(String, Option<String>, bool)>,
 }
@@ -830,28 +831,33 @@ impl Tx {
             }
             out.set_bar_off = self.wspr_bar(s, &env, entering);
         }
-        // AUTO counts only our own transmit period: the signals decoded in
-        // it (strong ones for longer), and the energy the receiver heard in
-        // it that nothing decoded (decision 115).
-        let ours: Vec<f32> = self
-            .heard
-            .iter()
-            .filter(|(t, _, snr)| {
-                sched::is_even(*t, sched::FT8_PERIOD) == self.tx_even
-                    && *t >= now as i64 - freq::keep_s(*snr)
-            })
-            .map(|(_, a, _)| *a)
-            .collect();
         if s.mode == TxMode::Ft8 && s.freq == FreqMode::Auto {
-            out.busy = freq::busy(&ours, &self.occ.spans(self.tx_even, now));
+            // AUTO counts only our own transmit period: the signals decoded
+            // in it (strong ones for longer), and the energy the receiver
+            // heard in it that nothing decoded (decision 115), each weighted
+            // by how recent and how strong (decision 118).
+            let marks: Vec<freq::Mark> = self
+                .heard
+                .iter()
+                .filter(|(t, _, snr)| {
+                    sched::is_even(*t, sched::FT8_PERIOD) == self.tx_even
+                        && *t >= now as i64 - freq::keep_s(*snr)
+                })
+                .map(|&(t, a, snr)| freq::Mark::decode(t, a, snr, now))
+                .chain(
+                    self.occ
+                        .spans(self.tx_even, now)
+                        .into_iter()
+                        .map(|(t, a, b, db)| freq::Mark::energy(t, a, b, db, now)),
+                )
+                .collect();
+            out.busy = freq::shade(&marks);
             // Only between overs, and not in the middle of an exchange,
             // so the station we work finds us where they answered.
             if self.over.is_none() && !(self.qso.busy() && self.auto_hz.is_some()) {
-                let cur = self.auto_hz.unwrap_or(s.audio_hz);
-                if let Some(p) = freq::pick(&out.busy, cur) {
-                    self.auto_hz = Some(p);
-                    s.audio_hz = p;
-                }
+                let p = freq::pick(&marks, self.auto_hz.unwrap_or(s.audio_hz));
+                self.auto_hz = Some(p);
+                s.audio_hz = p;
             }
         } else {
             self.auto_hz = None;
@@ -1913,14 +1919,19 @@ mod round5_tests {
             (T + 14) as f64,
             vec![heard(T, 1000.0, -2.0), heard(T, 2000.0, -15.0)],
         );
-        let spans = |o: &TxOut| o.busy.iter().map(|b| b.0).collect::<Vec<_>>();
+        let at =
+            |o: &TxOut, hz: f32| o.busy.iter().find(|b| b.0 <= hz && hz < b.1).map_or(0.0, |b| b.2);
         let o = frame(&mut tx, &mut s, (T + 100) as f64, Vec::new());
-        assert_eq!(spans(&o), vec![995.0, 1995.0]);
-        // After 2 minutes the weak one is gone; the strong one stays to 5.
-        let o = frame(&mut tx, &mut s, (T + 220) as f64, vec![heard(T + 210, 500.0, -20.0)]);
-        assert_eq!(spans(&o), vec![495.0, 995.0]);
+        assert!(at(&o, 1020.0) > 0.0 && at(&o, 2020.0) > 0.0, "{:?}", o.busy);
+        assert_eq!(at(&o, 1500.0), 0.0);
+        // After 2 minutes the weak one is gone; the strong one stays to 5,
+        // counting less than a fresh one.
+        let o = frame(&mut tx, &mut s, (T + 220) as f64, vec![heard(T + 210, 500.0, -2.0)]);
+        assert_eq!(at(&o, 2020.0), 0.0);
+        assert!(at(&o, 1020.0) > 0.0 && at(&o, 1020.0) < at(&o, 520.0), "{:?}", o.busy);
         let o = frame(&mut tx, &mut s, (T + 301) as f64, Vec::new());
-        assert_eq!(spans(&o), vec![495.0]);
+        assert_eq!(at(&o, 1020.0), 0.0);
+        assert!(at(&o, 520.0) > 0.0);
         // The other period is not counted.
         tx.tx_even = false;
         assert!(frame(&mut tx, &mut s, (T + 302) as f64, Vec::new()).busy.is_empty());
@@ -1945,7 +1956,11 @@ mod round5_tests {
             .collect();
         tx.occ.push(&a, T as f64);
         let o = frame(&mut tx, &mut s, (T + 16) as f64, Vec::new());
-        assert!(o.busy.iter().any(|&(a, b)| a <= 1490.0 && b >= 1490.0), "{:?}", o.busy);
+        assert!(
+            o.busy.iter().any(|&(a, b, v)| a <= 1490.0 && b >= 1490.0 && v > 0.0),
+            "{:?}",
+            o.busy
+        );
         assert!(!(1430.0..1500.0).contains(&s.audio_hz), "AUTO stayed on it at {}", s.audio_hz);
         // Only in our own period.
         tx.tx_even = false;

@@ -370,9 +370,9 @@ pub struct Scope {
     offset_drag: bool,
     /// The bar was moved by hand since TX last looked ([`Scope::take_bar_moved`]).
     offset_moved: bool,
-    /// Where TX AUTO found the band busy in its own period: radio Hz spans,
-    /// shaded faintly behind the bar.
-    tx_busy: Vec<(f64, f64)>,
+    /// How busy TX AUTO found the band in its own period: radio Hz spans
+    /// and 0 to 1, shaded faintly behind the bar, darker where busier.
+    tx_busy: Vec<(f64, f64, f32)>,
     offset_close: Option<egui::Rect>,
     /// The label the offset bar is on this frame, in `skim_shown`.
     skim_on_bar: Option<usize>,
@@ -611,8 +611,9 @@ impl Scope {
         self.dx_mark = mark;
     }
 
-    /// The busy parts TX AUTO is steering around, radio Hz.
-    pub fn set_tx_busy(&mut self, spans: Vec<(f64, f64)>) {
+    /// How busy TX AUTO finds each part of the band (decision 118): radio
+    /// Hz from and to, and 0 (quiet) to 1 (busiest).
+    pub fn set_tx_busy(&mut self, spans: Vec<(f64, f64, f32)>) {
         self.tx_busy = spans;
     }
 
