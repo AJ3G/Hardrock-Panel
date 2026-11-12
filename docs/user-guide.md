@@ -942,6 +942,8 @@ transcript says "Left K1ABC for W9XYZ". Click a queued call to drop it. Picking 
   a compound call carries no grid. You can type a line plainly; it goes out
   in that form. Replies to such stations decode with the call filled in once
   the panel has heard it, or once you are working it.
+- **Portable and rover calls** (F5OYA/P, K1ABC/R) are standard calls, sent
+  spelled out with their grid or report as in WSJT-X: `F5OYA/P AJ3G -17`.
 
 **WSPR.** **TRANSMIT** sends a beacon in 10, 20, 33 or 50 % of the 2 minute
 slots, picked from your call. **POWER** is the figure in the message: it must

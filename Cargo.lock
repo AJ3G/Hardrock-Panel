@@ -1630,6 +1630,7 @@ dependencies = [
  "hardrock",
  "links",
  "mfsk-core 0.10.0",
+ "mfsk-core 0.13.1",
  "naga",
  "png",
  "pollster",

@@ -6,6 +6,10 @@
 //! (sdroxide-types/src/digi.rs, GPL-3.0-or-later, like this program).
 
 use mfsk_core::msg::wsjt77;
+/// The later mfsk-core's message code, which packs a `/P` or `/R` call
+/// (decision 119). The 77 bits are the same on the air whichever packs
+/// them, so they go to the same FT8 encoder.
+use mfsk_jtty::msg::wsjt77 as wsjt77_rp;
 
 /// One decoded FT8 line, as the sequencer reads it.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -59,13 +63,7 @@ fn looks_like_call(t: &str) -> bool {
 }
 
 /// Read a decoded line.
-pub(crate) fn parse(
-    text: &str,
-    slot_utc: i64,
-    snr_db: i16,
-    dt: f32,
-    audio_hz: f32,
-) -> Decode {
+pub(crate) fn parse(text: &str, slot_utc: i64, snr_db: i16, dt: f32, audio_hz: f32) -> Decode {
     let mut d = Decode {
         slot_utc,
         snr_db,
@@ -121,8 +119,8 @@ pub(crate) fn cq_includes(
     }
     // Activities and contests anyone may answer.
     const OPEN: [&str; 13] = [
-        "POTA", "SOTA", "WWFF", "IOTA", "BOTA", "LOTA", "TEST", "FD", "RU", "WW", "ALL",
-        "QRP", "FT",
+        "POTA", "SOTA", "WWFF", "IOTA", "BOTA", "LOTA", "TEST", "FD", "RU", "WW", "ALL", "QRP",
+        "FT",
     ];
     if OPEN.contains(&to.as_str()) || to.chars().all(|c| c.is_ascii_digit()) {
         return true;
@@ -229,7 +227,7 @@ fn pack77_hashed(c1: &str, c2: &str, payload: &str, first_hashed: bool) -> Optio
     if !wsjt77::is_valid_callsign(hashed) || !is_std(if first_hashed { c2 } else { c1 }) {
         return None;
     }
-    let mut bits = wsjt77::pack77(a, b, payload)?;
+    let mut bits = pack77_std(a, b, payload)?;
     let n28 = NTOKENS + mfsk_core::msg::hash_table::ihashcall(hashed, 22);
     let start = if first_hashed { 0 } else { 29 };
     for i in 0..28 {
@@ -253,6 +251,33 @@ fn pack77_type4(a: &str, b: &str, payload: &str) -> Option<[u8; 77]> {
     Some(bits)
 }
 
+/// True for a call with WSJT-X's portable or rover suffix, `F5OYA/P`,
+/// `K1ABC/R`: still a standard call, carried as the base call and a flag.
+fn has_rp(call: &str) -> bool {
+    let c = bare(call);
+    c.len() >= 5 && (c.ends_with("/P") || c.ends_with("/R")) && is_std(c)
+}
+
+/// A standard message (Type 1, or Type 2 with a `/P` call). mfsk-core 0.10
+/// can't pack a `/P` or `/R` call at all, so a message with one goes
+/// through the later mfsk-core's `pack77`, which, as WSJT-X does, sets the
+/// call's flag bit and makes the message Type 2 (i3 = 2) for `/P` and
+/// keeps it Type 1 for `/R` (AJ3G, 12 Nov 2026: `F5OYA/P AJ3G -17` was
+/// refused). Other messages are packed as before.
+fn pack77_std(a: &str, b: &str, payload: &str) -> Option<[u8; 77]> {
+    if has_rp(a) || has_rp(b) {
+        wsjt77_rp::pack77(a, b, payload)
+    } else {
+        wsjt77::pack77(a, b, payload)
+    }
+}
+
+/// Whether packed bits read back as a message. The later mfsk-core reads
+/// every type the earlier one does, the `/P` and `/R` forms included.
+fn reads_back(bits: &[u8; 77]) -> bool {
+    wsjt77::unpack77(bits).is_some() || wsjt77_rp::unpack77(bits).is_some()
+}
+
 /// Pack `text` into FT8's 77 bits: a standard message
 /// (`<call> <call> [grid|report|R report|RRR|RR73|73]`, `CQ [mod] <call>
 /// [grid]`), the same with a non-standard call in WSJT-X's forms
@@ -265,15 +290,15 @@ pub(crate) fn pack(text: &str) -> Option<[u8; 77]> {
     let std = |c: &str| is_std(c);
     let br = |c: &str| c.starts_with('<');
     match t.as_slice() {
-        ["CQ", call] if std(call) => wsjt77::pack77("CQ", call, ""),
-        ["CQ", call, grid] if std(call) && is_grid4(grid) => wsjt77::pack77("CQ", call, grid),
+        ["CQ", call] if std(call) => pack77_std("CQ", call, ""),
+        ["CQ", call, grid] if std(call) && is_grid4(grid) => pack77_std("CQ", call, grid),
         ["CQ", m, call, grid] if std(call) && is_grid4(grid) => {
             // A directed CQ: "CQ DX", "CQ POTA" ride in the first call field.
-            wsjt77::pack77(&format!("CQ {m}"), call, grid)
+            pack77_std(&format!("CQ {m}"), call, grid)
         }
         ["CQ", call] if is_nonstd(call) => wsjt77::pack77_type4(call, "", "", true),
-        [a, b] if std(a) && std(b) => wsjt77::pack77(a, b, ""),
-        [a, b, r] if std(a) && std(b) => wsjt77::pack77(a, b, r),
+        [a, b] if std(a) && std(b) => pack77_std(a, b, ""),
+        [a, b, r] if std(a) && std(b) => pack77_std(a, b, r),
         // Type 4: one call spelled out, the other hashed.
         [a, b] | [a, b, "RRR" | "RR73" | "73"] if br(a) ^ br(b) => {
             pack77_type4(bare(a), bare(b), t.get(2).copied().unwrap_or(""))
@@ -283,14 +308,14 @@ pub(crate) fn pack(text: &str) -> Option<[u8; 77]> {
         _ if text.len() <= 13 => wsjt77::pack77_free_text(&text),
         _ => None,
     }
-    .filter(|bits| wsjt77::unpack77(bits).is_some())
+    .filter(reads_back)
 }
 
 /// What `text` will read as on the air, once packed: free text is cut to
 /// 13 characters, a hashed call is shown in brackets.
 #[cfg(test)]
 pub(crate) fn on_air(text: &str) -> Option<String> {
-    pack(text).and_then(|b| wsjt77::unpack77(&b))
+    pack(text).and_then(|b| wsjt77_rp::unpack77(&b))
 }
 
 #[cfg(test)]
@@ -301,13 +326,19 @@ mod tests {
     fn decoded_lines_are_read_for_who_and_what() {
         let d = parse("CQ W1AW FN31", 0, -10, 0.1, 1500.0);
         assert!(d.is_cq && d.to.is_none());
-        assert_eq!((d.from.as_deref(), d.grid.as_deref(), d.cq_to.as_deref()), (Some("W1AW"), Some("FN31"), None));
+        assert_eq!(
+            (d.from.as_deref(), d.grid.as_deref(), d.cq_to.as_deref()),
+            (Some("W1AW"), Some("FN31"), None)
+        );
         let d = parse("CQ DX ZS6ABC KG33", 0, -2, 0.0, 950.0);
         assert_eq!((d.cq_to.as_deref(), d.from.as_deref()), (Some("DX"), Some("ZS6ABC")));
         let d = parse("CQ POTA KD9QRS EN52", 0, -8, 0.3, 640.0);
         assert_eq!((d.cq_to.as_deref(), d.from.as_deref()), (Some("POTA"), Some("KD9QRS")));
         let d = parse("AJ3G JA1ABC PM95", 0, -14, 0.2, 1840.0);
-        assert_eq!((d.to.as_deref(), d.from.as_deref(), d.grid.as_deref()), (Some("AJ3G"), Some("JA1ABC"), Some("PM95")));
+        assert_eq!(
+            (d.to.as_deref(), d.from.as_deref(), d.grid.as_deref()),
+            (Some("AJ3G"), Some("JA1ABC"), Some("PM95"))
+        );
         let d = parse("AJ3G JA1ABC RR73", 0, -14, 0.2, 1840.0);
         assert_eq!(d.grid, None);
         let d = parse("<AJ3G> JA1ABC -10", 0, -14, 0.2, 1840.0);
@@ -402,5 +433,66 @@ mod tests {
         assert!(pack("EK/RX3DPK PJ4/K1ABC -10").is_none());
         // Standard messages are as they were.
         assert_eq!(wsjtx_form("JA1ABC AJ3G -12"), "JA1ABC AJ3G -12");
+    }
+
+    /// The message type, bits 74 to 76.
+    fn i3(bits: &[u8; 77]) -> u8 {
+        bits[74] << 2 | bits[75] << 1 | bits[76]
+    }
+
+    #[test]
+    fn a_qso_with_a_portable_or_rover_call_packs_as_wsjtx_does() {
+        // AJ3G's refused reply (12 Nov 2026).
+        let bits = pack("F5OYA/P AJ3G -17").expect("packs");
+        assert_eq!(i3(&bits), 2);
+        assert_eq!(on_air("F5OYA/P AJ3G -17").as_deref(), Some("F5OYA/P AJ3G -17"));
+        for (them, i3_want) in [("F5OYA/P", 2), ("K1ABC/R", 1)] {
+            let qso = [
+                // We answer them, then they answer us.
+                format!("CQ {them} JN18"),
+                format!("CQ POTA {them} JN18"),
+                format!("CQ {them}"),
+                format!("{them} AJ3G FM18"),
+                format!("AJ3G {them} -10"),
+                format!("{them} AJ3G R-17"),
+                format!("AJ3G {them} RR73"),
+                format!("AJ3G {them} RRR"),
+                format!("{them} AJ3G 73"),
+                // They answer our CQ.
+                "CQ AJ3G FM18".to_string(),
+                format!("AJ3G {them} JN18"),
+                format!("{them} AJ3G -10"),
+                format!("AJ3G {them} R+05"),
+                format!("{them} AJ3G RR73"),
+                format!("{them} AJ3G RRR"),
+                format!("AJ3G {them} 73"),
+                format!("AJ3G {them}"),
+            ];
+            for m in &qso {
+                // Nothing is rewritten into a hashed or Type 4 form.
+                assert_eq!(wsjtx_form(m), *m, "{m}");
+                let bits = pack(m).unwrap_or_else(|| panic!("{m} packs"));
+                assert_eq!(on_air(m).as_deref(), Some(m.as_str()), "{m}");
+                // The earlier mfsk-core, which the decoders use, reads it too.
+                assert_eq!(wsjt77::unpack77(&bits).as_deref(), Some(m.as_str()), "{m}");
+                if m.contains(them) {
+                    assert_eq!(i3(&bits), i3_want, "{m}");
+                }
+            }
+        }
+        // Calls without a suffix go out exactly as before.
+        assert_eq!(pack("JA1ABC AJ3G -12"), wsjt77::pack77("JA1ABC", "AJ3G", "-12"));
+    }
+
+    #[test]
+    fn a_portable_stations_lines_are_read_for_the_sequencer() {
+        let d = parse("AJ3G F5OYA/P R-10", 0, -10, 0.1, 1500.0);
+        assert_eq!((d.to.as_deref(), d.from.as_deref()), (Some("AJ3G"), Some("F5OYA/P")));
+        assert!(!d.free_text);
+        let d = parse("CQ F5OYA/P JN18", 0, -10, 0.1, 1500.0);
+        assert_eq!((d.from.as_deref(), d.grid.as_deref()), (Some("F5OYA/P"), Some("JN18")));
+        let d = parse("AJ3G K1ABC/R FN42", 0, -10, 0.1, 1500.0);
+        assert_eq!((d.from.as_deref(), d.grid.as_deref()), (Some("K1ABC/R"), Some("FN42")));
+        assert!(is_std("F5OYA/P") && !is_nonstd("F5OYA/P"));
     }
 }

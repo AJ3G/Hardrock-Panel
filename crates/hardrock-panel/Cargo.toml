@@ -45,6 +45,9 @@ zune-core = "0.5.3"
 # TX: FT8 and WSPR messages packed and rendered to audio (GPL-3.0-or-later,
 # as this program is).
 mfsk-core.workspace = true
+# The later mfsk-core (already built for JTTY) packs a /P or /R call
+# (decision 119).
+mfsk-jtty.workspace = true
 # TX freq AUTO's coarse occupancy of the receive passband (decision 115).
 rustfft.workspace = true
 
