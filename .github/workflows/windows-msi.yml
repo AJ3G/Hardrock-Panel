@@ -1,0 +1,232 @@
+name: Windows MSI
+
+# Manual-only: builds just the Windows .msi installer — the standard
+# (non-SoapySDR) variant, identical to what the release workflow produces —
+# so a test installer can be handed to someone without building every
+# platform. The .msi is uploaded as a run artifact and also kept as a
+# pre-release named dev-<commit>, because run artifacts expire.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit to build, short or full id (blank for the branch the run is on)
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # audiopus_sys bundles a libopus whose CMakeLists predates CMake 3.5; the
+  # CMake 4.x on the Windows runners refuses to configure it without this
+  # override (CMake 3.x ignores the variable).
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+jobs:
+  # actions/checkout takes only a full commit id, so a short one typed into
+  # the box is looked up here first.
+  resolve:
+    name: resolve commit
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.r.outputs.sha }}
+    steps:
+      - id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF: ${{ inputs.ref || github.sha }}
+        run: echo "sha=$(gh api "repos/$GH_REPO/commits/$REF" --jq .sha)" >> "$GITHUB_OUTPUT"
+
+  # The job ids and rust-cache keys deliberately match release.yml so the two
+  # workflows restore each other's caches.
+  web:
+    name: web client (wasm)
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      # Needed although the client builds none of it: cargo resolves the whole
+      # workspace first, and sdroxide-hfdl depends on vendor/xng by path. See
+      # the same step in release.yml.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: web-dist
+      - name: Install trunk
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xzf - -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # Same stamp the exe gets below, so the browser client this .msi embeds
+      # does not claim to be the release while the program hosting it does not.
+      - name: Stamp the build
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "SDROXIDE_BUILD=dev.${SHA::7}" >> "$GITHUB_ENV"
+      - name: Build web client
+        working-directory: crates/sdroxide-web
+        run: trunk build --release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: crates/sdroxide-web/dist
+          if-no-files-found: error
+
+  build:
+    name: windows msi
+    needs: [resolve, web]
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.version.outputs.sha }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # `submodules` pulls vendor/rade_c (the RADE codec), vendor/faad2 (the AAC
+      # decoder the DRM receiver is built with) and vendor/rtl_433. HD Radio's
+      # decoder is not among them: it is the machine's own libnrsc5, loaded at
+      # run time and never bundled (issue #488).
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          submodules: recursive
+
+      - name: Compute version
+        id: version
+        run: |
+          GITHUB_SHA=$(git rev-parse HEAD)
+          echo "BUILD_SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            RELEASE_VERSION="$GITHUB_REF_NAME"
+          else
+            RELEASE_VERSION="dev-${GITHUB_SHA::7}"
+          fi
+          CARGO_VERSION=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)
+          # This workflow exists to hand someone a test installer, so the thing
+          # it installs has to be able to say it is not the release. Matches
+          # what release.yml's `targets` job stamps a manual run with.
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            echo "SDROXIDE_BUILD=dev.${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+          {
+            echo "RELEASE_VERSION=$RELEASE_VERSION"
+            echo "CARGO_VERSION=$CARGO_VERSION"
+            echo "PKG=sdroxide-$RELEASE_VERSION-windows-x86_64"
+          } >> "$GITHUB_ENV"
+          echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      # RADE's Opus dependency is built with autotools, which MSVC cannot
+      # drive and whose static library MSVC cannot link. Windows therefore
+      # builds the `x86_64-pc-windows-gnu` target inside MSYS2/MinGW — same
+      # as the release workflow.
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-clang
+            autoconf
+            automake
+            libtool
+      - name: Use the MSYS2 toolchain
+        run: |
+          echo "CARGO_BUILD_TARGET=x86_64-pc-windows-gnu" >> "$GITHUB_ENV"
+          echo "D:/a/_temp/msys64/mingw64/bin" >> "$GITHUB_PATH"
+          echo "D:/a/_temp/msys64/usr/bin" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x86_64-cat
+
+      # The embed-web feature bakes these files into the binary via rust-embed.
+      - name: Fetch web client
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: crates/sdroxide-web/dist
+
+      # --no-default-features drops `soapy`; `rtl433` is a default too and is
+      # named explicitly, so the .msi carries the same ISM decoders as the
+      # release workflow's standard build.
+      - name: Build
+        run: cargo build --release --locked -p sdroxide --no-default-features --features embed-web,rtl433
+
+      # MinGW links libstdc++/libgcc/libwinpthread as DLLs by default, and
+      # those exist only on a machine with MSYS2 or PothosSDR installed — a
+      # plain Windows box answers "libstdc++-6.dll not found" the moment the
+      # user double-clicks the .exe. .cargo/config.toml and
+      # crates/sdroxide-drm/build.rs link them in statically instead; this
+      # checks that actually held, because the failure is otherwise invisible
+      # here and only shows up on a user's machine.
+      - name: Check for MinGW runtime DLLs
+        run: |
+          BIN="target/$CARGO_BUILD_TARGET/release/sdroxide.exe"
+          objdump -p "$BIN" | grep -i "DLL Name:" | sort -u
+          if objdump -p "$BIN" \
+               | grep -Eiq "DLL Name:[[:space:]]*(libstdc\+\+|libgcc_s|libwinpthread)"; then
+            echo "::error::sdroxide.exe still needs a MinGW runtime DLL beside it"
+            exit 1
+          fi
+
+      - name: Build MSI
+        run: |
+          mkdir -p out
+          # CARGO_BUILD_TARGET (the MSYS2/MinGW toolchain, set above) makes
+          # cargo write to a target-specific directory rather than
+          # target/release.
+          BIN_DIR="target/$CARGO_BUILD_TARGET/release"
+          dotnet tool install --global wix --version 5.0.2
+          wix build packaging/windows/main.wxs -arch x64 \
+            -d Version="$CARGO_VERSION" -d BinDir="$BIN_DIR" \
+            -o "out/$PKG.msi"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PKG }}-msi
+          path: out/*.msi
+          if-no-files-found: error
+
+  # Keeps the installer after the run artifact expires, as a pre-release named
+  # dev-<commit>. Runs on Linux, where gh needs no shell translation. A rebuild
+  # of the same commit replaces the file rather than failing. The tag goes on
+  # the commit the run is on: the workflow token may not tag an older commit
+  # whose workflow files differ, so an older build says its commit in the notes.
+  keep:
+    name: keep as a pre-release
+    needs: build
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: sdroxide-${{ needs.build.outputs.version }}-windows-x86_64-msi
+          path: out
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.version }}
+          SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          ls -l out
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/*.msi --clobber
+          else
+            gh release create "$TAG" out/*.msi --prerelease --target "$GITHUB_SHA" \
+              --title "$TAG (test build)" --notes "Private test installer built from $SHA."
+          fi

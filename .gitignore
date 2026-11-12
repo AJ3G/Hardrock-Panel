@@ -1,0 +1,29 @@
+/target
+crates/sdroxide-web/dist
+crates/sdroxide-web/dist/index.html
+
+# Vendoring rade_c put a CMakeLists.txt in the tree, so IDE CMake integrations
+# (VS Code's CMake Tools) configure it on their own and leave a build tree and
+# their own settings at the repo root. The real RADE build is driven by
+# crates/sdroxide-rade/build.rs and lives under /target.
+/build
+/compile_commands.json
+.cache/
+.vscode/
+
+# Building a vendored crate on its own — `cargo test --manifest-path
+# vendor/<crate>/Cargo.toml`, which is how the patches in there are checked —
+# leaves a target directory and a lock file of its own beside it. Neither is
+# part of the vendored source: the workspace resolves those crates through
+# `[patch.crates-io]` and its own `Cargo.lock`.
+/vendor/*/target
+/vendor/*/Cargo.lock
+
+# AtCHAT / file-transfer received files (runtime output)
+received/
+
+# Release notes drafted for the GitHub release page, not part of the tree.
+/RELEASE_NOTES*.md
+
+# Screenshots of new features, taken locally for review.
+/screenshots/

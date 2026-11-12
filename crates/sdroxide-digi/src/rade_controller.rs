@@ -1,0 +1,428 @@
+//! `RadeController` — FreeDV **RADE V1** digital voice.
+//!
+//! Structurally this is the keyboard-modem controller with speech in place of
+//! text: transmit is a continuous over the operator opens and closes rather
+//! than a timed burst, and receive runs incrementally as audio arrives.
+//!
+//! Two things make it unlike every other mode here, and they are why
+//! [`DigiEngine`] grew `rx_audio_out`, `wants_mic` and `on_tx_mic`:
+//!
+//! * it *produces* receive audio (synthesized speech) instead of text or an
+//!   image, so the engine plays its output in place of the demodulated signal;
+//! * it transmits the live microphone rather than a burst it synthesised
+//!   itself.
+//!
+//! All the signal processing — acquisition, demodulation, neural decode,
+//! vocoding and every sample-rate conversion — happens on
+//! [`RadeWorker`]'s own thread. This controller only moves samples across ring
+//! buffers, so nothing here can stall the engine's audio loop.
+
+use std::time::SystemTime;
+
+use sdroxide_rade::RadeWorker;
+use sdroxide_types::{DigiConfig, DigiStatus, Mode, QsoStep, RadeStatus, TranscriptLine};
+use tracing::error;
+
+use crate::DigiEngine;
+use crate::controller::DigiAction;
+
+/// Engine audio rate: the rate of decoded speech out and microphone audio in.
+const OUT_RATE: f64 = 48_000.0;
+
+/// How often the unidentified-reception report goes out while a RADE signal is
+/// in sync. The server rate-limits `rx_report` to once every two seconds per
+/// station, so this is comfortably inside it and still frequent enough that a
+/// calling station sees it is being heard.
+const PRESENCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a decoded callsign stays on the panel once the signal that carried
+/// it has gone. Long enough to read after the over it closed, short enough that
+/// a receiver left running does not go on naming a station that left the band.
+const DX_CALL_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
+
+pub struct RadeController {
+    cfg: DigiConfig,
+    /// `None` when the modem could not be opened — the mode then behaves as a
+    /// plain SSB receiver rather than taking the app down.
+    worker: Option<RadeWorker>,
+
+    tx_active: bool,
+    keyed: bool,
+    /// True once the end-of-over frame has gone out and transmit has drained.
+    tx_done: bool,
+
+    /// Dial frequency at the last poll, so a decoded callsign can be reported
+    /// at an absolute frequency.
+    dial_hz: f64,
+    /// The last callsign decoded from a remote End-of-Over frame, shown until
+    /// our next over starts or [`DX_CALL_HOLD`] passes off sync.
+    last_dx_call: Option<String>,
+    /// When that callsign was decoded, so a station heard once and gone is not
+    /// still named on the panel an hour later.
+    dx_call_at: Option<SystemTime>,
+
+    /// When the "hearing something, unidentified" report was last sent, so it
+    /// is paced rather than emitted on every poll. `None` until the first one.
+    presence_at: Option<SystemTime>,
+
+    last_status: DigiStatus,
+    status_dirty: bool,
+}
+
+impl RadeController {
+    pub fn new(cfg: DigiConfig, tap_rate: f64) -> Self {
+        let worker = match RadeWorker::new(tap_rate, OUT_RATE) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                error!(?e, "could not start the RADE modem; audio will pass through");
+                None
+            }
+        };
+        if let Some(w) = worker.as_ref() {
+            w.set_callsign(&cfg.my_call);
+        }
+        let last_status = build_status(&cfg, false, None, None);
+        RadeController {
+            cfg,
+            worker,
+            tx_active: false,
+            keyed: false,
+            tx_done: false,
+            dial_hz: 0.0,
+            last_dx_call: None,
+            dx_call_at: None,
+            presence_at: None,
+            last_status,
+            status_dirty: true,
+        }
+    }
+}
+
+fn build_status(
+    cfg: &DigiConfig,
+    keyed: bool,
+    rade: Option<RadeStatus>,
+    dx_call: Option<String>,
+) -> DigiStatus {
+    DigiStatus {
+        mode: Mode::Rade,
+        step: QsoStep::Idle,
+        dx_call,
+        dx_grid: None,
+        tx_next: keyed,
+        tx_pending_msg: None,
+        // RADE's carriers are fixed by the waveform, so there is no operator
+        // tone offset to report; the centre of the occupied band is the honest
+        // value for the panadapter marker.
+        audio_hz: 1470.0,
+        tx_even: false,
+        transmitting: keyed,
+        tx_watchdog: false,
+        tx_refused: None,
+        transcript: Vec::<TranscriptLine>::new(),
+        config: cfg.clone(),
+        text_rx: String::new(),
+        tx_sent: 0,
+        fsq_heard: Vec::new(),
+        fsq_messages: Vec::new(),
+        rade,
+        packet: None,
+        navtex: None,
+        acars: None,
+        aprs: None,
+        js8: None,
+        atchat: None,
+        fox_queue: Vec::new(),
+        call_queue: Vec::new(),
+        clock_offset_s: None,
+        cw: None,
+        wspr: None,
+        pi4: None,
+        qso: None,
+    }
+}
+
+impl DigiEngine for RadeController {
+    fn mode(&self) -> Mode {
+        Mode::Rade
+    }
+
+    fn on_rx_audio(&mut self, tap: &[f32]) {
+        if self.keyed {
+            return; // our own transmit audio is not a signal to decode
+        }
+        if let Some(w) = self.worker.as_mut() {
+            w.push_rx(tap);
+        }
+    }
+
+    fn rx_audio_out(&mut self, out: &mut Vec<f32>) -> bool {
+        let Some(w) = self.worker.as_mut() else { return false };
+        if self.keyed {
+            return false;
+        }
+        // Out of sync there is nothing to play, and substituting silence would
+        // mute the receiver while the operator is still tuning. Let the raw
+        // audio through instead.
+        if !w.stats().sync {
+            return false;
+        }
+        w.pop_rx(out);
+        true
+    }
+
+    /// With the panel's analog mute set, the raw signal is silenced whenever
+    /// the decoder has nothing to play — out of sync, and while transmitting.
+    fn mutes_analog_audio(&self) -> bool {
+        self.cfg.rade_mute_analog
+    }
+
+    fn poll(&mut self, now: SystemTime, dial_hz: f64) -> Vec<DigiAction> {
+        let mut actions = Vec::new();
+        self.dial_hz = dial_hz;
+        if self.tx_active && !self.keyed {
+            self.keyed = true;
+            self.tx_done = false;
+            self.status_dirty = true;
+            actions.push(DigiAction::KeyTx);
+        }
+
+        // Callsigns the far end put in its End-of-Over frame. At most one per
+        // received over, so this is empty on nearly every poll.
+        let mut identified = false;
+        if let Some(w) = self.worker.as_ref() {
+            for t in w.poll_text() {
+                self.last_dx_call = Some(t.call.clone());
+                self.dx_call_at = Some(now);
+                self.status_dirty = true;
+                identified = true;
+                actions.push(DigiAction::RadeCallsign {
+                    call: t.call,
+                    snr_db: t.snr_db,
+                    freq_hz: self.dial_hz,
+                });
+            }
+        }
+
+        let rade = self.worker.as_ref().map(stats_of);
+        // In sync but not yet identified: report that we are hearing
+        // *something*, so the transmitting station can see it is being heard
+        // before either end knows the other's callsign. Paced, because a
+        // station in sync for a minute would otherwise send a report every
+        // poll. FreeDV GUI does the same, with an empty callsign.
+        if let Some(st) = rade {
+            if st.sync && !self.keyed {
+                let due = self
+                    .presence_at
+                    .is_none_or(|t| now.duration_since(t).unwrap_or_default() >= PRESENCE_INTERVAL);
+                // Never behind a callsign decoded on this same pass. The two
+                // are one report on the far end's line, and the empty one
+                // would land on top of the name and take it off again —
+                // FreeDV GUI sends the unidentified form only where it has no
+                // callsign to send, and so do we. The pacing still moves on,
+                // so the named report stands for this interval.
+                if identified {
+                    self.presence_at = Some(now);
+                } else if due {
+                    self.presence_at = Some(now);
+                    actions.push(DigiAction::RadePresence { snr_db: st.snr_db });
+                }
+            } else {
+                // Out of sync, or our own over: nothing is being received.
+                self.presence_at = None;
+            }
+            // A callsign only ever arrives at the end of an over, so it long
+            // outlives the sync that carried it. Held for a while so it can be
+            // read, then let go: "heard" is about the station on frequency
+            // now, and an hour-old name is a worse answer than none.
+            if !st.sync
+                && self.last_dx_call.is_some()
+                && self
+                    .dx_call_at
+                    .is_none_or(|t| now.duration_since(t).unwrap_or_default() >= DX_CALL_HOLD)
+            {
+                self.last_dx_call = None;
+                self.dx_call_at = None;
+                self.status_dirty = true;
+            }
+        }
+
+        let status = build_status(&self.cfg, self.keyed, rade, self.last_dx_call.clone());
+        if self.status_dirty || status.rade != self.last_status.rade {
+            self.status_dirty = false;
+            self.last_status = status.clone();
+            actions.push(DigiAction::Status(status));
+        }
+        actions
+    }
+
+    fn tx_burst_active(&self) -> bool {
+        self.keyed
+    }
+
+    fn wants_mic(&self) -> bool {
+        true
+    }
+
+    fn on_tx_mic(&mut self, mic_48k: &[f32]) {
+        // Only while the operator holds the over. After release the worker is
+        // back on receive and never reads this ring, so audio fed during the
+        // end-of-over tail opened the *next* over, grew with every over, and
+        // overflowed into the "samples dropped" warning (#614).
+        if !self.keyed || !self.tx_active {
+            return;
+        }
+        if let Some(w) = self.worker.as_mut() {
+            w.push_mic(mic_48k);
+        }
+    }
+
+    fn fill_tx_block(&mut self, out: &mut [f32]) -> bool {
+        let Some(w) = self.worker.as_mut() else {
+            out.fill(0.0);
+            return true;
+        };
+        w.pop_tx(out);
+        // The over ends when the operator has released transmit *and* the
+        // end-of-over frame has been generated and read out. Returning true
+        // early would cut the tail the far end needs to close cleanly.
+        if !self.tx_active && !self.tx_done && w.tx_drained() {
+            self.tx_done = true;
+        }
+        self.tx_done
+    }
+
+    /// RADE's 6 dB is not headroom the transmitter may have back.
+    ///
+    /// `sdroxide_rade::TX_REAL_SCALE` puts the waveform's *nominal* unit
+    /// amplitude at half scale, exactly as the C library specifies — but this
+    /// is a multi-carrier waveform whose peaks ride well above nominal, and
+    /// that is what the 6 dB is there for. Declaring the level it is already at
+    /// leaves those peaks intact; scaling it up to a nominal full scale would
+    /// flatten every one of them against the limiter, which is the one thing a
+    /// digital voice modem cannot survive.
+    fn tx_peak(&self) -> f32 {
+        1.0
+    }
+
+    fn on_burst_done(&mut self) {
+        self.keyed = false;
+        self.tx_done = false;
+        // The receiver has been fed our own transmit audio for the length of
+        // the over; start it clean.
+        if let Some(w) = self.worker.as_ref() {
+            w.reset();
+        }
+        self.status_dirty = true;
+    }
+
+    fn abort(&mut self) {
+        self.abort_tx();
+    }
+
+    fn abort_tx(&mut self) {
+        // See `CwController::abort_tx`: a refused key-up must not leave the
+        // latch set, or nothing can ever key again.
+        self.keyed = false;
+        self.tx_active = false;
+        if let Some(w) = self.worker.as_ref() {
+            w.set_tx(false);
+        }
+        self.tx_done = true;
+        self.status_dirty = true;
+    }
+
+    fn set_config(&mut self, cfg: DigiConfig) {
+        if cfg.my_call != self.cfg.my_call
+            && let Some(w) = self.worker.as_ref()
+        {
+            w.set_callsign(&cfg.my_call);
+        }
+        self.cfg = cfg;
+        self.status_dirty = true;
+    }
+
+    /// RADE's carriers are fixed by the waveform — there is no tone offset to
+    /// move, so the audio-frequency control does nothing here.
+    fn set_audio_hz(&mut self, _hz: f32) {}
+
+    fn audio_hz(&self) -> f32 {
+        self.last_status.audio_hz
+    }
+
+    fn status(&self) -> DigiStatus {
+        build_status(
+            &self.cfg,
+            self.keyed,
+            self.worker.as_ref().map(stats_of),
+            self.last_dx_call.clone(),
+        )
+    }
+
+    fn set_tx_active(&mut self, on: bool) {
+        if on == self.tx_active {
+            return;
+        }
+        if on {
+            // A new over of our own: whoever we last heard is no longer the
+            // station on frequency as far as the display is concerned.
+            self.last_dx_call = None;
+            self.dx_call_at = None;
+        }
+        self.tx_active = on;
+        if let Some(w) = self.worker.as_ref() {
+            w.set_tx(on);
+        }
+        self.status_dirty = true;
+    }
+}
+
+fn stats_of(w: &RadeWorker) -> RadeStatus {
+    let s = w.stats();
+    RadeStatus {
+        sync: s.sync,
+        snr_db: s.snr_db,
+        freq_offset_hz: s.freq_offset_hz,
+        rx_level: s.rx_level,
+        eoo_count: s.eoo_count,
+        dropped: s.dropped,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Issue #614: microphone audio kept arriving through the end-of-over tail,
+    /// into a ring the worker no longer read. It opened the next over and grew
+    /// until it overflowed into the "samples dropped" warning.
+    #[test]
+    fn mic_audio_after_release_is_not_queued_for_the_next_over() {
+        let mut c = RadeController::new(DigiConfig::default(), 48_000.0);
+        if c.worker.is_none() {
+            return; // no modem on this machine; nothing to test
+        }
+        let mic = vec![0.1f32; 4_800];
+        c.set_tx_active(true);
+        let _ = c.poll(SystemTime::now(), 14_236_000.0);
+        assert!(c.keyed);
+        for _ in 0..3 {
+            c.on_tx_mic(&mic);
+        }
+        c.set_tx_active(false);
+        // Still keyed for the tail; the engine keeps feeding the microphone.
+        for _ in 0..15 {
+            c.on_tx_mic(&mic);
+        }
+        let w = c.worker.as_mut().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut out = vec![0.0f32; 4_800];
+        while !w.tx_drained() && Instant::now() < deadline {
+            w.pop_tx(&mut out);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(w.tx_pending(), 0, "audio from after release was queued");
+        assert_eq!(w.stats().dropped, 0);
+    }
+}

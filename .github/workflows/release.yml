@@ -1,0 +1,993 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # Manual runs build all artifacts (downloadable from the run page) without
+  # creating a release — useful for testing the pipeline.
+  workflow_dispatch:
+  # Nightly build, 03:17 UTC. Same deal as a manual run — `release` is gated on
+  # a tag, so nothing is published — but it builds the four platforms listed in
+  # `targets` rather than all fourteen, and the result is downloaded from the
+  # run's Artifacts section. Note that GitHub runs a schedule on the default
+  # branch only, and disables it after 60 days with no commits to the
+  # repository; a push re-enables it. The odd minute is deliberate: GitHub
+  # delays scheduled runs at the top of the hour, when load peaks, and drops
+  # some outright, which is most likely what became of the first 03:00 nightly.
+  schedule:
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # audiopus_sys bundles a libopus whose CMakeLists predates CMake 3.5; the
+  # CMake 4.x on the macOS/Windows runners refuses to configure it without
+  # this override (CMake 3.x ignores the variable).
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+jobs:
+  # Which build combinations this run wants. A tag or a manual run builds all
+  # fourteen; the nightly builds four — the standard (non-SoapySDR) variant of
+  # the platforms most people run. A scheduled run publishes nothing (`release`
+  # below is gated on a tag), so its artifacts on the run page are the whole
+  # product of the run and the releases page never hears about it.
+  #
+  # The platform table lives in this job rather than in `build`'s own
+  # `strategy.matrix` because a matrix written in YAML cannot be narrowed per
+  # event. Shrinking the `label` list would leave the `include:` entries that
+  # map a label to its runner with nothing to attach to, and GitHub turns an
+  # unattached `include:` entry into an extra job rather than dropping it — so
+  # the three platforms the nightly means to skip would come back as three
+  # more builds.
+  targets:
+    name: pick targets
+    runs-on: ubuntu-latest
+    outputs:
+      combos: ${{ steps.pick.outputs.combos }}
+      stamp: ${{ steps.pick.outputs.stamp }}
+    steps:
+      - id: pick
+        run: |
+          # The -compat builds are the same two Linux builds compiled inside an
+          # Ubuntu 22.04 container, so the binaries link glibc 2.35 and run on
+          # stable/LTS distributions (Ubuntu 22.04, Mint 21, Debian 12,
+          # Raspberry Pi OS bookworm) that the regular builds refuse with
+          # "version `GLIBC_2.39' not found" (issue report 2026-08). A
+          # container rather than `runs-on: ubuntu-22.04` because GitHub
+          # retires that runner image on 2027-04-17 with brownouts from
+          # 2026-09-17, while a container image keeps working on any runner.
+          # Every other entry carries no `container` key, which `build` reads
+          # as the empty string and GitHub as "no container".
+          platforms='[
+            {"label": "linux-x86_64",         "os": "ubuntu-latest"},
+            {"label": "linux-aarch64",        "os": "ubuntu-24.04-arm"},
+            {"label": "linux-x86_64-compat",  "os": "ubuntu-latest",    "container": "ubuntu:22.04"},
+            {"label": "linux-aarch64-compat", "os": "ubuntu-24.04-arm", "container": "ubuntu:22.04"},
+            {"label": "windows-x86_64",       "os": "windows-latest"},
+            {"label": "macos-aarch64",        "os": "macos-latest"},
+            {"label": "macos-x86_64",         "os": "macos-15-intel"}
+          ]'
+          # Every platform is built twice: `soapy` (dynamically links SoapySDR)
+          # and `cat` (--no-default-features: no SoapySDR, runs without
+          # libSoapySDR installed; drive a CAT rig over serial + a sound card
+          # instead). The nightly builds `cat` only — it is what the installers
+          # ship and the one a tester can run without installing PothosSDR
+          # first.
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            wanted='["linux-x86_64-compat", "linux-aarch64-compat", "windows-x86_64", "macos-aarch64"]'
+            variants='["cat"]'
+          else
+            wanted='null'
+            variants='["soapy", "cat"]'
+          fi
+          # An include-only matrix: one job per entry, and no cross product to
+          # filter down afterwards.
+          combos=$(jq -cn \
+            --argjson platforms "$platforms" \
+            --argjson wanted "$wanted" \
+            --argjson variants "$variants" \
+            '{include: [ $platforms[] as $p
+                         | select($wanted == null or ($wanted | index($p.label)) != null)
+                         | $variants[]
+                         | $p + {variant: .} ]}')
+          echo "combos=$combos" >> "$GITHUB_OUTPUT"
+          echo "$combos" | jq .
+
+          # What this build should call itself. A tag is a release and keeps the
+          # bare crate version; anything else says which build it is and which
+          # commit it came from, so `sdroxide --version`, the About box and a
+          # crash report name the build rather than the release it was cut
+          # from. `sdroxide-version`'s build script reads this; unset (a local
+          # `cargo build`) means the plain version. Both the wasm client and
+          # every native build take it from here so they agree.
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            stamp=""
+          elif [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            stamp="nightly.$(date -u +%Y%m%d).${GITHUB_SHA::7}"
+          else
+            stamp="dev.${GITHUB_SHA::7}"
+          fi
+          echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
+          echo "build stamp: ${stamp:-<none, release>}"
+
+  # Build the wasm web client once; every native build embeds the same dist.
+  web:
+    name: web client (wasm)
+    needs: targets
+    runs-on: ubuntu-latest
+    # So the About box in a browser client agrees with the server that served
+    # it, rather than naming the release the nightly was cut from.
+    env:
+      SDROXIDE_BUILD: ${{ needs.targets.outputs.stamp }}
+    steps:
+      # The client compiles none of the vendored code, but cargo reads every
+      # workspace member's manifest before building any of them, and
+      # sdroxide-hfdl reaches xng by path into the vendor/xng submodule.
+      # Without it cargo stops at "failed to get `xng-mode-hfdl`", which is
+      # what failed every nightly from 2026-09-24 on.
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: web-dist
+      - name: Install trunk
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xzf - -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build web client
+        working-directory: crates/sdroxide-web
+        run: trunk build --release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: crates/sdroxide-web/dist
+          if-no-files-found: error
+          # A nightly is superseded the next night, so it need not sit on the
+          # run page for the repository's default 90 days. 0 means "use the
+          # default", which is what a tagged or manual run keeps.
+          retention-days: ${{ github.event_name == 'schedule' && 14 || 0 }}
+
+  build:
+    name: ${{ matrix.label }} (${{ matrix.variant }})
+    needs: [web, targets]
+    runs-on: ${{ matrix.os }}
+    # Empty for every non-compat entry, which means "no container".
+    container: ${{ matrix.container }}
+    env:
+      SDROXIDE_BUILD: ${{ needs.targets.outputs.stamp }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.combos) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The -compat jobs start from a bare Ubuntu 22.04 image rather than the
+      # runner image, so everything the runner normally provides is installed
+      # here (as root — the image has no sudo). This must run BEFORE checkout:
+      # without git in the container, actions/checkout silently falls back to
+      # the REST API download, which cannot fetch the vendor/ submodules.
+      # curl is for rustup, wget for the Opus model download that RADE's
+      # autogen.sh does, zstd for the cache archives, and build-essential also
+      # brings binutils (strip) and dpkg-dev (dpkg-shlibdeps, which cargo-deb
+      # runs to compute the .deb's Depends).
+      - name: Install build environment (compat container)
+        if: matrix.container
+        run: |
+          apt-get update
+          # build-essential also carries the C++ compiler the vendored DRM
+          # receiver needs; nothing about DRM is a *system* dependency, because
+          # Dream, faad2 and the FFT are all built from source in-tree.
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates curl wget zstd build-essential \
+            libasound2-dev pkg-config cmake autoconf automake libtool libclang-dev \
+            file desktop-file-utils
+          if [[ "${{ matrix.variant }}" == "soapy" ]]; then
+            apt-get install -y --no-install-recommends libsoapysdr-dev
+          fi
+
+      # `submodules` pulls vendor/rade_c (the RADE codec), vendor/faad2 (the AAC
+      # decoder the DRM receiver is built with), vendor/rtl_433 and vendor/xng
+      # (the HFDL decode core). HD Radio's
+      # decoder is not among them: it is the machine's own libnrsc5, loaded at
+      # run time and never bundled (issue #488).
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Compute version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            RELEASE_VERSION="$GITHUB_REF_NAME"
+          else
+            RELEASE_VERSION="dev-${GITHUB_SHA::7}"
+          fi
+          CARGO_VERSION=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)
+          # The SoapySDR build gets a "-soapysdr" suffix; the non-SoapySDR build
+          # (CAT/HPSDR/TCI, no libSoapySDR dependency) is the default, un-suffixed
+          # artifact.
+          if [[ "${{ matrix.variant }}" == "soapy" ]]; then SUFFIX="-soapysdr"; else SUFFIX=""; fi
+          {
+            echo "RELEASE_VERSION=$RELEASE_VERSION"
+            echo "CARGO_VERSION=$CARGO_VERSION"
+            echo "PKG=sdroxide-$RELEASE_VERSION-${{ matrix.label }}$SUFFIX"
+          } >> "$GITHUB_ENV"
+
+      - name: Install dependencies (Linux)
+        # The -compat container jobs installed everything above, pre-checkout.
+        if: runner.os == 'Linux' && !matrix.container
+        run: |
+          sudo apt-get update
+          # ALSA + pkg-config are needed by both variants; SoapySDR only by `soapy`.
+          # RADE builds a FARGAN-enabled Opus from source with autotools, and
+          # bindgen needs libclang — which the DRM receiver's bindings need too.
+          # DRM adds no system package of its own: Dream, faad2 and the FFT it
+          # would otherwise take from fftw3 are all built from the vendored
+          # sources, in both variants.
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev pkg-config cmake autoconf automake libtool libclang-dev
+          if [[ "${{ matrix.variant }}" == "soapy" ]]; then
+            sudo apt-get install -y --no-install-recommends libsoapysdr-dev
+          fi
+
+      # Extract the PothosSDR bundle (no install needed); soapysdr-sys finds
+      # SoapySDR.dll via PATH. Same approach as rust-soapysdr's own CI.
+      # RADE's Opus dependency is built with autotools, which MSVC cannot drive
+      # and whose static library MSVC cannot link. Windows therefore builds the
+      # `x86_64-pc-windows-gnu` target inside MSYS2/MinGW — the same way
+      # upstream FreeDV ships its Windows binaries. The DRM receiver is
+      # compiled by `cc` directly rather than through its own build system, so
+      # it never generates a makefile and cannot hit the MSYS `make` trap that
+      # an absolute path in a rule line sets off.
+      - name: Set up MSYS2 (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-clang
+            autoconf
+            automake
+            libtool
+      - name: Use the MSYS2 toolchain (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          echo "CARGO_BUILD_TARGET=x86_64-pc-windows-gnu" >> "$GITHUB_ENV"
+          echo "D:/a/_temp/msys64/mingw64/bin" >> "$GITHUB_PATH"
+          echo "D:/a/_temp/msys64/usr/bin" >> "$GITHUB_PATH"
+
+      - name: Install SoapySDR (Windows)
+        if: runner.os == 'Windows' && matrix.variant == 'soapy'
+        run: |
+          curl -L https://downloads.myriadrf.org/builds/PothosSDR/PothosSDR-2021.07.25-vc16-x64.exe -o pothossdr.exe
+          7z x -opothos -y pothossdr.exe > /dev/null
+          echo "${{ github.workspace }}/pothos/bin" >> "$GITHUB_PATH"
+
+      # RADE builds a FARGAN-enabled Opus from source with autotools.
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake autoconf automake libtool
+
+      - name: Install SoapySDR (macOS)
+        if: runner.os == 'macOS' && matrix.variant == 'soapy'
+        run: brew install pkg-config soapysdr
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.label }}-${{ matrix.variant }}
+
+      # The embed-web feature bakes these files into the binary via rust-embed.
+      - name: Fetch web client
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: crates/sdroxide-web/dist
+
+      - name: Build
+        run: |
+          # `cat` drops the default `soapy` feature. `rtl433` is a default too,
+          # but this build asks for it back: the embedded rtl_433 is statically
+          # linked C, so it costs the SoapySDR-free artifact nothing at run time
+          # and the release notes' "everything above" stays true. Both embed the
+          # web client.
+          if [[ "${{ matrix.variant }}" == "cat" ]]; then
+            cargo build --release --locked -p sdroxide --no-default-features --features embed-web,rtl433
+          else
+            cargo build --release --locked -p sdroxide --features embed-web
+          fi
+
+      # MinGW links libstdc++/libgcc/libwinpthread as DLLs by default, and
+      # those exist only on a machine with MSYS2 or PothosSDR installed — a
+      # plain Windows box answers "libstdc++-6.dll not found" the moment the
+      # user double-clicks the .exe. .cargo/config.toml and
+      # crates/sdroxide-drm/build.rs link them in statically instead; this
+      # checks that actually held, because the failure is otherwise invisible
+      # here and only shows up on a user's machine.
+      - name: Check for MinGW runtime DLLs (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          BIN="target/$CARGO_BUILD_TARGET/release/sdroxide.exe"
+          objdump -p "$BIN" | grep -i "DLL Name:" | sort -u
+          if objdump -p "$BIN" \
+               | grep -Eiq "DLL Name:[[:space:]]*(libstdc\+\+|libgcc_s|libwinpthread)"; then
+            echo "::error::sdroxide.exe still needs a MinGW runtime DLL beside it"
+            exit 1
+          fi
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          strip target/release/sdroxide
+          mkdir -p out stage/sdroxide
+          cp target/release/sdroxide LICENSE stage/sdroxide/
+          # Every binary embeds the RX-888's FX3 firmware image, which is MIT
+          # licensed: the notice has to travel with the binary, not just live
+          # in the source tree.
+          cp crates/sdroxide-rx888/firmware/LICENSE.txt stage/sdroxide/LICENSE-rx888-firmware.txt
+          # ...and CMUdict, embedded for the spoken announcements'
+          # grapheme-to-phoneme. BSD-2-Clause, same argument.
+          cp crates/sdroxide-speech/assets/LICENSE-cmudict.txt stage/sdroxide/
+          # ...and the DeepCW model, embedded for the CW decoder. This one is
+          # AGPL-3.0-only, which is stronger than sdroxide's own GPL and adds a
+          # network clause, so the notice matters more here than for the two
+          # above rather than less.
+          cp crates/sdroxide-deepcw/LICENSE stage/sdroxide/LICENSE-deepcw.txt
+          # The speech voice. Unlike the two above this is not embedded — it is
+          # CC BY-NC-SA, which a GPL binary may not absorb, so it travels as a
+          # data file the program reads at run time. sdroxide looks for a
+          # "voices" directory beside the executable, which is what this is.
+          # The .deb gets the same files through cargo-deb's asset list.
+          mkdir -p stage/sdroxide/voices
+          cp assets/voices/en_US-hfc_female-medium.onnx \
+             assets/voices/en_US-hfc_female-medium.onnx.json \
+             assets/voices/en_US-hfc_female-medium.MODEL_CARD stage/sdroxide/voices/
+          cp assets/voices/LICENSE-voice.txt stage/sdroxide/
+          # The .deb registers the menu entry itself; the portable tarball
+          # carries the same files plus a script that installs them per-user.
+          cp packaging/linux/sdroxide.desktop packaging/icons/sdroxide.svg stage/sdroxide/
+          cp packaging/linux/install-desktop-entry.sh stage/sdroxide/
+          # Likewise the udev rules: the .deb drops them in
+          # /usr/lib/udev/rules.d, but a tarball user has to install them by
+          # hand and cannot do that if they are not in the tarball. Both
+          # variants carry them — the RTL-SDR, RX-888 and Airspy HF+ drivers
+          # are native and present in every build.
+          cp packaging/linux/60-sdroxide-rtlsdr.rules packaging/linux/60-sdroxide-rx888.rules \
+             packaging/linux/60-sdroxide-airspyhf.rules packaging/linux/60-sdroxide-hackrf.rules \
+             packaging/linux/60-sdroxide-airspy.rules packaging/linux/60-sdroxide-elad.rules \
+             packaging/linux/60-sdroxide-limerfe.rules stage/sdroxide/
+          if [[ "${{ matrix.variant }}" == "cat" ]]; then
+            cat > stage/sdroxide/README.txt <<'EOF'
+          sdroxide — SDR transceiver (https://github.com/dividebysandwich/sdroxide)
+
+          Standard build (no SoapySDR). Runtime requirement:
+            libasound2 (or libasound2t64)   — ALSA
+
+          Drives, with no SoapySDR involved at all:
+            * RTL-SDR dongles, RX-888 / RX-888 Mk2 receivers and Airspy HF+
+              (Dual / Discovery / Ranger), directly over USB via native
+              pure-Rust drivers. The RX-888's FX3 firmware is bundled and
+              uploaded automatically, so there is no vendor driver package to
+              install and nothing to run first.
+            * a CAT-controlled radio over a serial port + sound card
+              (Settings -> Audio/CAT)
+            * the OpenHPSDR and TCI network backends
+
+          Other SoapySDR devices (HackRF, Airspy R2/Mini, PlutoSDR, ...) need
+          the "-soapysdr" build.
+
+          Run ./sdroxide for the GUI, ./sdroxide --server to serve the web UI
+          on http://localhost:4950, or ./sdroxide --help for all options.
+          EOF
+          else
+            cat > stage/sdroxide/README.txt <<'EOF'
+          sdroxide — SDR transceiver (https://github.com/dividebysandwich/sdroxide)
+
+          Runtime requirements (Debian/Ubuntu package names):
+            libsoapysdr0.8  soapysdr-module-all  libasound2 (or libasound2t64)
+
+          RTL-SDR dongles, RX-888 / RX-888 Mk2 receivers and the Airspy HF+
+          do not go through SoapySDR in this build either: they have native
+          pure-Rust drivers and are opened directly over USB. SoapySDR is what
+          adds everything else (HackRF, Airspy R2/Mini, PlutoSDR, ...).
+
+          Run ./sdroxide for the GUI, ./sdroxide --server to serve the web UI
+          on http://localhost:4950, or ./sdroxide --help for all options.
+          EOF
+          fi
+          cat >> stage/sdroxide/README.txt <<'EOF'
+
+          HD Radio (the digital sidecar of North American FM stations) needs
+          nrsc5's decoder library, libnrsc5.so, which is not bundled: sdroxide
+          loads it at startup when it is there. Install nrsc5 from
+          https://github.com/theori-io/nrsc5 (on Arch, the nrsc5-git AUR
+          package), or put libnrsc5.so beside the sdroxide executable. Without
+          it the HD RADIO mode is shown greyed out, and hovering it says why.
+
+          To add sdroxide to your desktop menu, run ./install-desktop-entry.sh
+          (per-user, no root needed; --uninstall removes it again). The .deb
+          package registers the menu entry automatically.
+
+          USB receivers: opening an RTL-SDR, RX-888 or Airspy HF+ as a normal
+          user needs a udev rule, which the .deb installs for you but the
+          tarball cannot:
+
+            sudo cp 60-sdroxide-*.rules /usr/lib/udev/rules.d/
+            sudo udevadm control --reload
+
+          Then unplug and replug the receiver. Without this sdroxide will see
+          the device and fail to open it (--probe says which).
+
+          LICENSE-rx888-firmware.txt covers the RX-888 FX3 firmware image that
+          is bundled in the binary and uploaded to the receiver; it is MIT
+          licensed and separate from sdroxide's own LICENSE.
+
+          Spoken announcements: the radio can read itself out — frequency,
+          mode, band, SWR while you tune up, FT8/JS8 messages addressed to you
+          — so it can be operated without seeing it. Switch it on under
+          Settings -> General -> Voice announcements. The voice runs on this
+          machine; nothing is sent anywhere.
+
+          The voice lives in the "voices" directory beside the program. It is
+          CC BY-NC-SA 4.0 (see LICENSE-voice.txt) rather than GPL, which is
+          why it is a separate data file and not part of the program itself.
+          LICENSE-cmudict.txt covers the pronunciation dictionary embedded in
+          the binary (BSD-2-Clause).
+
+          CW decoding uses the DeepCW neural model, which is embedded in the
+          binary and is AGPL-3.0-only (see LICENSE-deepcw.txt) — a stronger
+          copyleft than sdroxide's own GPL. Because it is linked in rather than
+          read as a data file, that licence covers this binary as a whole, and
+          its section 13 applies: if you run sdroxide as a server and let other
+          people use it over a network, you have to offer them the source.
+          EOF
+          tar czf "out/$PKG.tar.gz" -C stage sdroxide
+          cargo install cargo-deb --locked
+          # The SoapySDR build uses the `soapysdr` deb variant (package
+          # sdroxide-soapysdr, recommends the driver modules); the default build
+          # uses the base metadata (package sdroxide, no SoapySDR recommendation).
+          if [[ "${{ matrix.variant }}" == "soapy" ]]; then
+            cargo deb --no-build -p sdroxide --variant soapysdr -o "out/$PKG.deb"
+          else
+            cargo deb --no-build -p sdroxide -o "out/$PKG.deb"
+          fi
+
+      - name: Package AppImage (Linux)
+        # Issue #208: one file to download and run, with no install step and no
+        # package manager.
+        #
+        # Built from the **-compat** job and from the standard variant only,
+        # and both halves of that are deliberate:
+        #
+        # * -compat, because an AppImage is a promise that the file runs on the
+        #   machine it lands on, and that promise is glibc's to keep. The
+        #   regular Linux build needs glibc 2.39; this one links 2.35 and so
+        #   covers the stable distributions as well as the current ones.
+        # * standard (no SoapySDR), because a SoapySDR AppImage would have to
+        #   carry libSoapySDR *and* the driver modules it goes looking for at
+        #   run time, in a directory laid out the way that library expects. That
+        #   is the half-working bundle AppImages are notorious for, and this
+        #   build needs none of it: the native drivers — RTL-SDR, RX-888,
+        #   HackRF, Airspy, AirspyHF+, SDRplay, LimeSDR, PlutoSDR, HPSDR, TCI,
+        #   CAT — are all compiled in.
+        #
+        # Nothing is bundled beside the binary. ALSA, X11, Wayland, GLIBC and
+        # the GL stack are on AppImage's own exclude list precisely because they
+        # have to be the host's — a bundled libasound cannot see the host's
+        # sound configuration, and a bundled GL stack cannot see its driver. So
+        # this AppImage is exactly as portable as the -compat tarball beside it,
+        # and is a single runnable file with a menu entry instead of a directory
+        # to unpack.
+        if: runner.os == 'Linux' && matrix.variant == 'cat' && contains(matrix.label, 'compat')
+        run: |
+          case "${{ matrix.label }}" in
+            *aarch64*) export ARCH=aarch64 ;;
+            *)         export ARCH=x86_64 ;;
+          esac
+          # The AppDir. `voices/` sits beside the executable because that is
+          # where the program looks for it (`speech::synth::voice_dirs` reads
+          # `current_exe()`), which inside a mounted AppImage is
+          # /tmp/.mount_XXXX/usr/bin.
+          rm -rf AppDir
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications \
+                   AppDir/usr/share/icons/hicolor/scalable/apps \
+                   AppDir/usr/share/doc/sdroxide
+          cp target/release/sdroxide AppDir/usr/bin/
+          cp -r stage/sdroxide/voices AppDir/usr/bin/
+          cp stage/sdroxide/*.txt stage/sdroxide/LICENSE stage/sdroxide/*.rules \
+             AppDir/usr/share/doc/sdroxide/
+          cp packaging/linux/sdroxide.desktop AppDir/usr/share/applications/
+          cp packaging/icons/sdroxide.svg AppDir/usr/share/icons/hicolor/scalable/apps/
+          # appimagetool wants the desktop entry and the icon at the AppDir root
+          # as well, and `.DirIcon` is what a file manager shows.
+          cp packaging/linux/sdroxide.desktop AppDir/
+          cp packaging/icons/sdroxide.svg AppDir/
+          cp packaging/icons/sdroxide.svg AppDir/.DirIcon
+          # AppRun rather than a symlink to the binary: `exec` keeps the process
+          # id, so a desktop that started the AppImage still owns the window,
+          # and "$@" passes the command line through — `--server`, `--probe` and
+          # the rest work exactly as they do on the tarball.
+          cat > AppDir/AppRun <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/sdroxide" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+          # `--appimage-extract-and-run`: appimagetool is itself an AppImage and
+          # mounting one needs FUSE, which a container has no business having.
+          TOOL_URL=https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-$ARCH.AppImage
+          curl -sSfL "$TOOL_URL" -o appimagetool
+          chmod +x appimagetool
+          APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool AppDir "out/$PKG.AppImage"
+          # A file that cannot be run is not what this feature promised, so
+          # prove it can — on x86_64, where the runner is the target. The
+          # AppImage runtime needs FUSE and the runner has none, so this is the
+          # extract-and-run path, which is also the escape hatch a user without
+          # FUSE has.
+          if [[ "$ARCH" == "x86_64" ]]; then
+            APPIMAGE_EXTRACT_AND_RUN=1 "out/$PKG.AppImage" --version
+          fi
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p out stage/sdroxide
+          # CARGO_BUILD_TARGET (the MSYS2/MinGW toolchain, set above) makes
+          # cargo write to a target-specific directory rather than
+          # target/release.
+          BIN_DIR="target/$CARGO_BUILD_TARGET/release"
+          cp "$BIN_DIR/sdroxide.exe" stage/sdroxide/
+          cp LICENSE stage/sdroxide/LICENSE.txt
+          # MIT notice for the FX3 firmware image embedded in the binary.
+          cp crates/sdroxide-rx888/firmware/LICENSE.txt stage/sdroxide/LICENSE-rx888-firmware.txt
+          cp crates/sdroxide-speech/assets/LICENSE-cmudict.txt stage/sdroxide/
+          # AGPL notice for the DeepCW model embedded in the binary.
+          cp crates/sdroxide-deepcw/LICENSE stage/sdroxide/LICENSE-deepcw.txt
+          # The speech voice, in a "voices" directory beside the executable —
+          # see the Linux step for why it is a data file rather than embedded.
+          mkdir -p stage/sdroxide/voices
+          cp assets/voices/en_US-hfc_female-medium.onnx \
+             assets/voices/en_US-hfc_female-medium.onnx.json \
+             assets/voices/en_US-hfc_female-medium.MODEL_CARD stage/sdroxide/voices/
+          cp assets/voices/LICENSE-voice.txt stage/sdroxide/
+          if [[ "${{ matrix.variant }}" == "cat" ]]; then
+            cat > stage/sdroxide/README.txt <<'EOF'
+          sdroxide — SDR transceiver (https://github.com/dividebysandwich/sdroxide)
+
+          Standard build (no SoapySDR / PothosSDR needed). Drives:
+            * RTL-SDR dongles, RX-888 / RX-888 Mk2 receivers and Airspy HF+
+              (Dual / Discovery / Ranger), directly over USB via native
+              drivers. The RX-888's FX3 firmware is bundled and uploaded
+              automatically — no vendor driver package needed. The HF+ needs
+              WinUSB, which Zadig or Airspy's own package installs.
+            * a CAT-controlled radio over a serial port + sound card
+              (Settings -> Audio/CAT)
+            * the OpenHPSDR and TCI network backends
+
+          Other SoapySDR devices (HackRF, Airspy R2/Mini, PlutoSDR, ...) need
+          the "-soapysdr" build.
+
+          Run sdroxide.exe for the GUI, sdroxide.exe --server to serve the web
+          UI on http://localhost:4950, or sdroxide.exe --help for all options.
+          EOF
+          else
+            cat > stage/sdroxide/README.txt <<'EOF'
+          sdroxide — SDR transceiver (https://github.com/dividebysandwich/sdroxide)
+
+          Requires PothosSDR (provides SoapySDR and the device drivers):
+            https://downloads.myriadrf.org/builds/PothosSDR/
+          During its installation choose "Add PothosSDR to the system PATH".
+
+          RTL-SDR dongles and RX-888 / RX-888 Mk2 receivers do not go through
+          SoapySDR in this build either: they have native drivers and are
+          opened directly over USB.
+
+          Run sdroxide.exe for the GUI, sdroxide.exe --server to serve the web
+          UI on http://localhost:4950, or sdroxide.exe --help for all options.
+          EOF
+          fi
+          # Both variants have the native USB drivers, so both need the WinUSB
+          # note. Zadig is the only Windows-side setup either receiver needs.
+          cat >> stage/sdroxide/README.txt <<'EOF'
+
+          HD Radio (the digital sidecar of North American FM stations) needs
+          nrsc5's decoder library, libnrsc5.dll, which is not bundled: put it,
+          and the DLLs it depends on, beside sdroxide.exe. nrsc5 publishes no
+          Windows download; it builds with MSYS2 (see
+          https://github.com/theori-io/nrsc5). Without it the HD RADIO mode is
+          shown greyed out, and hovering it says why.
+
+          USB receivers: Windows has no driver bound to an RTL-SDR or RX-888
+          out of the box. Use Zadig (https://zadig.akeo.ie/) to bind the device
+          to WinUSB — for the RX-888 do this for BOTH of its USB ids,
+          04B4:00F3 (the bare Cypress FX3 bootloader it enumerates as on every
+          plug-in) and 04B4:00F1 (the same device once sdroxide has uploaded
+          firmware into it). Binding only the second one never works, because
+          the upload happens through the first.
+
+          LICENSE-rx888-firmware.txt covers the RX-888 FX3 firmware image that
+          is bundled in the binary and uploaded to the receiver; it is MIT
+          licensed and separate from sdroxide's own LICENSE.txt.
+
+          Spoken announcements: the radio can read itself out — frequency,
+          mode, band, SWR while you tune up, FT8/JS8 messages addressed to you
+          — so it can be operated without seeing it. Switch it on under
+          Settings -> General -> Voice announcements. The voice runs on this
+          machine; nothing is sent anywhere.
+
+          The voice lives in the "voices" directory beside the program. It is
+          CC BY-NC-SA 4.0 (see LICENSE-voice.txt) rather than GPL, which is
+          why it is a separate data file and not part of the program itself.
+          LICENSE-cmudict.txt covers the pronunciation dictionary embedded in
+          the binary (BSD-2-Clause).
+
+          CW decoding uses the DeepCW neural model, which is embedded in the
+          binary and is AGPL-3.0-only (see LICENSE-deepcw.txt) — a stronger
+          copyleft than sdroxide's own GPL. Because it is linked in rather than
+          read as a data file, that licence covers this binary as a whole, and
+          its section 13 applies: if you run sdroxide as a server and let other
+          people use it over a network, you have to offer them the source.
+          EOF
+          7z a "out/$PKG.zip" ./stage/sdroxide > /dev/null
+          # The MSI (fixed product identity) is only built for the default
+          # (non-SoapySDR) variant; SoapySDR users take the portable .zip.
+          if [[ "${{ matrix.variant }}" == "cat" ]]; then
+            dotnet tool install --global wix --version 5.0.2
+            wix build packaging/windows/main.wxs -arch x64 \
+              -d Version="$CARGO_VERSION" -d BinDir="$BIN_DIR" \
+              -o "out/$PKG.msi"
+          fi
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p out stage/sdroxide
+          # As on Linux, drop the symbol table — `-x` because a Rust binary's
+          # indirect symbol table entries make a full strip fail.
+          strip -x target/release/sdroxide
+          ls -lh target/release/sdroxide
+          # Portable tarball (both variants)
+          cp target/release/sdroxide LICENSE stage/sdroxide/
+          # MIT notice for the FX3 firmware image embedded in the binary.
+          cp crates/sdroxide-rx888/firmware/LICENSE.txt stage/sdroxide/LICENSE-rx888-firmware.txt
+          cp crates/sdroxide-speech/assets/LICENSE-cmudict.txt stage/sdroxide/
+          # AGPL notice for the DeepCW model embedded in the binary.
+          cp crates/sdroxide-deepcw/LICENSE stage/sdroxide/LICENSE-deepcw.txt
+          # The speech voice, in a "voices" directory beside the executable —
+          # see the Linux step for why it is a data file rather than embedded.
+          mkdir -p stage/sdroxide/voices
+          cp assets/voices/en_US-hfc_female-medium.onnx \
+             assets/voices/en_US-hfc_female-medium.onnx.json \
+             assets/voices/en_US-hfc_female-medium.MODEL_CARD stage/sdroxide/voices/
+          cp assets/voices/LICENSE-voice.txt stage/sdroxide/
+          if [[ "${{ matrix.variant }}" == "cat" ]]; then
+            cat > stage/sdroxide/README.txt <<'EOF'
+          sdroxide — SDR transceiver (https://github.com/dividebysandwich/sdroxide)
+
+          Standard build (no SoapySDR needed). Drives:
+            * RTL-SDR dongles, RX-888 / RX-888 Mk2 receivers and Airspy HF+
+              (Dual / Discovery / Ranger), directly over USB via native
+              drivers. The RX-888's FX3 firmware is bundled and uploaded
+              automatically — no vendor driver package needed, and nothing to
+              set up on macOS.
+            * a CAT-controlled radio over a serial port + sound card
+              (Settings -> Audio/CAT)
+            * the OpenHPSDR and TCI network backends
+
+          Other SoapySDR devices (HackRF, Airspy R2/Mini, PlutoSDR, ...) need
+          the "-soapysdr" build.
+
+          Run ./sdroxide for the GUI, ./sdroxide --server to serve the web UI
+          on http://localhost:4950, or ./sdroxide --help for all options.
+          EOF
+          else
+            cat > stage/sdroxide/README.txt <<'EOF'
+          sdroxide — SDR transceiver (https://github.com/dividebysandwich/sdroxide)
+
+          Requires SoapySDR plus the driver for your radio, e.g.:
+            brew install soapysdr soapyrtlsdr
+
+          RTL-SDR dongles and RX-888 / RX-888 Mk2 receivers do not go through
+          SoapySDR in this build either: they have native drivers and are
+          opened directly over USB, with nothing to set up on macOS.
+
+          Run ./sdroxide for the GUI, ./sdroxide --server to serve the web UI
+          on http://localhost:4950, or ./sdroxide --help for all options.
+          EOF
+          fi
+          cat >> stage/sdroxide/README.txt <<'EOF'
+
+          HD Radio (the digital sidecar of North American FM stations) needs
+          nrsc5's decoder library, libnrsc5.dylib, which is not bundled: build
+          and install nrsc5 from https://github.com/theori-io/nrsc5, which puts
+          it in /usr/local/lib, where sdroxide looks. Without it the HD RADIO
+          mode is shown greyed out, and hovering it says why.
+
+          LICENSE-rx888-firmware.txt covers the RX-888 FX3 firmware image that
+          is bundled in the binary and uploaded to the receiver; it is MIT
+          licensed and separate from sdroxide's own LICENSE.
+
+          Spoken announcements: the radio can read itself out — frequency,
+          mode, band, SWR while you tune up, FT8/JS8 messages addressed to you
+          — so it can be operated without seeing it. Switch it on under
+          Settings -> General -> Voice announcements. The voice runs on this
+          machine; nothing is sent anywhere.
+
+          The voice lives in the "voices" directory beside the program. It is
+          CC BY-NC-SA 4.0 (see LICENSE-voice.txt) rather than GPL, which is
+          why it is a separate data file and not part of the program itself.
+          LICENSE-cmudict.txt covers the pronunciation dictionary embedded in
+          the binary (BSD-2-Clause).
+
+          CW decoding uses the DeepCW neural model, which is embedded in the
+          binary and is AGPL-3.0-only (see LICENSE-deepcw.txt) — a stronger
+          copyleft than sdroxide's own GPL. Because it is linked in rather than
+          read as a data file, that licence covers this binary as a whole, and
+          its section 13 applies: if you run sdroxide as a server and let other
+          people use it over a network, you have to offer them the source.
+          EOF
+          tar czf "out/$PKG.tar.gz" -C stage sdroxide
+          # The .app/.dmg (fixed bundle identity) is only built for the default
+          # (non-SoapySDR) variant; SoapySDR users take the portable tarball.
+          if [[ "${{ matrix.variant }}" == "cat" ]]; then
+            mkdir -p stage-dmg
+            APP=stage-dmg/sdroxide.app
+            mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+            sed "s/@VERSION@/$CARGO_VERSION/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
+            cp target/release/sdroxide "$APP/Contents/MacOS/sdroxide"
+            # CFBundleIconFile=sdroxide resolves to this; without it Launchpad
+            # and the Dock fall back to the blank generic-application icon.
+            cp packaging/macos/sdroxide.icns "$APP/Contents/Resources/sdroxide.icns"
+            # The MIT notice for the embedded FX3 firmware goes into the bundle
+            # (so it survives dragging the .app out of the image) as well as
+            # alongside it. It has to be in place before codesign, which seals
+            # the contents of Resources into the signature.
+            cp crates/sdroxide-rx888/firmware/LICENSE.txt "$APP/Contents/Resources/LICENSE-rx888-firmware.txt"
+            cp crates/sdroxide-speech/assets/LICENSE-cmudict.txt "$APP/Contents/Resources/"
+            cp crates/sdroxide-deepcw/LICENSE "$APP/Contents/Resources/LICENSE-deepcw.txt"
+            # The speech voice. In a bundle it goes under Resources, which is
+            # where sdroxide looks once it finds itself in Contents/MacOS.
+            # Also before codesign, for the same reason as the notices above.
+            mkdir -p "$APP/Contents/Resources/voices"
+            cp assets/voices/en_US-hfc_female-medium.onnx \
+               assets/voices/en_US-hfc_female-medium.onnx.json \
+               assets/voices/en_US-hfc_female-medium.MODEL_CARD "$APP/Contents/Resources/voices/"
+            cp assets/voices/LICENSE-voice.txt "$APP/Contents/Resources/"
+            codesign --force -s - "$APP/Contents/MacOS/sdroxide"
+            codesign --force -s - "$APP"
+            cp LICENSE stage-dmg/
+            cp crates/sdroxide-rx888/firmware/LICENSE.txt stage-dmg/LICENSE-rx888-firmware.txt
+            cp assets/voices/LICENSE-voice.txt crates/sdroxide-speech/assets/LICENSE-cmudict.txt stage-dmg/
+            cp crates/sdroxide-deepcw/LICENSE stage-dmg/LICENSE-deepcw.txt
+            # The image is created at an explicit size and filled by hand
+            # rather than handed to `hdiutil create -srcfolder`, whose own
+            # sizing runs out of room mid-copy ("hdiutil: create failed - No
+            # space left on device") with ~160 GB still free on the host: the
+            # image, not the disk, is what fills up. The /Applications
+            # shortcut is the one thing in that folder whose size is open to
+            # interpretation, so it is made inside the mounted image instead,
+            # where it cannot enter the size calculation at all.
+            size_mb=$(( $(du -sm stage-dmg | cut -f1) + 64 ))
+            # No -format here: it is only accepted together with -srcfolder or
+            # -srcdevice, and a blank sized image is read-write UDIF anyway.
+            hdiutil create -volname sdroxide -fs HFS+ -size "${size_mb}m" \
+              -ov rw.dmg
+            mnt=$(mktemp -d)
+            hdiutil attach rw.dmg -mountpoint "$mnt" -nobrowse -noautoopen
+            # ditto, not cp: the code signature lives in extended attributes.
+            ditto "$APP" "$mnt/sdroxide.app"
+            codesign --verify --strict "$mnt/sdroxide.app"
+            cp LICENSE "$mnt/"
+            cp crates/sdroxide-rx888/firmware/LICENSE.txt "$mnt/LICENSE-rx888-firmware.txt"
+            cp assets/voices/LICENSE-voice.txt crates/sdroxide-speech/assets/LICENSE-cmudict.txt "$mnt/"
+            cp crates/sdroxide-deepcw/LICENSE "$mnt/LICENSE-deepcw.txt"
+            ln -s /Applications "$mnt/Applications"
+            hdiutil detach "$mnt" || { sleep 5; hdiutil detach "$mnt" -force; }
+            hdiutil convert rw.dmg -format UDZO -ov -o "out/$PKG.dmg"
+            rm -f rw.dmg
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pkg-${{ matrix.label }}-${{ matrix.variant }}
+          path: out/*
+          if-no-files-found: error
+          # As above: a nightly's artifacts expire in a fortnight, a tagged
+          # build's become the release assets and keep the default retention.
+          retention-days: ${{ github.event_name == 'schedule' && 14 || 0 }}
+
+  release:
+    name: create release
+    needs: [web, build]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pkg-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: web-dist
+      - name: Zip standalone web client
+        run: |
+          cd web-dist
+          zip -r "../dist/sdroxide-web-$GITHUB_REF_NAME.zip" .
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          ### Which build to download
+
+          Two builds are provided for every platform:
+
+          - **Standard** (no suffix) — built without SoapySDR, so it needs no
+            libSoapySDR/PothosSDR at all. It still drives real SDR hardware:
+            **RTL-SDR** dongles, **RX-888 / RX-888 Mk2** receivers and the
+            **Airspy HF+** (Dual / Discovery / Ranger) are opened directly over
+            USB by native pure-Rust drivers (the RX-888's FX3 firmware is
+            bundled and uploaded automatically — no vendor driver package). Plus a CAT-controlled radio (Icom/Yaesu/Xiegu) over a
+            serial port + USB sound card (**Settings → Audio/CAT**), and the
+            **OpenHPSDR** and **TCI** network backends. This is the recommended
+            download for most users, and the one packaged as an installer
+            (Windows `.msi`, macOS `.dmg`).
+          - **SoapySDR** (`-soapysdr` suffix) — everything above *plus* a
+            dynamic link against **SoapySDR**, for devices that have no native
+            driver here (HackRF, Airspy R2/Mini, PlutoSDR, …). No Windows or
+            macOS installer, but on Linux it comes as a `.deb` (package
+            `sdroxide-soapysdr`) as well as a portable archive — take
+            `sdroxide-<version>-linux-aarch64-compat-soapysdr.deb` for a
+            Raspberry Pi, Orange Pi or other ARM board, and the `x86_64` one for
+            a PC. Every `.deb` has the browser client built into the binary, so
+            the server serves the web UI with nothing else installed.
+
+          On Linux both builds additionally come as a **`-compat`** artifact
+          (e.g. `linux-x86_64-compat`), compiled against an older glibc (2.35).
+          Take the `-compat` file if the regular one refuses to start with
+          ``version `GLIBC_2.39' not found`` — which is what happens on
+          stable/LTS distributions such as Ubuntu 22.04, Linux Mint 21,
+          Debian 12 and Raspberry Pi OS (bookworm). The regular Linux builds
+          need glibc 2.39 or newer (Ubuntu 24.04 / Mint 22 / Debian 13); the
+          `-compat` builds and `.deb`s work on both old and new distributions.
+
+          ### Just want to try it? Take the AppImage
+
+          `sdroxide-<version>-linux-x86_64-compat.AppImage` (and the `aarch64`
+          one for a Raspberry Pi or other ARM board) is one file: download it,
+          `chmod +x` it, and run it. Nothing is installed, nothing is unpacked,
+          and there is no package manager involved.
+
+          It is the **Standard** build, so no SoapySDR is needed — and none of
+          the native drivers go through it anyway: RTL-SDR, RX-888, HackRF,
+          Airspy, Airspy HF+, SDRplay, LimeSDR, PlutoSDR, HPSDR, TCI, SpyServer
+          and a CAT rig on a sound card are all compiled in. It is built against
+          glibc 2.35, so it runs on old and new distributions alike.
+
+          Two things it cannot do for you, because no single file can:
+
+          - **USB receivers still need the udev rule.** The rule lives in
+            `usr/share/doc/sdroxide` inside the AppImage; the tarball or the
+            `.deb` beside it carries the same files if that is easier.
+          - **It needs FUSE to mount itself**, which every desktop distribution
+            has (`fuse3`). Where it is missing —  a minimal container, say — run
+            it as `APPIMAGE_EXTRACT_AND_RUN=1 ./sdroxide-….AppImage` instead.
+
+          ### Requirements (SoapySDR builds)
+
+          Install **SoapySDR** together with the driver module for your radio:
+
+          - **Windows**: install [PothosSDR](https://downloads.myriadrf.org/builds/PothosSDR/)
+            and select "Add PothosSDR to the system PATH" during setup.
+          - **Linux**: the `-soapysdr.deb` declares its dependencies and
+            recommends `soapysdr-module-all`. For the portable tarball install
+            `libsoapysdr0.8`, `soapysdr-module-all`, and ALSA (`libasound2`).
+          - **macOS**: `brew install soapysdr` plus a driver such as
+            `soapyrtlsdr` or `soapyhackrf`.
+
+          The **Standard** builds need only audio support (ALSA `libasound2` on
+          Linux; built in on Windows/macOS) — no SoapySDR. On macOS the app is
+          unsigned: right-click → Open on first launch, or clear quarantine with
+          `xattr -dr com.apple.quarantine sdroxide.app`.
+
+          ### USB receivers (RTL-SDR, RX-888) — all builds
+
+          - **Linux**: the `.deb` installs the udev rules for you. Portable
+            tarballs now ship them: `sudo cp 60-sdroxide-*.rules
+            /usr/lib/udev/rules.d/ && sudo udevadm control --reload`, then
+            replug. For the RX-888 **both** ids in the rule are required —
+            `04b4:00f3` is the bare FX3 bootloader it enumerates as on every
+            plug-in, `04b4:00f1` is the same device after sdroxide uploads
+            firmware into it.
+          - **Windows**: bind the device to WinUSB with
+            [Zadig](https://zadig.akeo.ie/) — for the RX-888, once for each of
+            the two ids above.
+          - **macOS**: nothing to do.
+
+          The RX-888 FX3 firmware image is bundled in every binary and uploaded
+          to the receiver at open time. It is MIT licensed (© 2017-2020 Oscar
+          Steila IK1XPV and the rx888-firmware contributors) and its notice
+          ships as `LICENSE-rx888-firmware.txt` in every package.
+
+          ### HD Radio — all builds
+
+          HD Radio (the digital sidecar of North American FM stations) is
+          decoded by **libnrsc5** from the [nrsc5](https://github.com/theori-io/nrsc5)
+          project, which is **not bundled**: sdroxide looks for it at startup
+          and uses it if it is there. Without it the **HD RADIO** mode is shown
+          greyed out, and hovering it says why. With a remote client, it is the
+          station's machine that needs it, not the client's.
+
+          - **Linux**: on Arch, the `nrsc5-git` AUR package. Elsewhere, build
+            nrsc5 from source: `sudo make install` puts `libnrsc5.so` in
+            `/usr/local/lib`, where sdroxide looks. A `libnrsc5.so` beside the
+            executable works too.
+          - **Windows**: put `libnrsc5.dll` and the DLLs it depends on beside
+            `sdroxide.exe`. nrsc5 publishes no Windows download; it builds with
+            MSYS2.
+          - **macOS**: build and install nrsc5 from source, which puts
+            `libnrsc5.dylib` in `/usr/local/lib`.
+
+          Restart sdroxide after installing it: the library is looked for once,
+          at startup.
+
+          ### Spoken announcements
+
+          The radio can read itself out — frequency once the dial stops moving,
+          mode and band as one phrase, band-edge warnings, the SWR while you
+          tune up, and FT8/JS8 messages addressed to you — so it can be operated
+          without seeing it. Switch it on under **Settings → General → Voice
+          announcements**. The window is also exposed to NVDA, Orca and
+          VoiceOver.
+
+          The neural voice runs on your own machine: nothing is sent anywhere
+          and no speech service has to be installed. It ships in a `voices`
+          directory beside the program (inside `Contents/Resources` in the macOS
+          bundle, `/usr/share/sdroxide/voices` from the `.deb`), and is
+          **CC BY-NC-SA 4.0** rather than GPL — which is why it is a separate
+          data file that sdroxide reads at run time rather than part of the
+          binary. Its notice ships as `LICENSE-voice.txt`, and
+          `LICENSE-cmudict.txt` covers the pronunciation dictionary embedded in
+          the binary (BSD-2-Clause). Extra Piper voices can be dropped into
+          `speech_voices/` in the config directory and picked in Settings.
+
+          ### CW decoding
+
+          CW is decoded by [DeepCW](https://github.com/e04/deepcw-engine), a
+          neural model embedded in every binary. It reads the spectrogram
+          directly instead of fitting a timing model to the envelope, which is
+          why it keeps copying well below the point where a classic decoder
+          gives up, and why it copies hand-sent CW whose timing no fit would
+          accept. The band skimmer uses the same model on every signal it finds.
+
+          The model and its reference implementation are **AGPL-3.0-only**, a
+          stronger copyleft than sdroxide's GPL, and it is linked into the
+          binary rather than read as a data file — so it covers the release as a
+          whole. In particular AGPL section 13 applies: **if you run
+          `sdroxide --server` and other people use that instance over a
+          network, you must offer them the Corresponding Source.** The notice
+          ships as `LICENSE-deepcw.txt` in every package.
+
+          Every binary embeds the web client: run `sdroxide --server` and open
+          `http://<host>:4950` in a browser. `sdroxide-web-*.zip` contains the
+          standalone web assets for use with `--web-root`.
+          EOF
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --title "sdroxide $GITHUB_REF_NAME" --notes-file notes.md --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber dist/*

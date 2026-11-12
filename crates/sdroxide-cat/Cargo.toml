@@ -1,0 +1,25 @@
+[package]
+name = "sdroxide-cat"
+version.workspace = true
+edition.workspace = true
+
+# Native-only serial CAT control (Icom CI-V / Yaesu / Xiegu). Must never be a
+# dependency of any wasm-targeted crate.
+[dependencies]
+sdroxide-types.workspace = true
+# `default-features = false` drops the `libudev` feature so we don't link
+# libudev-sys (no libudev-dev needed to build). Port enumeration falls back to
+# scanning /sys/class/tty, which still lists /dev/ttyACM* — we only need the
+# path, not USB vendor/product metadata.
+serialport = { version = "4.10", default-features = false }
+crossbeam-channel.workspace = true
+# The in-band audio ring for the (tr)uSDX's stream. The same lock-free SPSC
+# ring the sound-card paths use, for the same reason: the serial thread must
+# never block on the audio consumer, and the consumer must never wait on a lock
+# the thread holds.
+rtrb.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# XML-RPC response parsing for the flrig profile. The same parse-only crate the
+# lookup, Pluto and solar crates already use, at the same version.
+roxmltree = "0.21.1"

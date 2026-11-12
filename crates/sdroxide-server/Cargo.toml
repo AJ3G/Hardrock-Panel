@@ -1,0 +1,48 @@
+[package]
+name = "sdroxide-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+axum = { version = "0.8.9", features = ["ws"] }
+crossbeam-channel.workspace = true
+futures-util = "0.3.34"
+mime_guess = "2.0.5"
+opus = "0.4.0"
+rtrb.workspace = true
+rust-embed = { version = "8.12.0", features = ["interpolate-folder-path"], optional = true }
+sdroxide-proto = { path = "../sdroxide-proto" }
+# The space-weather feed behind /solar-ws (src/solar.rs), including its
+# native-only network and cache half — which the server always is.
+sdroxide-solar = { path = "../sdroxide-solar" }
+sdroxide-types = { path = "../sdroxide-types" }
+# The radio listing on /radios, which is the only JSON this server speaks —
+# everything on the sockets is postcard.
+serde = { workspace = true }
+serde_json = "1.0.151"
+thiserror.workspace = true
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+# For the one layer that has to run *before* routing rather than after it: the
+# reverse-proxy prefix strip (`strip_proxy_prefix`). `Router::layer` is applied
+# to matched routes, so it is too late to change which route matches.
+tower = { version = "0.5.3", default-features = false }
+tower-http = { version = "0.7.0", features = ["fs", "set-header"] }
+tracing.workspace = true
+triple_buffer = "9.0.0"
+
+[dev-dependencies]
+# The server only uses the engine, not SoapySDR device handling — leave
+# `soapy` for the top-level binary to decide.
+sdroxide-radio = { path = "../sdroxide-radio", default-features = false }
+# Seeding and reading back the engine host's `radio.json` in `radio_config.rs`,
+# through the same store the engine writes it with — a test that hand-rolled
+# the file could pass against a format the engine cannot read.
+sdroxide-config = { path = "../sdroxide-config" }
+tokio-tungstenite = "0.30.0"
+# `start_paused` clocks, so the sign-in gate's three-second lockout is asserted
+# rather than waited out — the tests would otherwise take longer than the rest
+# of the suite put together.
+tokio = { version = "1.53.1", features = ["test-util"] }
+
+[features]
+embed-web = ["dep:rust-embed"]

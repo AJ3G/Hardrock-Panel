@@ -1,0 +1,112 @@
+[package]
+name = "sdroxide-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sdroxide-types.workspace = true
+# The build stamp, for the three places that say which build this is: the
+# About box, the "you are running X" line on the update banner, and the
+# crash report the graphics-driver panic hook writes.
+sdroxide-version.workspace = true
+# Diagnostics only. The panadapter's view state is decided here and nowhere
+# else, so without a way to say what it did there is no way to tell a gesture
+# that never arrived from one that arrived and was overruled. Pure-facade and
+# wasm-safe; a build with no subscriber pays nothing.
+tracing.workspace = true
+# The APRS codec, for the one thing the panel needs it for: telling the
+# operator whether their digipeater path is a reasonable one. Pure parsing with
+# no I/O and no clock, so it builds for wasm32 alongside everything else here.
+sdroxide-aprs = { path = "../sdroxide-aprs" }
+serde.workspace = true
+# `accesskit` is one of eframe's defaults, and turning the defaults off
+# silently switched it back off: without it the whole widget tree is
+# invisible to NVDA, Orca and VoiceOver. It is native-only (it maps to
+# egui-winit), so it costs the browser build nothing.
+eframe = { version = "0.36.1", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wgpu",
+    "wayland",
+    "x11",
+    "persistence",
+] }
+# The browser build's WebSocket is the one `web-sys` provides, and it follows
+# the page: a client served over https upgrades itself to `wss://`. The native
+# remote client has no page to follow, so it dials what the operator typed —
+# and without ewebsock's `tls` feature tungstenite is compiled with no TLS at
+# all and refuses every `wss://` URL it is given, which is what a station
+# behind a reverse proxy on port 443 is reached by (issue #360). The feature is
+# added in the native block below rather than here so wasm never pulls rustls.
+ewebsock = { version = "0.8.0", optional = true }
+sdroxide-proto = { path = "../sdroxide-proto", optional = true }
+# SSTV: crop/scale + PNG decode/encode of gallery and TX-source images, and
+# glyph rasterisation for the message overlay. Both are pure-Rust / wasm-safe.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+ab_glyph = "0.2"
+# Solar-system 3D view (src/solar3d): ephemeris, space-weather types and SGP4.
+# Portable — the crate's network/cache half is cfg'd out on wasm32, where the
+# same data arrives over the server's /solar-ws relay instead.
+sdroxide-solar = { path = "../sdroxide-solar" }
+# Zero-copy packing of the solar view's GPU uniform/instance buffers.
+bytemuck = { version = "1", features = ["derive"] }
+# Spoken announcements. The pure core only — text normalisation, the priority
+# queue and the announcement state machine — which carries no audio, no model
+# and no I/O, and so builds for wasm32 alongside everything else here. The
+# native target block below adds the synthesizer on top.
+sdroxide-speech = { path = "../sdroxide-speech", default-features = false }
+
+[features]
+# WebSocket RemoteController for the browser (and native remote) client.
+remote = ["dep:ewebsock", "dep:sdroxide-proto"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rfd = "0.17.2"
+# TLS for the native remote client, unified with the entry above rather than
+# replacing it: a `wss://` server — one behind a reverse proxy terminating
+# HTTPS, which is how a station on port 443 is usually reached — is refused
+# outright by a tungstenite built without it. See the note beside that entry.
+ewebsock = { version = "0.8.0", optional = true, features = ["tls"] }
+# The OS timezone, for the solar view's local-time clock. `clock` is the only
+# feature that matters here; the browser build asks JavaScript for the offset
+# instead, so chrono never reaches the wasm dependency path.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+sdroxide-config = { path = "../sdroxide-config" }
+# ...and the half that links a model runtime and a sound card. Cargo unifies
+# this with the entry above, so native gets `synth` and wasm does not.
+sdroxide-speech = { path = "../sdroxide-speech", features = ["synth"] }
+# The alarm half of the same story: cpal output for the audible alerts. A hard
+# dependency here (cpal owns the host audio stack), so it lives in the native
+# block and never reaches the wasm dependency path.
+sdroxide-audio = { path = "../sdroxide-audio" }
+# The Morse trainer plays its practice tone locally, through the same
+# keyer the CW transmit path uses (native only, like the audio above).
+sdroxide-dsp = { path = "../sdroxide-dsp" }
+# MIDI control surfaces (VFO knob, PTT button, faders). Native-only: it links
+# the host MIDI stack, so it must never reach the wasm dependency path.
+sdroxide-midi = { path = "../sdroxide-midi" }
+# Drives the one-shot adapter probe in `wgpu_options` to completion. wgpu's
+# enumeration is a future for the browser's sake only, and this is the executor
+# wgpu and eframe already pull in, so it adds no build time.
+pollster = "1.0"
+# Only for `event_loop`, which has to name winit's own types: eframe does not
+# re-export winit, so it is taken through `egui-winit` — the crate eframe gets
+# winit from — and the version can never drift from the one eframe links.
+egui-winit = { version = "0.36", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+rfd = "0.17.2"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Blob", "BlobPropertyBag", "Url", "Document", "Window", "HtmlAnchorElement", "HtmlElement", "Storage", "File", "FileList", "FileReader", "HtmlInputElement"] }
+
+[dev-dependencies]
+# Compiles and validates the WGSL in src/shaders/ as a unit test, so a shader
+# error is a test failure rather than a blank window at runtime. Same version
+# wgpu already uses, so it adds no build time.
+naga = { version = "30.0.1", features = ["wgsl-in"] }
+# The format eframe's storage uses, so the persisted-state tests can read a blob
+# written by an older version exactly as the app would. Already in the tree via
+# eframe, so it adds no build time either.
+ron = "0.12"

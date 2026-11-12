@@ -1,0 +1,35 @@
+[package]
+name = "sdroxide-solar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Solar-system ephemeris and space-weather data (DONKI, NOAA SWPC, SDO imagery) for sdroxide"
+
+[dependencies]
+sdroxide-types.workspace = true
+serde.workspace = true
+serde_json = "1"
+tracing.workspace = true
+# Pure-Rust JPEG/PNG decode for the SDO browse images.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# SGP4 orbit propagation for the amateur satellites. Pure Rust; default
+# features are off so it brings only chrono (for the TLE epoch) and not serde.
+# chrono comes in with default features off too, so there is no `clock`, no
+# `wasmbind` and no js-sys — it builds for wasm32 unchanged.
+sgp4 = { version = "2.4.0", default-features = false, features = ["alloc", "std"] }
+# HamQSL's band-conditions feed is the one product here that is XML rather than
+# JSON. Pure Rust, no I/O, already in the lock file via sdroxide-net, and it
+# parses rather than pattern-matches — the alternative was hand-scanning for
+# tags, which breaks the first time an attribute order changes.
+roxmltree = "0.21.1"
+
+# The network and filesystem half (src/feed.rs, src/cache.rs). The browser
+# build gets the same data relayed over the server's WebSocket instead, so none
+# of this may reach wasm32.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Blocking HTTPS. Default features are rustls with the `ring` provider and
+# compiled-in Mozilla roots: no OpenSSL, no system certificate store, and no
+# async runtime — this crate owns exactly one worker thread.
+ureq = "3.4"
+crossbeam-channel.workspace = true
+sdroxide-config = { path = "../sdroxide-config" }

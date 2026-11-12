@@ -1,0 +1,12 @@
+[submodule "vendor/rade_c"]
+	path = vendor/rade_c
+	url = https://github.com/freedv/rade_c
+[submodule "vendor/rtl_433"]
+	path = vendor/rtl_433
+	url = https://github.com/merbanan/rtl_433
+[submodule "vendor/faad2"]
+	path = vendor/faad2
+	url = https://github.com/knik0/faad2
+[submodule "vendor/xng"]
+	path = vendor/xng
+	url = https://github.com/airframesio/xng.git
