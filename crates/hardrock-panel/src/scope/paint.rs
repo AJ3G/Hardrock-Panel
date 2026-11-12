@@ -944,15 +944,16 @@ fn paint_skim_waterfall(sc: &mut Scope, ui: &egui::Ui, p: &egui::Painter, rect: 
 /// flag is pinned to that side with an arrow.
 fn paint_offset(sc: &mut Scope, p: &egui::Painter, rect: Rect, cx: &Ctx, spectrum: bool) {
     let v = cx.view;
-    // TX AUTO's busy parts: a faint neutral shade, not a warning colour.
-    for &(lo, hi) in &sc.tx_busy {
+    // How busy TX AUTO finds the band: a faint neutral shade, darker
+    // where busier, never a warning colour (decision 118).
+    for &(lo, hi, busy) in &sc.tx_busy {
         let (a, b) = (v.x_of(lo, rect.left(), rect.width()), v.x_of(hi, rect.left(), rect.width()));
         let (a, b) = (a.min(b).max(rect.left()), a.max(b).min(rect.right()));
         if b > a {
             p.rect_filled(
                 Rect::from_x_y_ranges(a..=b, rect.y_range()),
                 0.0,
-                ink().gamma_multiply(0.07),
+                ink().gamma_multiply(0.02 + 0.12 * busy.clamp(0.0, 1.0)),
             );
         }
     }

@@ -918,11 +918,13 @@ transcript says "Left K1ABC for W9XYZ". Click a queued call to drop it. Picking 
   timed out, STOP QSO) or after HALT, and comes back when you pick a station.
   Hovering a line shows the station's card, the flag beside its country.
 - **TX audio and the scope's bar.** While TX is open the red offset bar on
-  SCOPE is where you transmit. **AUTO** picks the clearest gap in your own
-  slots before each over and shades the busy parts faintly. It counts the
+  SCOPE is where you transmit. **AUTO** moves to the quietest spot in your
+  own slots before each over, even on a crowded band with no clear gap, and
+  stays put while where it is is about as quiet as the best. It counts the
   stations decoded in your own period (strong ones, −5 dB or better, for 5
   minutes, others for 2) and any signal the receiver heard there that
-  nothing decoded, over the last few of your slots; **MANUAL** follows
+  nothing decoded, the newest slot and stronger signals counting most. The
+  scope shades the band grey, darker where busier; **MANUAL** follows
   the bar and a row you click; **HOLD** moves only when you drag the bar or
   type the figure. Dragging the bar on AUTO switches it to MANUAL. The bar
   can't move while you transmit.

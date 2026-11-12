@@ -579,9 +579,9 @@ impl App {
             Some((d, lower)) => out
                 .busy
                 .iter()
-                .map(|&(a, b)| {
+                .map(|&(a, b, v)| {
                     let (a, b) = (a as f64, b as f64);
-                    if lower { (d - b, d - a) } else { (d + a, d + b) }
+                    if lower { (d - b, d - a, v) } else { (d + a, d + b, v) }
                 })
                 .collect(),
             None => Vec::new(),
