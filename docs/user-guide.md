@@ -886,7 +886,7 @@ your saved free-text lines. **+** on a row queues the station. REPLY (or a
 double-click) on another station during a QSO stops that QSO, as STOP QSO
 does (nothing logged, not queued), and starts the new one at once: an over
 already on the air finishes and the next goes to the new station; the
-transcript says "Left K1ABC for W9XYZ". Click a queued call to drop it.
+transcript says "Left K1ABC for W9XYZ". Click a queued call to drop it. Picking the station you are already working changes nothing; a QSO started by a pick begins with what was already said between you, under a "picked up with … here" note.
 
 - Beside the station's call, the audio offset you copy them at (*1737 Hz*),
   from their latest decode.

@@ -27,6 +27,9 @@ const CONFIRM_S: i64 = 300;
 /// How long a call addressed to us is remembered, for where a reply the
 /// operator picks by hand opens, s.
 const RECENT_CALL_S: i64 = 300;
+/// How long the lines exchanged with each station are kept, s, so a QSO
+/// started (or started again) by a pick shows the whole exchange so far.
+const EXCHANGE_KEEP_S: i64 = 600;
 
 /// Where the exchange stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -267,6 +270,11 @@ pub(crate) struct Qso {
     heard: HashMap<String, i64>,
     /// Stations that answered our CQ while we took another.
     also_calling: Vec<String>,
+    /// Every line to or from us over the last [`EXCHANGE_KEEP_S`], by the
+    /// other station's call, whatever the transcript was doing: a QSO
+    /// started by a pick begins with what was already said (AJ3G, 12 Nov
+    /// 2026: transcripts beginning at their R+report).
+    exchanged: VecDeque<(String, Line)>,
 }
 
 impl Qso {
@@ -292,6 +300,7 @@ impl Qso {
             called_us: HashMap::new(),
             heard: HashMap::new(),
             also_calling: Vec::new(),
+            exchanged: VecDeque::new(),
         }
     }
 
@@ -417,7 +426,36 @@ impl Qso {
 
     /// Record a message as it went out.
     pub(crate) fn record_tx(&mut self, text: &str, now_utc: i64) {
-        self.transcript.push(Line { utc: now_utc, tx: true, text: text.into(), note: false, done: false });
+        let line = Line { utc: now_utc, tx: true, text: text.into(), note: false, done: false };
+        // Our over, by the call it is sent to (CQ to nobody).
+        let to = text.split_whitespace().next().unwrap_or("").trim_matches(['<', '>']).to_ascii_uppercase();
+        if !to.is_empty() && to != "CQ" {
+            self.keep_exchanged(to, line.clone(), now_utc);
+        }
+        self.transcript.push(line);
+    }
+
+    fn keep_exchanged(&mut self, call: String, line: Line, now_utc: i64) {
+        self.exchanged.push_back((call, line));
+        while self.exchanged.front().is_some_and(|(_, l)| l.utc < now_utc - EXCHANGE_KEEP_S) {
+            self.exchanged.pop_front();
+        }
+    }
+
+    /// The transcript for a contact with `call` begun at `now_utc`: what
+    /// was already said between us (their calls to us, our overs to them),
+    /// oldest first, then a note that the contact was picked up there.
+    fn seed_transcript(&mut self, call: &str, now_utc: i64) {
+        let before: Vec<Line> = self
+            .exchanged
+            .iter()
+            .filter(|(c, l)| c.eq_ignore_ascii_case(call) && l.utc >= now_utc - EXCHANGE_KEEP_S)
+            .map(|(_, l)| l.clone())
+            .collect();
+        if !before.is_empty() {
+            self.transcript.extend(before);
+            self.note(format!("picked up with {call} here"), now_utc);
+        }
     }
 
     /// A plain line in the transcript.
@@ -434,9 +472,18 @@ impl Qso {
     /// Wait CQ. A station that has lately called us is answered from where
     /// their exchange stands, not from the top.
     pub(crate) fn start_qso(&mut self, from: &str, grid: Option<String>, snr: i16, wait_for_cq: bool, now_utc: i64) {
-        self.fresh_contact();
-        self.operator_acted();
         let from = from.to_ascii_uppercase();
+        // Picked again while already working them: carry on as we are
+        // rather than start the contact over (AJ3G, 12 Nov 2026).
+        if self.dx.as_ref().is_some_and(|d| d.call == from) && self.busy() && !self.logged {
+            tracing::info!("TX: {from} picked again mid-QSO; the exchange carries on");
+            self.operator_acted();
+            return;
+        }
+        tracing::info!("TX: QSO with {from} started from a pick");
+        self.fresh_contact();
+        self.seed_transcript(&from, now_utc);
+        self.operator_acted();
         self.queue.retain(|q| !q.call.eq_ignore_ascii_case(&from));
         let heard = self
             .called_us
@@ -520,6 +567,10 @@ impl Qso {
             }
             if let Some(from) = d.from.as_deref().filter(|_| is_call_to_us(d, &me)) {
                 self.called_us.insert(from.to_string(), (now_utc, classify(&d.message)));
+            }
+            if let Some(from) = d.from.as_deref().filter(|f| !f.is_empty() && d.to.as_deref() == Some(me.as_str())) {
+                let line = Line { utc: now_utc, tx: false, text: d.message.clone(), note: false, done: false };
+                self.keep_exchanged(from.to_ascii_uppercase(), line, now_utc);
             }
         }
         self.called_us.retain(|_, (t, _)| now_utc - *t <= RECENT_CALL_S);
@@ -1005,6 +1056,40 @@ mod tests {
         q.start_qso("K1ABC", None, -5, false, 0);
         q.stop();
         assert!(!q.in_progress());
+    }
+
+    #[test]
+    fn a_qso_picked_up_mid_exchange_shows_what_was_already_said() {
+        let mut q = Qso::new(cfg());
+        q.call_cq();
+        q.record_tx("CQ AJ3G FN20", 0);
+        // Call 1st off: they call, nothing is started until picked.
+        q.cfg.call_first = false;
+        q.on_rx(&[d("AJ3G W1FAM FN41")], 15);
+        // Picked: their call is carried in.
+        q.start_qso("W1FAM", Some("FN41".into()), -10, false, 20);
+        let t: Vec<&str> = q.transcript().iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(t[0], "AJ3G W1FAM FN41", "{t:?}");
+        q.record_tx("W1FAM AJ3G -10", 30);
+        q.on_rx(&[d("AJ3G W1FAM R+10")], 45);
+        // Picked again on their R+10 (a double-click): nothing is lost.
+        q.start_qso("W1FAM", None, -10, false, 46);
+        let t: Vec<&str> = q.transcript().iter().map(|l| l.text.as_str()).collect();
+        assert!(t.contains(&"AJ3G W1FAM FN41") && t.contains(&"W1FAM AJ3G -10") && t.contains(&"AJ3G W1FAM R+10"), "{t:?}");
+        assert_eq!(q.plan_tx().as_deref(), Some("W1FAM AJ3G RR73"));
+    }
+
+    #[test]
+    fn a_fresh_pick_after_a_stop_carries_in_the_lines_with_that_station() {
+        let mut q = Qso::new(cfg());
+        q.start_qso("K1ABC", None, -5, false, 0);
+        q.record_tx("K1ABC AJ3G FN20", 0);
+        q.on_rx(&[d("AJ3G K1ABC -07")], 15);
+        q.stop();
+        q.start_qso("K1ABC", None, -5, false, 20);
+        let t: Vec<&str> = q.transcript().iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(&t[..2], &["K1ABC AJ3G FN20", "AJ3G K1ABC -07"], "{t:?}");
+        assert!(t[2].starts_with("picked up with K1ABC"));
     }
 
     #[test]
