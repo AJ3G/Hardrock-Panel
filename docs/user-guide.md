@@ -1101,6 +1101,21 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
 - **IBP BEACONS.** Which NCDXF/IARU beacon is on 20, 17, 15, 12 and 10 m
   now, its bearing and distance from you, and the seconds until the next
   one. Hearing one is a path open now. Hover a call for its site.
+- **BANDS OPEN.** A box in the map's bottom right corner while any band has
+  been heard: one bar a band, in the band's colour, 160 m at the top, with
+  the share of the world its paths reach (the same figure as REACH). The
+  bars run to the 1, 3, 10, 30 or 100 % the foot names, and fade as the
+  paths age (the memory is HALF-LIFE). It counts your own receptions and the
+  reports fetched (PSK Reporter, WSPR); there is no RBN here. Turn it off
+  with **BANDS OPEN** under LAYERS; the choice is remembered.
+- **BANDS** (on the SHOW row) opens the BANDS window: DAY or NIGHT at your
+  grid and how old HamQSL's forecast is, the BAND CONDITIONS table (CONDX
+  Good in green, Fair in blue, Poor in white), IBP BEACONS, and **METEOR
+  SHOWERS**: the showers active today from the International Meteor
+  Organization's list, strongest first, with each peak rate (ZHR), days to
+  the peak, and where the radiant is in your sky now (up, with its
+  direction, or down). Meteor scatter is best on 6 and 2 m with the radiant
+  up near a peak. Nothing is fetched for it. It shows while GLOBE is open.
 - **SPACE WEATHER and WEATHER.** While GLOBE is open it fetches the solar
   flux, Kp, X-ray and solar wind and the aurora from NOAA SWPC, the MUF(3000)
   from KC2G's ionosondes, infrared clouds from NOAA nowCOAST, and the weather

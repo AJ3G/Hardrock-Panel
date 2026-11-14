@@ -10,11 +10,13 @@
 //! in the panel's own look. Nothing it shows can key the radio: TUNE moves
 //! the receiver as a DATA key does, with every check that has.
 
+mod bands;
 pub(crate) mod fetch;
 pub(crate) mod field;
 mod forecast;
 mod geo;
 mod ibp;
+mod meteor;
 mod picture;
 pub(crate) mod sphere;
 mod sun;
@@ -132,6 +134,10 @@ pub(crate) struct GlobeSettings {
     pub extra_modes: Vec<String>,
     /// The extras' paths drawn too; off, only the mode in use has paths.
     pub extra_paths: bool,
+    /// BANDS OPEN over the map (decision 127): on unless AJ3G hides it.
+    pub bands_open: bool,
+    /// The BANDS window is open (decision 127).
+    pub bands_window: bool,
 }
 
 /// I HEARD · HEARD ME · BOTH (AJ3G, 11 Nov 2026): the stations AJ3G
@@ -182,6 +188,8 @@ impl Default for GlobeSettings {
             all_modes: false,
             extra_modes: Vec::new(),
             extra_paths: false,
+            bands_open: true,
+            bands_window: false,
         }
     }
 }
@@ -927,6 +935,7 @@ fn body(
         );
     });
     footer(ui, g);
+    bands::window(ui.ctx(), g, s, st, now);
 }
 
 fn top_bar(ui: &mut egui::Ui, popped: bool, st: &StationSettings, now: f64, out: &mut GlobeOut) {
@@ -1016,6 +1025,7 @@ fn toolbar(ui: &mut egui::Ui, g: &mut Globe, s: &mut GlobeSettings) {
             (&mut s.cities, "CITIES"),
             (&mut s.borders, "BORDERS"),
             (&mut s.grid, "GRID"),
+            (&mut s.bands_open, "BANDS OPEN"),
         ] {
             if chrome::chip(ui, *on, label).clicked() {
                 *on = !*on;
@@ -1132,6 +1142,16 @@ fn show_row(ui: &mut egui::Ui, g: &mut Globe, s: &mut GlobeSettings) {
             .clicked()
         {
             g.clear(decoders::slot::utc_now());
+        }
+        ui.add_space(10.0);
+        if chrome::chip(ui, s.bands_window, "BANDS")
+            .on_hover_text(
+                "The BANDS window: HamQSL's forecast beside the paths heard, the IBP beacons \
+                 now and today's meteor showers",
+            )
+            .clicked()
+        {
+            s.bands_window = !s.bands_window;
         }
     });
 }
@@ -2041,6 +2061,7 @@ fn map(
         }
     });
     legend(&painter, rect, g, s);
+    bands::open_box(&painter, rect, g, s);
     heard_me_popup(ui, rect, g, st, now);
 }
 
@@ -2840,8 +2861,9 @@ fn hamqsl_group(band: &str) -> Option<&'static str> {
 /// night, by the Sun at the station), FORECAST's model for this hour, and
 /// what was heard: PATHS (receptions, each at its faded weight), REACH (the
 /// share of the world) and BEST (the strongest report's margin over its
-/// mode's floor). The receiver's band is marked. Blues, white and grey
-/// only: yellow and red stay the warnings'.
+/// mode's floor). The receiver's band is marked. Green, blues, white and
+/// grey only: yellow and red stay the warnings'. Shown in GLOBE's side panel
+/// and in the BANDS window (decision 127).
 fn band_conditions(
     ui: &mut egui::Ui,
     g: &Globe,
@@ -2891,9 +2913,11 @@ fn band_conditions(
                 Some(w) => (
                     w.to_uppercase(),
                     match w {
-                        "Good" => theme::CYAN(),
-                        "Fair" => theme::TEXT_STRONG(),
-                        _ => theme::TEXT(),
+                        // Green, blue, white (decision 127): never the
+                        // warnings' yellow or red.
+                        "Good" => theme::GREEN(),
+                        "Fair" => theme::CYAN(),
+                        _ => theme::TEXT_STRONG(),
                     },
                 ),
                 None => ("—".into(), theme::TEXT()),
@@ -2943,8 +2967,9 @@ fn band_conditions(
     }
     let mut notes = vec![format!(
         "CONDX is HamQSL's {} forecast for the whole world; MODEL is FORECAST's for this \
-         hour from here. PATHS, REACH (bars to {:.0}%) and BEST are from the stations heard: \
-         a dotted row is unheard, not closed.",
+         hour from here. PATHS, REACH (bars to {:.0}%) and BEST are from the stations heard \
+         (own receptions, PSK Reporter and WSPR; no RBN): a dotted row is unheard, not \
+         closed.",
         if day { "day" } else { "night" },
         scale * 100.0
     )];
