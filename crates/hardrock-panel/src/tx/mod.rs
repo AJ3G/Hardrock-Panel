@@ -945,7 +945,8 @@ impl Tx {
         if let Some((dial, _)) = env.rx_dial {
             // A band change (or a big move) clears the FT8 list. WSPR's is
             // kept and shown by band (decision 92).
-            if self.list_dial.is_some_and(|d| (d - dial).abs() > 5_000.0) {
+            if let Some(was) = self.list_dial.filter(|d| (d - dial).abs() > 5_000.0) {
+                tracing::info!("TX: decode list cleared: the receiver moved {:.3} -> {:.3} kHz", was / 1e3, dial / 1e3);
                 self.rows.clear();
                 self.heard.clear();
                 self.occ.clear();

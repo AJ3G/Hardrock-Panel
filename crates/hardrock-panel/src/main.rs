@@ -211,6 +211,9 @@ struct App {
     tone_error: Option<String>,
     /// Since when the radio has been seen transmitting.
     rig_keyed_since: Option<Instant>,
+    /// The receiver as last seen, to log a jump (decode list and scope
+    /// spots cleared during CQ, AJ3G 14 Nov 2026).
+    rx_seen: Option<f64>,
     /// What says the station is transmitting, as last logged, and since when.
     tx_sources: (String, Option<Instant>),
     render_state: Option<RenderState>,
@@ -329,6 +332,7 @@ impl App {
             tx_sources: (String::new(), None),
             tone_error: None,
             rig_keyed_since: None,
+            rx_seen: None,
         }
     }
 
@@ -535,6 +539,25 @@ impl App {
         let feed = std::mem::take(&mut self.decode.tx_feed);
         self.tx.take_wspr(std::mem::take(&mut self.decode.wspr_feed), self.saved.station.pos());
         let rx_dial = self.rx.active().then(|| (self.rx.rx_hz, self.rx.mode.is_lower()));
+        // A receiver that jumps clears TX's list and moves the scope's spots:
+        // say where from and to, with the radio's dials, so the cause shows
+        // in COPY LOG.
+        if let Some((d, _)) = rx_dial {
+            if let Some(was) = self.rx_seen
+                && (d - was).abs() >= 500.0
+            {
+                tracing::info!(
+                    "receiver moved {:.3} -> {:.3} kHz (VFO A {:?}, VFO B {:?}, split {:?}, TX {})",
+                    was / 1e3,
+                    d / 1e3,
+                    rig.and_then(|r| r.freq_hz),
+                    rig.and_then(|r| r.freq_b_hz),
+                    rig.and_then(|r| r.split),
+                    rig.is_some_and(|r| r.transmitting())
+                );
+            }
+            self.rx_seen = Some(d);
+        }
         let bar_off = match (self.scope.bar_hz(), rx_dial) {
             (Some(b), Some((d, lower))) => Some(if lower { d - b } else { b - d }),
             _ => None,
