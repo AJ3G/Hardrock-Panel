@@ -897,43 +897,70 @@ fn row_ui(
         s if s >= -15 => ink,
         _ => ink.gamma_multiply(0.7),
     };
+    // Narrow windows keep what matters (AJ3G, 14 Nov 2026: "I am missing
+    // data when I have the window smaller"): the message and the badges
+    // always; then, as room allows, the country, the path and the
+    // continent; DT goes first of the numbers.
+    let show_dt = w >= 420.0;
     if r.ours {
         put("TX".into(), tx_ink(), 34.0);
-        put(String::new(), ink, 34.0);
+        if show_dt {
+            put(String::new(), ink, 34.0);
+        }
     } else {
         put(format!("{:+03}", r.d.snr_db), snr_col, 34.0);
-        put(format!("{:4.1}", r.d.dt), ink, 34.0);
+        if show_dt {
+            put(format!("{:4.1}", r.d.dt), ink, 34.0);
+        }
     }
     put(format!("{:4.0}", r.d.audio_hz), ink, 42.0);
-    let msg_w = (w * 0.40).clamp(150.0, 260.0);
+    let buttons = !r.ours && r.d.from.is_some();
+    let end = rect.right() - if buttons { 78.0 } else { 4.0 };
+    let tags: Vec<_> = r.badges.tags().into_iter().take(2).collect();
+    let badges_w: f32 = tags.iter().map(|t| crate::logbook::novelty::width(&p, *t, 9.5) + 4.0).sum();
+    let text_w = p.layout_no_wrap(r.d.message.clone(), font.clone(), ink).size().x + 10.0;
+    let mut room = end - x.get() - text_w - badges_w;
+    let mut take = |want: f32| -> bool {
+        let ok = room >= want;
+        if ok {
+            room -= want;
+        }
+        ok
+    };
+    let country_w = match &r.country {
+        Some(_) if take(120.0) => 120.0,
+        Some(_) if take(52.0) => 52.0,
+        _ => 0.0,
+    };
+    let show_path = r.path.is_some() && take(106.0);
+    let show_cont = r.continent.is_some() && take(24.0);
+    // The message: its own width, or what is left when even that is short.
+    let msg_w = text_w.min((end - x.get() - badges_w).max(60.0));
+    let msg_rect = egui::Rect::from_min_max(egui::pos2(x.get(), rect.top()), egui::pos2(x.get() + msg_w - 4.0, rect.bottom()));
+    let pm = p.with_clip_rect(msg_rect.intersect(rect));
+    let msg_ink = if r.ours { tx_ink() } else { ink };
     if r.to_me {
         // Bold, as the monospace face has no bold: drawn twice, a hair apart.
-        p.text(egui::pos2(x.get() + 0.7, y), egui::Align2::LEFT_CENTER, &r.d.message, font.clone(), ink);
+        pm.text(egui::pos2(x.get() + 0.7, y), egui::Align2::LEFT_CENTER, &r.d.message, font.clone(), ink);
     }
-    put(r.d.message.clone(), if r.ours { tx_ink() } else { ink }, msg_w);
-    let wide = w > 520.0;
-    if let Some(cty) = &r.country {
-        let name: String = if wide { cty.chars().take(16).collect() } else { cty.chars().take(6).collect() };
-        put(name, ink, if wide { 120.0 } else { 52.0 });
-    } else {
-        put(String::new(), ink, if wide { 120.0 } else { 52.0 });
+    pm.text(egui::pos2(x.get(), y), egui::Align2::LEFT_CENTER, &r.d.message, font.clone(), msg_ink);
+    x.set(x.get() + msg_w);
+    if country_w > 0.0
+        && let Some(cty) = &r.country
+    {
+        let n = if country_w > 100.0 { 16 } else { 6 };
+        put(cty.chars().take(n).collect(), ink, country_w);
     }
-    if let Some(cont) = r.continent {
+    if show_cont && let Some(cont) = r.continent {
         put(cont.into(), theme::continent_color(cont), 24.0);
-    } else {
-        x.set(x.get() + 24.0);
     }
-    if let Some((brg, km, guess)) = r.path {
+    if show_path && let Some((brg, km, guess)) = r.path {
         let col = if guess { ink.gamma_multiply(0.6) } else { ink };
         put(format!("{brg:3.0}° {km:5.0} km"), col, 106.0);
     }
     // Badges: the two rarest things new about them (decision 122).
-    let right = rect.right() - 76.0;
-    let mut bx = x.get().min(right - 4.0);
-    for t in r.badges.tags().into_iter().take(2) {
-        if bx + crate::logbook::novelty::width(&p, t, 9.5) > right {
-            break;
-        }
+    let mut bx = x.get().min(end - badges_w).max(rect.left());
+    for t in tags {
         let br = crate::logbook::novelty::paint(&p, egui::pos2(bx, y), t, 9.5, 1.0);
         bx = br.right() + 4.0;
     }

@@ -182,7 +182,9 @@ pub const CONTROLS: &[Control] = &[
     ),
     ctl(
         "GS",
-        "GS;",
+        // P1 0, as SDR Console reads it: the DUO doesn't answer `GS;`
+        // (AJ3G's settings read, 14 Nov 2026).
+        "GS0;",
         "",
         None,
         "AGC SPEED / GAIN",
@@ -468,8 +470,27 @@ pub const CONTROLS: &[Control] = &[
         Menu,
         OFF_ON,
     ),
-    ctl("OV", "OV;", "", Some(61), "OFFSET VALUE", "The transverter offset", Menu, RO),
-    ctl("FF", "FF;", "", Some(62), "F4 / F5", "What the F4 and F5 keys do", Menu, RO),
+    // OV (menu 61) and LB (backlight colours) are left out: the DUO
+    // answers neither read, and their formats aren't readable in the
+    // manual (AJ3G, 14 Nov 2026: what can't be read is removed).
+    ctl(
+        "FF",
+        // P1 4, F4's key; `FF;` alone goes unanswered.
+        "FF4;",
+        "4",
+        Some(62),
+        "F4 KEY",
+        "What the F4 key does",
+        Menu,
+        Kind::Choice(&[
+            ("00", "Nothing"),
+            ("01", "CW message"),
+            ("02", "Split"),
+            ("03", "Knob lock"),
+            ("04", "CW / CW-R"),
+            ("05", "VFO tracking"),
+        ]),
+    ),
     ctl(
         "BH",
         "BH;",
@@ -480,10 +501,10 @@ pub const CONTROLS: &[Control] = &[
         Menu,
         OFF_ON,
     ),
-    ctl("LB", "LB;", "", None, "BACKLIGHT RGB", "The backlight colour for each state", Menu, RO),
     // Read only
     ctl("DT", "DT;", "", None, "MODEL", "Radio type", Info, RO),
-    ctl("VS", "VS;", "", Some(84), "FIRMWARE", "Firmware versions", Info, RO),
+    // P1 I, the UI firmware: `VS;` alone goes unanswered.
+    ctl("VS", "VSI;", "", Some(84), "FIRMWARE", "The radio's UI firmware version", Info, RO),
     ctl("SN", "SN;", "", Some(83), "SERIAL", "Serial number", Info, RO),
     ctl(
         "BR",
