@@ -148,8 +148,39 @@ impl Control {
     }
 
     /// The value part of an answer: the body without the fixed prefix.
+    ///
+    /// The prefix is taken off only when what is left is at least as wide
+    /// as the value itself, so an answer that leaves the prefix out still
+    /// reads right: `TB005` and `TB05` are both TX BW 05, and `FD0` is
+    /// FM DEV 0, not an empty value (AJ3G saw TX BW stay blank, 14 Nov 2026).
     pub fn value_of<'a>(&self, body: &'a str) -> &'a str {
-        body.strip_prefix(self.prefix).unwrap_or(body)
+        match body.strip_prefix(self.prefix) {
+            Some(v) if !self.prefix.is_empty() && v.trim_end().len() >= self.value_width() => v,
+            _ => body,
+        }
+    }
+
+    /// The narrowest a value of this control is written.
+    fn value_width(&self) -> usize {
+        match self.kind {
+            Kind::Range { width, .. } => width,
+            Kind::Choice(opts) => opts.iter().map(|(o, _)| o.len()).min().unwrap_or(1),
+            Kind::Text { len } => len,
+            Kind::Toggle | Kind::ReadOnly => 1,
+        }
+        .max(1)
+    }
+
+    /// The choice `value` stands for: the same code, or for numeric codes
+    /// the same number however it is padded (`5`, `05` and `005` are all
+    /// `05`).
+    pub fn choice_of(&self, value: &str) -> Option<&'static (&'static str, &'static str)> {
+        let Kind::Choice(opts) = self.kind else { return None };
+        let v = value.trim();
+        opts.iter().find(|(o, _)| *o == v).or_else(|| {
+            let n: i64 = v.parse().ok()?;
+            opts.iter().find(|(o, _)| o.parse::<i64>().ok() == Some(n))
+        })
     }
 
     /// The value in words.
@@ -160,13 +191,9 @@ impl Control {
                 "1" => "On".into(),
                 v => v.into(),
             },
-            Kind::Choice(opts) => opts
-                .iter()
-                .find(|(v, _)| {
-                    *v == value.trim() || v.parse::<i32>().ok() == value.trim().parse().ok()
-                })
-                .map(|(_, l)| l.to_string())
-                .unwrap_or_else(|| value.into()),
+            Kind::Choice(_) => {
+                self.choice_of(value).map(|(_, l)| l.to_string()).unwrap_or_else(|| value.into())
+            }
             Kind::Range { unit, .. } => match value.trim().parse::<i32>() {
                 Ok(n) if unit.is_empty() => n.to_string(),
                 Ok(n) => format!("{n} {unit}"),
@@ -184,7 +211,7 @@ impl Control {
         let body = match self.kind {
             Kind::Toggle if v == "0" || v == "1" => v.to_string(),
             Kind::Toggle => return Err(format!("{}: {v} isn't 0 or 1", self.name)),
-            Kind::Choice(opts) => match opts.iter().find(|(o, _)| *o == v) {
+            Kind::Choice(_) => match self.choice_of(v) {
                 Some((o, _)) => o.to_string(),
                 None => return Err(format!("{}: {v} isn't one of its choices", self.name)),
             },

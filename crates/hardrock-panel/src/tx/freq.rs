@@ -16,6 +16,55 @@ pub(crate) const LO_HZ: f32 = 200.0;
 pub(crate) const HI_HZ: f32 = 2900.0;
 /// An FT8 signal's width above its tone 0, Hz (8 tones of 6.25 Hz).
 pub(crate) const SIGNAL_HZ: f32 = 50.0;
+/// The radio's transmit filter (menu 35 TX BW, decision 125): AUTO keeps
+/// the whole signal at least this far below its high edge, Hz, where the
+/// filter is still flat (AJ3G, 14 Nov 2026: a tone at 2760 Hz on 100-2700
+/// gave almost no power) ...
+pub(crate) const FILTER_TOP_HZ: f32 = 300.0;
+/// ... and tone 0 at least this far above its low edge, Hz ...
+pub(crate) const FILTER_LOW_HZ: f32 = 100.0;
+/// ... unless the high edge is at least this, Hz, when AUTO's own top
+/// ([`HI_HZ`]) is well inside it already.
+pub(crate) const FILTER_WIDE_HZ: u32 = 3500;
+
+/// The audio AUTO searches, Hz: tone 0 from `lo`, the top of the signal up
+/// to `hi`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Range {
+    pub lo: f32,
+    pub hi: f32,
+}
+
+/// AUTO's whole range, as before decision 125.
+pub(crate) const FULL: Range = Range { lo: LO_HZ, hi: HI_HZ };
+
+impl Range {
+    /// The range a transmit filter from `bw.0` to `bw.1` Hz leaves (decision
+    /// 125): the top [`FILTER_TOP_HZ`] under its high edge when that is
+    /// under [`FILTER_WIDE_HZ`], tone 0 [`FILTER_LOW_HZ`] over its low edge,
+    /// never wider than [`FULL`]. Not known: [`FULL`].
+    pub(crate) fn for_filter(bw: Option<(u32, u32)>) -> Range {
+        let Some((lo, hi)) = bw else { return FULL };
+        let top = if hi < FILTER_WIDE_HZ { HI_HZ.min(hi as f32 - FILTER_TOP_HZ) } else { HI_HZ };
+        Range { lo: LO_HZ.max(lo as f32 + FILTER_LOW_HZ), hi: top }
+    }
+
+    /// The highest tone 0 in the range, Hz.
+    pub(crate) fn top_tone(self) -> f32 {
+        self.hi - SIGNAL_HZ
+    }
+
+    /// Whether a tone 0 at `x` keeps the whole signal in the range.
+    pub(crate) fn holds(self, x: f32) -> bool {
+        (self.lo..=self.top_tone()).contains(&x)
+    }
+
+    /// Room for at least one spot.
+    fn usable(self) -> bool {
+        self.top_tone() >= self.lo
+    }
+}
+
 /// The grid AUTO searches on, Hz.
 const STEP_HZ: f32 = 10.0;
 /// A little room either side of a heard signal, Hz: inside it counts as
@@ -105,21 +154,21 @@ pub(crate) fn score(marks: &[Mark], x: f32) -> f32 {
         .sum()
 }
 
-/// The tone-0 spots AUTO may choose, Hz.
-fn spots() -> impl Iterator<Item = f32> {
-    let n = ((HI_HZ - SIGNAL_HZ - LO_HZ) / STEP_HZ).floor() as i32;
-    (0..=n).map(|i| LO_HZ + i as f32 * STEP_HZ)
+/// The tone-0 spots AUTO may choose in `r`, Hz.
+fn spots(r: Range) -> impl Iterator<Item = f32> {
+    let n = ((r.hi - SIGNAL_HZ - r.lo) / STEP_HZ).floor() as i32;
+    (0..=n).map(move |i| r.lo + i as f32 * STEP_HZ)
 }
 
-/// Where to send (tone 0, Hz): the spot with the lowest [`score`], the
-/// nearest `current` of equals; `current` itself while it is in range and
-/// within a small margin of the best. Always somewhere.
-pub(crate) fn pick(marks: &[Mark], current: f32) -> f32 {
-    let scored: Vec<(f32, f32)> = spots().map(|x| (x, score(marks, x))).collect();
+/// Where to send (tone 0, Hz) in `range` ([`FULL`] if it has no room): the
+/// spot with the lowest [`score`], the nearest `current` of equals;
+/// `current` itself while it is in range and within a small margin of the
+/// best. Always somewhere.
+pub(crate) fn pick(marks: &[Mark], current: f32, range: Range) -> f32 {
+    let range = if range.usable() { range } else { FULL };
+    let scored: Vec<(f32, f32)> = spots(range).map(|x| (x, score(marks, x))).collect();
     let best = scored.iter().map(|s| s.1).fold(f32::INFINITY, f32::min);
-    if (LO_HZ..=HI_HZ - SIGNAL_HZ).contains(&current)
-        && score(marks, current) <= best + STAY_ABS + STAY_REL * best
-    {
+    if range.holds(current) && score(marks, current) <= best + STAY_ABS + STAY_REL * best {
         return current;
     }
     scored
@@ -130,13 +179,14 @@ pub(crate) fn pick(marks: &[Mark], current: f32) -> f32 {
 }
 
 /// The scope's shading: spans of audio Hz with how busy (0 to 1) each is,
-/// in 10 Hz steps across the range, from the marks covering each (with
-/// their guard). Neighbouring steps of the same shade are merged.
-pub(crate) fn shade(marks: &[Mark]) -> Vec<(f32, f32, f32)> {
-    let n = ((HI_HZ - LO_HZ) / STEP_HZ).round() as i32;
+/// in 10 Hz steps across AUTO's `range`, from the marks covering each
+/// (with their guard). Neighbouring steps of the same shade are merged.
+pub(crate) fn shade(marks: &[Mark], range: Range) -> Vec<(f32, f32, f32)> {
+    let range = if range.usable() { range } else { FULL };
+    let n = ((range.hi - range.lo) / STEP_HZ).round() as i32;
     let mut out: Vec<(f32, f32, f32)> = Vec::new();
     for i in 0..n {
-        let (a, b) = (LO_HZ + i as f32 * STEP_HZ, LO_HZ + (i + 1) as f32 * STEP_HZ);
+        let (a, b) = (range.lo + i as f32 * STEP_HZ, range.lo + (i + 1) as f32 * STEP_HZ);
         let mid = 0.5 * (a + b);
         let s: f32 = marks
             .iter()
@@ -168,18 +218,52 @@ mod tests {
         Mark::decode(slot, hz, snr, NOW)
     }
 
+    fn pick_full(marks: &[Mark], current: f32) -> f32 {
+        pick(marks, current, FULL)
+    }
+
+    /// Decision 125: AJ3G's DUO on TX BW 100-2700 sent almost nothing at
+    /// 2760 Hz. AUTO keeps the whole signal 300 Hz under the filter's top,
+    /// and tone 0 100 Hz over its bottom; at 3500 and 4000 nothing changes.
+    #[test]
+    fn auto_keeps_inside_the_radios_transmit_filter() {
+        let r = Range::for_filter(Some((100, 2700)));
+        assert_eq!((r.lo, r.top_tone()), (200.0, 2350.0));
+        assert_eq!(Range::for_filter(Some((100, 3000))).top_tone(), 2650.0);
+        assert_eq!(Range::for_filter(Some((300, 3000))).lo, 400.0);
+        assert_eq!(Range::for_filter(Some((100, 3500))), FULL);
+        assert_eq!(Range::for_filter(Some((50, 4000))), FULL);
+        assert_eq!(Range::for_filter(None), FULL);
+        // The band busy below 2400 Hz, quiet above: on the full range AUTO
+        // goes up there, on 100-2700 it stays under 2350 Hz.
+        let busy: Vec<Mark> = (0..40).map(|i| d(200.0 + 55.0 * i as f32, NEW, 0.0)).collect();
+        assert!(pick(&busy, 1500.0, FULL) > 2400.0);
+        let p = pick(&busy, 1500.0, r);
+        assert!(r.holds(p) && p <= 2350.0, "{p}");
+        // Sitting above the cap (the filter was just read): moves in.
+        assert!(pick(&[], 2760.0, r) <= 2350.0);
+        assert_eq!(pick(&[], 1500.0, r), 1500.0);
+        // The shading covers AUTO's range only.
+        let s = shade(&[d(2500.0, NEW, 0.0), d(1000.0, NEW, 0.0)], r);
+        assert!(s.iter().all(|x| x.0 >= r.lo && x.1 <= r.hi), "{s:?}");
+        assert!(!s.is_empty());
+        // No room at all: the full range, rather than nowhere.
+        let none = Range { lo: 2000.0, hi: 1900.0 };
+        assert!(FULL.holds(pick(&[], 2000.0, none)));
+    }
+
     #[test]
     fn auto_stays_where_it_is_quiet_and_moves_when_someone_lands_on_it() {
         // Quiet where it is.
-        assert_eq!(pick(&[d(600.0, NEW, -10.0), d(1800.0, NEW, -10.0)], 1200.0), 1200.0);
+        assert_eq!(pick_full(&[d(600.0, NEW, -10.0), d(1800.0, NEW, -10.0)], 1200.0), 1200.0);
         // Nothing heard: stays put.
-        assert_eq!(pick(&[], 1500.0), 1500.0);
+        assert_eq!(pick_full(&[], 1500.0), 1500.0);
         // Someone landed on it: moves clear, to the nearest quiet spot.
-        let p = pick(&[d(1000.0, NEW, -10.0)], 1000.0);
+        let p = pick_full(&[d(1000.0, NEW, -10.0)], 1000.0);
         assert!((p - 1000.0).abs() >= NEAR_HZ + SIGNAL_HZ, "{p}");
         assert!((p - 1000.0).abs() <= NEAR_HZ + SIGNAL_HZ + 2.0 * GUARD_HZ + STEP_HZ, "{p}");
         // Out of range: moves in.
-        assert!((LO_HZ..=HI_HZ - SIGNAL_HZ).contains(&pick(&[], 2890.0)));
+        assert!((LO_HZ..=HI_HZ - SIGNAL_HZ).contains(&pick_full(&[], 2890.0)));
     }
 
     #[test]
@@ -197,11 +281,11 @@ mod tests {
                 }
             })
             .collect();
-        let p = pick(&marks, 600.0);
+        let p = pick_full(&marks, 600.0);
         assert!((1400.0..1650.0).contains(&p), "{p}");
         // Even a band full of identical signals gives a spot.
         let full: Vec<Mark> = (0..60).map(|i| d(150.0 + 50.0 * i as f32, NEW, 0.0)).collect();
-        assert!((LO_HZ..=HI_HZ).contains(&pick(&full, 1500.0)));
+        assert!((LO_HZ..=HI_HZ).contains(&pick_full(&full, 1500.0)));
     }
 
     #[test]
@@ -211,7 +295,7 @@ mod tests {
             (0..50).map(|i| d(180.0 + 55.0 * i as f32, NEW - 30, -10.0)).collect();
         let ours = 180.0 + 55.0 * 20.0 + 25.0;
         marks.push(d(ours, NEW, -10.0));
-        let p = pick(&marks, ours);
+        let p = pick_full(&marks, ours);
         assert!((p - ours).abs() > SIGNAL_HZ, "{p}");
         // The same spot is scored worse than when only old activity was
         // there.
@@ -224,9 +308,9 @@ mod tests {
         // is a little over the best, within the margin.
         let marks = [d(1300.0, NEW - 60, -20.0)];
         assert!(score(&marks, 1380.0) > 0.0);
-        assert_eq!(pick(&marks, 1380.0), 1380.0);
+        assert_eq!(pick_full(&marks, 1380.0), 1380.0);
         // A fresh strong one in the same place: we move.
-        assert_ne!(pick(&[d(1300.0, NEW, 5.0)], 1380.0), 1380.0);
+        assert_ne!(pick_full(&[d(1300.0, NEW, 5.0)], 1380.0), 1380.0);
     }
 
     #[test]
@@ -250,7 +334,7 @@ mod tests {
     #[test]
     fn shading_is_darker_where_busier() {
         let marks = [d(1000.0, NEW, 10.0), d(1500.0, NEW - 60, -10.0)];
-        let s = shade(&marks);
+        let s = shade(&marks, FULL);
         let at = |hz: f32| s.iter().find(|x| x.0 <= hz && hz < x.1).map_or(0.0, |x| x.2);
         assert!(at(1020.0) > at(1520.0), "{s:?}");
         assert!(at(1520.0) > 0.0);
@@ -263,8 +347,8 @@ mod tests {
         // Energy at 1200 to 1260 Hz that nothing decoded, 20 dB over the
         // floor: AUTO moves off 1220 Hz.
         let m = [Mark::energy(NEW, 1200.0, 1260.0, 20.0, NOW)];
-        let p = pick(&m, 1220.0);
+        let p = pick_full(&m, 1220.0);
         assert!(!(1145.0..1265.0).contains(&p), "{p}");
-        assert_eq!(pick(&m, 1600.0), 1600.0);
+        assert_eq!(pick_full(&m, 1600.0), 1600.0);
     }
 }

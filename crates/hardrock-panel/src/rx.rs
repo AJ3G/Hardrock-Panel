@@ -481,7 +481,7 @@ pub(crate) struct Rx {
     /// receiver, or the offset bar), for the readouts.
     last_tx: f64,
     pub(crate) tx_plan: Option<scope::TxAt>,
-    split: SplitState,
+    pub(crate) split: SplitState,
     /// The mode and filter width the DUO's filter was last set for.
     duo_sent: Option<(Mode, u32)>,
     /// The receiver's mode and the DUO's, kept as one (decision 116).
@@ -1547,6 +1547,11 @@ pub(crate) struct SplitState {
     /// The panel put the radio in split (and so may take it out).
     made: bool,
     last: Option<(Vec<Frame>, Instant)>,
+    /// The VFO B the TX window's FT8 overs go from in split (decision 125):
+    /// while it is set, VFO B is the TX window's, which moves it to keep
+    /// the tone in the middle of the radio's transmit filter, and it isn't
+    /// pulled back to the receiver here.
+    pub(crate) tx_window_b: Option<u64>,
 }
 
 impl SplitState {
@@ -1568,7 +1573,9 @@ impl SplitState {
         let rx = rx_hz.round().max(0.0) as u64;
         let mut want = Vec::new();
         if on && rx != dial {
-            if r.freq_b_hz != Some(rx) {
+            // SAFETY INTERLOCK (docs/safety-interlocks.md, #7): VFO B left to
+            // the TX window while its overs go from it (decision 125).
+            if r.freq_b_hz != Some(rx) && self.tx_window_b.is_none() {
                 want.extend(proto.set_freq(Vfo::B, rx));
             }
             if r.split != Some(true) {
@@ -1835,6 +1842,24 @@ mod tests {
         assert_eq!(text(&f), ["SP0;"]);
         let r = duo(14_200_000, Some(14_212_500), Some(false));
         assert!(s.frames(&*proto, &r, 14_200_000.0, true).is_empty());
+    }
+
+    /// Decision 125: while the TX window's FT8 overs go from VFO B in split,
+    /// VFO B is the TX window's (it moves it so the tone sits mid filter),
+    /// and is not pulled back to the receiver; split is still kept on.
+    #[test]
+    fn vfo_b_is_left_to_the_tx_window_while_its_overs_use_it() {
+        let proto = rigcat::RigModel::FdmDuo.protocol();
+        let mut s = SplitState { tx_window_b: Some(14_213_500), ..Default::default() };
+        let r = duo(14_200_000, Some(14_213_500), Some(true));
+        assert!(s.frames(&*proto, &r, 14_212_500.0, true).is_empty());
+        // Split off: turned on, VFO B left alone.
+        let r = duo(14_200_000, Some(14_213_500), Some(false));
+        assert_eq!(text(&s.frames(&*proto, &r, 14_212_500.0, true)), ["SP1;"]);
+        // The TX window done with it: back to the receiver.
+        s.tx_window_b = None;
+        let r = duo(14_200_000, Some(14_213_500), Some(true));
+        assert_eq!(text(&s.frames(&*proto, &r, 14_212_500.0, true)), ["FB00014212500;"]);
     }
 
     #[test]

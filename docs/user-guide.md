@@ -925,15 +925,25 @@ transcript says "Left K1ABC for W9XYZ". Click a queued call to drop it. Picking 
   minutes, others for 2) and any signal the receiver heard there that
   nothing decoded, the newest slot and stronger signals counting most. The
   scope shades the band grey, darker where busier; **MANUAL** follows
-  the bar and a row you click; **HOLD** moves only when you drag the bar or
-  type the figure. Dragging the bar on AUTO switches it to MANUAL. The bar
-  can't move while you transmit.
-- **Split**, as WSJT-X's Rig split: with the radio in split and VFO B where
-  the offset can't be sent from, the panel moves VFO B so the tone goes out
+  the bar, a row you click and a figure you type in TX AUDIO (the bar moves
+  to it and stays until you drag it or click a row); **HOLD** moves only when
+  you drag the bar or type the figure. Dragging the bar on AUTO switches it
+  to MANUAL. The bar can't move while you transmit.
+- **The radio's transmit filter** (menu 35 TX BW, under RADIO > TX AUDIO):
+  out of split, AUTO keeps your whole signal at least 300 Hz under its top
+  edge and 100 Hz over its bottom edge, so on 100-2700 it goes no higher
+  than 2 350 Hz (on 3500 and 4000 nothing changes). A tone set by hand past
+  that gets a yellow line naming menu 35: the radio sends little power
+  there. Widening TX BW to 100-3500 is the other cure.
+- **Split**, as WSJT-X's Rig split: with the radio in split and the tone from
+  VFO B outside 1 000 to 2 000 Hz, the panel moves VFO B so the tone goes out
   near 1 500 Hz (VFO B = the receive dial plus the offset less 1 500 Hz, in
-  500 Hz steps; mirrored on LSB) and your signal still lands on the bar. The
+  500 Hz steps; mirrored on LSB) and your signal still lands on the bar, so
+  in split AUTO uses the whole waterfall and the tone stays in the middle of
+  the radio's filter. TX follows RX then leaves VFO B to the TX window. The
   over goes once the radio reads VFO B back there, and only if it still reads
-  it there straight before keying; the panel log says each move.
+  it there straight before keying; VFO B never moves while you transmit, and
+  the panel log says each move.
 - The **TX watchdog** stops a run after 6 minutes with no reply and no touch,
   and a station is given up after 10 unanswered calls.
 - **Compound calls** (EK/RX3DPK, PJ4/K1ABC, W1AW/QRP) work as in WSJT-X: the

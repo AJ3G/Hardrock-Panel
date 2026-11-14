@@ -278,6 +278,10 @@ pub(crate) struct TxOut {
     pub busy: Vec<(f32, f32, f32)>,
     /// The QSO under way, for GLOBE: call, grid, keyed now.
     pub strobe: Option<(String, Option<String>, bool)>,
+    /// In split, the VFO B the FT8 overs go from (where it is, or where it
+    /// is being moved to), so TX follows RX leaves it there rather than
+    /// pulling it back to the receiver (decision 125).
+    pub split_b: Option<u64>,
 }
 
 /// Everything about the station the TX engine looks at each frame.
@@ -380,6 +384,14 @@ pub(crate) struct Tx {
     /// for another (decision 114): its end is not counted against the new
     /// one.
     left_slot: Option<i64>,
+    /// The TX audio as this engine last left it, so a value typed, dragged
+    /// or clicked in the window since is seen and kept, and the bar moved
+    /// to it, rather than the bar's old place read back over it (decision
+    /// 126).
+    audio_seen: Option<f32>,
+    /// The tone is outside what the radio's transmit filter (menu 35 TX BW)
+    /// passes cleanly: what to say (decision 125).
+    pub filter_note: Option<String>,
 }
 
 impl Default for Tx {
@@ -418,6 +430,8 @@ impl Default for Tx {
             was_enabled: false,
             halted: false,
             split_sent: None,
+            audio_seen: None,
+            filter_note: None,
             left_slot: None,
         }
     }
@@ -817,8 +831,13 @@ impl Tx {
             if env.bar_moved && s.freq == FreqMode::Auto {
                 s.freq = FreqMode::Manual;
             }
+            // A value typed in the window (or a decode clicked) since last
+            // frame stands, and the bar goes to it below; otherwise the bar
+            // is read, as a drag or a retune moved it (decision 126).
+            let typed = self.audio_seen.is_some_and(|a| a != s.audio_hz) && !env.bar_moved;
             if let Some(b) = env.bar_off.filter(|_| self.over.is_none())
                 && s.freq != FreqMode::Auto
+                && !typed
                 && (100.0..=3000.0).contains(&b)
             {
                 s.audio_hz = b as f32;
@@ -851,11 +870,13 @@ impl Tx {
                         .map(|(t, a, b, db)| freq::Mark::energy(t, a, b, db, now)),
                 )
                 .collect();
-            out.busy = freq::shade(&marks);
+            // Kept inside the radio's transmit filter (decision 125).
+            let range = auto_range(env.rig, env.rx_dial);
+            out.busy = freq::shade(&marks, range);
             // Only between overs, and not in the middle of an exchange,
             // so the station we work finds us where they answered.
             if self.over.is_none() && !(self.qso.busy() && self.auto_hz.is_some()) {
-                let p = freq::pick(&marks, self.auto_hz.unwrap_or(s.audio_hz));
+                let p = freq::pick(&marks, self.auto_hz.unwrap_or(s.audio_hz), range);
                 self.auto_hz = Some(p);
                 s.audio_hz = p;
             }
@@ -869,6 +890,17 @@ impl Tx {
         {
             out.set_bar_off = Some(s.audio_hz as f64);
         }
+        self.audio_seen = (s.mode == TxMode::Ft8).then_some(s.audio_hz);
+        let plan = (s.mode == TxMode::Ft8).then(|| self.tx_audio(s, &env)).flatten();
+        self.filter_note = plan.and_then(|p| filter_note(env.rig, p));
+        // SAFETY INTERLOCK (docs/safety-interlocks.md, #7): VFO B is the TX
+        // window's while it sends FT8 in split; it moves it only between
+        // overs (`follow_split`) and keys only on it as read back.
+        out.split_b = match plan.filter(|_| self.enabled) {
+            Some(AudioPlan::MoveB { dial, .. }) => Some(dial),
+            Some(AudioPlan::Go { split_dial, .. }) => split_dial,
+            None => None,
+        };
         // GLOBE's strobe.
         if s.mode == TxMode::Ft8
             && let Some(c) = self.qso.dx_call().filter(|_| self.qso.busy() || self.on_air())
@@ -1238,6 +1270,59 @@ impl Tx {
 /// that dial.
 const AUDIO_OK: std::ops::RangeInclusive<f64> = 100.0..=2950.0;
 
+/// In split, VFO B is left where it is while the tone from it stays in the
+/// flat middle of the radio's transmit filter, Hz; outside, VFO B is moved
+/// so the tone is 1500 Hz give or take 250 (decision 125: on AJ3G's DUO a
+/// tone near the filter's top edge went out with almost no power).
+const SPLIT_KEEP: std::ops::RangeInclusive<f64> = 1000.0..=2000.0;
+
+/// AUTO's range (decision 125): out of split, as an offset from the
+/// receive dial `rx`, the audio menu 35 TX BW passes cleanly from VFO A
+/// ([`freq::Range::for_filter`]); the full range when TX BW isn't known,
+/// and in split, where VFO B is moved to keep the tone in the middle.
+pub(crate) fn auto_range(r: Option<&RigStatus>, rx: Option<(f64, bool)>) -> freq::Range {
+    let Some(r) = r else { return freq::FULL };
+    if r.split == Some(true) {
+        return freq::FULL;
+    }
+    let cap = freq::Range::for_filter(rigcat::elad::tx_bw_hz(r));
+    if cap == freq::FULL {
+        return cap;
+    }
+    // The tone is the offset plus this.
+    let shift = match (rx, r.freq_hz) {
+        (Some(rx), Some(a)) => audio_from(rx, a as f64, 0.0) as f32,
+        _ => 0.0,
+    };
+    let lo = (cap.lo - shift).max(freq::LO_HZ);
+    let hi = (cap.hi - shift).min(freq::HI_HZ);
+    freq::Range { lo, hi }
+}
+
+/// What to say when the over's tone is outside what menu 35 TX BW passes
+/// cleanly (decision 125): set by hand on MANUAL or HOLD, or AUTO held in
+/// the middle of an exchange.
+pub(crate) fn filter_note(r: Option<&RigStatus>, plan: AudioPlan) -> Option<String> {
+    let bw = rigcat::elad::tx_bw_hz(r?)?;
+    let cap = freq::Range::for_filter(Some(bw));
+    let audio = match plan {
+        AudioPlan::Go { audio, .. } | AudioPlan::MoveB { audio, .. } => audio,
+    };
+    if cap == freq::FULL || cap.holds(audio) {
+        return None;
+    }
+    let (lo, hi) = bw;
+    let side = if audio > cap.top_tone() {
+        format!("above {:.0} Hz", cap.top_tone())
+    } else {
+        format!("below {:.0} Hz", cap.lo)
+    };
+    Some(format!(
+        "The {audio:.0} Hz tone is {side}, near the edge of the radio's transmit filter (menu 35 \
+         TX BW {lo}-{hi}): it may go out with little power. Move it in, or widen TX BW."
+    ))
+}
+
 /// Split (decision 106): where the tone goes once VFO B is moved for it,
 /// Hz, as WSJT-X's Rig split keeps it in the middle of the radio's audio.
 pub(crate) const SPLIT_AUDIO_HZ: f64 = 1500.0;
@@ -1278,9 +1363,13 @@ pub(crate) fn split_dial(rx: (f64, bool), off: f64) -> (u64, f32) {
 /// How an FT8 over `off` Hz from the receive dial `rx` goes on the radio
 /// `r`. Out of split, from VFO A as before, or not at all if the tone would
 /// leave [`AUDIO_OK`]. In split, receiving on A, from VFO B: where it is
-/// while the tone stays in [`AUDIO_OK`] (TX follows RX, or the operator, put
-/// it there), else moved by [`split_dial`]. Split receiving on B transmits
-/// from A, which the panel doesn't move: as before.
+/// while the tone stays in [`SPLIT_KEEP`] (TX follows RX, the operator, or
+/// an earlier move put it there), else moved by [`split_dial`] (decision
+/// 125). Split receiving on B transmits from A, which the panel doesn't
+/// move: as before.
+///
+/// SAFETY INTERLOCK (docs/safety-interlocks.md, #7): in split the over is
+/// keyed only on the VFO B returned in `Go`, as read back.
 pub(crate) fn audio_plan(r: &RigStatus, rx: (f64, bool), off: f64) -> Option<AudioPlan> {
     let ok = |a: f64| AUDIO_OK.contains(&a).then_some(a.round() as f32);
     if r.split != Some(true) {
@@ -1290,8 +1379,9 @@ pub(crate) fn audio_plan(r: &RigStatus, rx: (f64, bool), off: f64) -> Option<Aud
     if r.vfo == Some(1) {
         return None;
     }
+    let keep = |a: f64| SPLIT_KEEP.contains(&a).then_some(a.round() as f32);
     if let Some(b) = r.freq_b_hz.filter(|&b| b > 0)
-        && let Some(audio) = ok(audio_from(rx, b as f64, off))
+        && let Some(audio) = keep(audio_from(rx, b as f64, off))
     {
         return Some(AudioPlan::Go { audio, split_dial: Some(b) });
     }
@@ -1588,6 +1678,44 @@ mod round3_tests {
         assert_eq!(o.set_bar_off, Some(900.0));
     }
 
+    /// Decision 126 (AJ3G: "In Manual make it so I can also type in a
+    /// frequency"): a value typed (or a decode clicked) on MANUAL moves the
+    /// bar there and stays until the bar is dragged; the bar is otherwise
+    /// followed as before.
+    #[test]
+    fn a_typed_tx_audio_on_manual_moves_the_bar_and_stays() {
+        let mut tx = Tx::default();
+        let mut s = TxSettings {
+            mode: TxMode::Ft8,
+            freq: FreqMode::Manual,
+            audio_hz: 1200.0,
+            ..Default::default()
+        };
+        // Entering FT8: the bar is placed, not read.
+        assert_eq!(frame(&mut tx, &mut s, Some(800.0), false, false).set_bar_off, Some(1200.0));
+        assert_eq!(frame(&mut tx, &mut s, Some(1200.0), false, false).set_bar_off, None);
+        // The bar moved (a drag, or the receiver retuned): followed.
+        frame(&mut tx, &mut s, Some(1350.0), true, false);
+        assert_eq!(s.audio_hz, 1350.0);
+        frame(&mut tx, &mut s, Some(1400.0), false, false);
+        assert_eq!(s.audio_hz, 1400.0);
+        // Typed: kept, and the bar sent there.
+        s.audio_hz = 2100.0;
+        let o = frame(&mut tx, &mut s, Some(1400.0), false, false);
+        assert_eq!((s.audio_hz, o.set_bar_off), (2100.0, Some(2100.0)));
+        let o = frame(&mut tx, &mut s, Some(2100.0), false, false);
+        assert_eq!((s.audio_hz, o.set_bar_off), (2100.0, None));
+        // Typed and dragged in the same frame: the drag wins.
+        s.audio_hz = 900.0;
+        frame(&mut tx, &mut s, Some(1600.0), true, false);
+        assert_eq!(s.audio_hz, 1600.0);
+        // HOLD keeps a typed value the same way.
+        s.freq = FreqMode::Hold;
+        s.audio_hz = 1000.0;
+        let o = frame(&mut tx, &mut s, Some(1600.0), false, false);
+        assert_eq!((s.audio_hz, o.set_bar_off), (1000.0, Some(1000.0)));
+    }
+
     /// SAFETY INTERLOCK #13 (decision 116): no over while SCOPE's receiver
     /// and the radio disagree on the mode, or are not on a sideband.
     #[test]
@@ -1766,13 +1894,20 @@ mod split_tests {
             audio_plan(&r, rx, 2526.0),
             Some(AudioPlan::Go { audio: 1526.0, split_dial: Some(14_075_000) })
         );
-        // VFO B already somewhere the tone can go from (TX follows RX put it
-        // on the receiver): left there, so the two never pull against each
-        // other.
+        // VFO B already somewhere the tone sits in the middle of the
+        // radio's transmit filter (TX follows RX put it on the receiver):
+        // left there.
         let r = rig(14_074_000, Some(14_074_000), Some(true));
         assert_eq!(
+            audio_plan(&r, rx, 1400.0),
+            Some(AudioPlan::Go { audio: 1400.0, split_dial: Some(14_074_000) })
+        );
+        // Decision 125: but a tone near the filter's edge from there is not
+        // sent; VFO B is moved so it sits mid filter (TX follows RX leaves
+        // it to the TX window then, `SplitState::tx_window_b`).
+        assert_eq!(
             audio_plan(&r, rx, 2526.0),
-            Some(AudioPlan::Go { audio: 2526.0, split_dial: Some(14_074_000) })
+            Some(AudioPlan::MoveB { dial: 14_075_000, audio: 1526.0 })
         );
         // LSB, VFO B elsewhere.
         let r = rig(7_074_000, Some(7_000_000), Some(true));
@@ -1784,6 +1919,86 @@ mod split_tests {
         let mut r = rig(14_074_000, Some(14_250_000), Some(true));
         r.vfo = Some(1);
         assert_eq!(audio_plan(&r, rx, 2526.0), None);
+    }
+
+    /// Decision 125: in split, VFO B stays put while the tone from it is in
+    /// 1000 to 2000 Hz, and is moved otherwise, so AUTO can use the whole
+    /// waterfall and the tone is always mid filter. A move always lands the
+    /// tone inside that window, so it is never moved again for nothing.
+    #[test]
+    fn in_split_the_tone_is_kept_in_the_middle_of_the_transmit_filter() {
+        for (rx, b) in [((14_074_000.0, false), 14_074_000), ((7_074_000.0, true), 7_074_000)] {
+            let r = rig(rx.0 as u64, Some(b), Some(true));
+            for off in [1000.0, 1500.0, 2000.0] {
+                assert!(matches!(audio_plan(&r, rx, off), Some(AudioPlan::Go { .. })), "{off}");
+            }
+            for off in [200.0, 990.0, 2010.0, 2760.0, 2900.0] {
+                let Some(AudioPlan::MoveB { dial, audio }) = audio_plan(&r, rx, off) else {
+                    panic!("{off}: not moved");
+                };
+                // Read back there: goes, on that VFO B, mid filter.
+                let moved = rig(rx.0 as u64, Some(dial), Some(true));
+                assert_eq!(
+                    audio_plan(&moved, rx, off),
+                    Some(AudioPlan::Go { audio, split_dial: Some(dial) })
+                );
+                assert!((1250.0..=1750.0).contains(&audio), "{off}: {audio}");
+            }
+        }
+    }
+
+    fn with_tb(mut r: RigStatus, body: &str) -> RigStatus {
+        r.values.insert("TB".into(), body.into());
+        r
+    }
+
+    /// Decision 125: out of split AUTO keeps under the radio's transmit
+    /// filter's top as read (TX BW 100-2700: tone 0 at most 2350 Hz), as an
+    /// offset from the receive dial; in split, or with TX BW unread or 3500
+    /// and wider, it has the whole range.
+    #[test]
+    fn auto_range_follows_tx_bw_out_of_split() {
+        let rx = Some((14_074_000.0, false));
+        let r = with_tb(rig(14_074_000, None, Some(false)), "001");
+        let a = auto_range(Some(&r), rx);
+        assert_eq!((a.lo, a.top_tone()), (200.0, 2350.0));
+        // The receiver 300 Hz above VFO A: the tone is the offset plus 300.
+        let a = auto_range(Some(&r), Some((14_074_300.0, false)));
+        assert_eq!(a.top_tone(), 2050.0);
+        // LSB, the receiver 300 Hz below VFO A: the same.
+        let l = with_tb(rig(7_074_000, None, Some(false)), "001");
+        assert_eq!(auto_range(Some(&l), Some((7_073_700.0, true))).top_tone(), 2050.0);
+        assert_eq!(auto_range(Some(&with_tb(r.clone(), "003")), rx), freq::FULL);
+        // 300-4000: the top as before, the bottom kept 100 Hz over 300.
+        assert_eq!(
+            auto_range(Some(&with_tb(r.clone(), "012")), rx),
+            freq::Range { lo: 400.0, hi: freq::HI_HZ }
+        );
+        assert_eq!(auto_range(Some(&rig(14_074_000, None, Some(false))), rx), freq::FULL);
+        assert_eq!(auto_range(Some(&with_tb(r.clone(), "?")), rx), freq::FULL);
+        assert_eq!(auto_range(None, rx), freq::FULL);
+        let sp = with_tb(rig(14_074_000, Some(14_074_000), Some(true)), "001");
+        assert_eq!(auto_range(Some(&sp), rx), freq::FULL);
+        // TX BW 100-3000 caps at 2650.
+        assert_eq!(auto_range(Some(&with_tb(r, "002")), rx).top_tone(), 2650.0);
+    }
+
+    /// Decision 125: a tone set by hand past what TX BW passes cleanly is
+    /// named, with menu 35, in the window's warning colour.
+    #[test]
+    fn a_tone_past_the_transmit_filter_is_warned_of() {
+        let r = with_tb(rig(14_074_000, None, Some(false)), "001");
+        let go = |a: f32| AudioPlan::Go { audio: a, split_dial: None };
+        let n = filter_note(Some(&r), go(2760.0)).unwrap();
+        assert!(n.contains("menu 35") && n.contains("100-2700") && n.contains("2350"), "{n}");
+        assert!(filter_note(Some(&r), go(2350.0)).is_none());
+        assert!(filter_note(Some(&r), go(1500.0)).is_none());
+        // Low edge: 300-2700 wants tone 0 from 400 Hz.
+        assert!(filter_note(Some(&with_tb(r.clone(), "009")), go(350.0)).unwrap().contains("below 400"));
+        // Wide, or not read: nothing to say.
+        assert!(filter_note(Some(&with_tb(r.clone(), "003")), go(2760.0)).is_none());
+        assert!(filter_note(Some(&rig(14_074_000, None, None)), go(2760.0)).is_none());
+        assert!(filter_note(None, go(2760.0)).is_none());
     }
 }
 
