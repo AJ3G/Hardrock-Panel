@@ -14,7 +14,12 @@
 //! | api.weather.gov | Weather alerts at the station (United States only) | 15 min |
 //! | retrieve.pskreporter.info | Who heard the station's callsign in the last hour (PSK REPORTER on) | 5 min |
 //! | retrieve.pskreporter.info | Everyone's reports on GLOBE's band in the last 15 minutes (PSK BAND on) | 15 min |
+//! | retrieve.pskreporter.info | Everyone's reports in the station's Maidenhead field (its grid's first two characters), every band, the last 15 minutes (PSK AREA on, grid known) | 15 min |
 //! | wsprnet.org and db1.wspr.live | Who heard the station's WSPR in the last hour (WSPR HEARD ME on) | 2 min beaconing WSPR, else 5 |
+//!
+//! PSK Reporter asks for few queries: no two of its three requests go out
+//! within a minute of each other, and PSK AREA is never asked more often
+//! than every 15 minutes, its window opened and shut or not.
 //!
 //! Each is parsed here by a plain function, so the tests read sample answers
 //! and the container never calls out. Nothing is ever sent but the request.
@@ -129,6 +134,11 @@ pub(crate) struct Fetched {
     /// minutes, as paths from each receiver to its sender (PSK BAND).
     pub band_paths: Vec<Reception>,
     pub band_for: Option<(u64, u64)>,
+    /// PSK Reporter: everyone's reports in `area_for`'s Maidenhead field,
+    /// every band, the last 15 minutes, as paths from each receiver to its
+    /// sender (PSK AREA, decision 129).
+    pub area_paths: Vec<Reception>,
+    pub area_for: Option<String>,
     /// WSPR HEARD ME: who heard the station's WSPR, the whole last hour, as
     /// WSPRnet and wspr.live each last answered (a site that fails keeps
     /// its last answer). `wspr::merge` makes them one list.
@@ -172,6 +182,9 @@ pub(crate) struct Ask {
     /// PSK BAND: the band's edges, Hz, to ask PSK Reporter about; `None` is
     /// off.
     pub pskr_band: Option<(u64, u64)>,
+    /// PSK AREA: the Maidenhead field ("FN") to ask PSK Reporter about on
+    /// every band; `None` is off (or no grid, or the window shut).
+    pub pskr_area: Option<String>,
     /// WSPR HEARD ME: ask WSPRnet and wspr.live who heard the call.
     pub wspr: bool,
     /// Beaconing WSPR: WSPR HEARD ME every 2 minutes, not 5.
@@ -189,6 +202,7 @@ impl Ask {
             pskr: false,
             clouds: false,
             pskr_band: None,
+            pskr_area: None,
             wspr: false,
             wspr_fast: false,
             open: false,
@@ -298,12 +312,22 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
         // asks for few queries: one band, every 15 minutes, the window it
         // asks for.
         ("PSKBAND", 15),
+        // Every band near the station (PSK AREA): as big an answer, as
+        // seldom. Its first ask waits two minutes, off the minute the
+        // others first go out in.
+        ("PSKAREA", 15),
         // N0NBH updates hourly and asks that it be fetched no more often.
         ("HAMQSL", 60),
     ]
     .into_iter()
-    .map(|(name, min)| Due { name, every: Duration::from_secs(min * 60), next: now })
+    .map(|(name, min)| {
+        let first = if name == "PSKAREA" { now + Duration::from_secs(120) } else { now };
+        Due { name, every: Duration::from_secs(min * 60), next: first }
+    })
     .collect();
+    // When PSK Reporter was last asked anything, to keep its requests a
+    // minute apart.
+    let mut pskr_last: Option<Instant> = None;
     let mut slow_swpc: Option<Instant> = None;
     let mut last_ask: Option<Ask> = None;
     while !stop.load(Ordering::Relaxed) {
@@ -355,6 +379,15 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
             if !a.open && !matches!(d.name, "PSKR" | "WSPR") {
                 continue;
             }
+            let psk = matches!(d.name, "PSKR" | "PSKBAND" | "PSKAREA");
+            if psk && let Some(gap) = pskr_wait(pskr_last, Instant::now()) {
+                d.next = Instant::now() + gap;
+                continue;
+            }
+            // PSK AREA, turned off, keeps when it was last asked: back on
+            // (the window opened again, another field) it waits out the 15
+            // minutes from then.
+            let prev = d.next;
             d.next = Instant::now() + d.every;
             let r = match d.name {
                 "SWPC" => {
@@ -431,12 +464,29 @@ fn run(stop: Arc<AtomicBool>, data: Arc<Mutex<Fetched>>, ask: Arc<Mutex<Ask>>) {
                         })
                     })
                 }
+                "PSKAREA" if a.pskr_area.is_some() => {
+                    let area = a.pskr_area.clone().expect("checked");
+                    get_text(&ag, &pskr_area_url(&area)).map(|t| parse_pskr_area(&t)).map(|r| {
+                        tracing::info!("globe: PSK Reporter: {} reports in {area}", r.len());
+                        with(&data, |f| {
+                            f.area_paths = r;
+                            f.area_for = Some(area);
+                        })
+                    })
+                }
+                "PSKAREA" => {
+                    d.next = prev;
+                    continue;
+                }
                 // Turned off: asked again as soon as it is turned on.
                 _ => {
                     d.next = Instant::now();
                     continue;
                 }
             };
+            if psk {
+                pskr_last = Some(Instant::now());
+            }
             if let Err(e) = &r {
                 tracing::info!("globe: {} fetch failed: {e}", d.name);
             }
@@ -821,9 +871,45 @@ fn pskr_band_url((lo, hi): (u64, u64)) -> String {
     )
 }
 
+/// How long to wait before asking PSK Reporter again, if it was asked less
+/// than a minute ago.
+fn pskr_wait(last: Option<Instant>, now: Instant) -> Option<Duration> {
+    const GAP: Duration = Duration::from_secs(60);
+    let since = now.checked_duration_since(last?)?;
+    (since < GAP).then(|| GAP - since)
+}
+
+/// The Maidenhead field PSK AREA asks about: the grid's first two letters,
+/// upper case ("FN" from "FN20xr"), or `None` for no usable grid.
+pub(crate) fn pskr_area_of(grid: &str) -> Option<String> {
+    let f: String = grid.trim().chars().take(2).collect::<String>().to_ascii_uppercase();
+    (f.len() == 2 && f.chars().all(|c| ('A'..='R').contains(&c))).then_some(f)
+}
+
+/// Everyone's reports in the Maidenhead field `area`, every band, the last
+/// 15 minutes: `modify=grid` makes `callsign` a locator prefix, so one
+/// request covers every station sending or receiving near AJ3G. Only read:
+/// nothing is ever sent.
+fn pskr_area_url(area: &str) -> String {
+    format!(
+        "https://retrieve.pskreporter.info/query?callsign={area}&modify=grid&flowStartSeconds=-900&rronly=1&noactive=1"
+    )
+}
+
+/// PSK AREA's answer, read as PSK BAND's is.
+pub(crate) fn parse_pskr_area(t: &str) -> Vec<Reception> {
+    parse_pskr_paths(t, Source::PskArea)
+}
+
 /// PSK Reporter's band-wide answer: each report with both locators, as a
 /// path from its receiver to its sender (PSK BAND).
 pub(crate) fn parse_pskr_band(t: &str) -> Vec<Reception> {
+    parse_pskr_paths(t, Source::PskBand)
+}
+
+/// Each report with both locators, as a path from its receiver to its
+/// sender, tagged `src`.
+fn parse_pskr_paths(t: &str, src: Source) -> Vec<Reception> {
     let place = |grid: &str| {
         let g: String = grid.chars().take(if grid.len() >= 6 { 6 } else { 4 }).collect();
         let pos = grid_to_latlon(&g)
@@ -845,7 +931,7 @@ pub(crate) fn parse_pskr_band(t: &str) -> Vec<Reception> {
                 mode: attr(&tag, "mode").unwrap_or("").to_string(),
                 snr: attr(&tag, "sNR").and_then(|s| s.parse().ok()),
                 utc: attr(&tag, "flowStartSeconds")?.parse().ok()?,
-                src: Source::PskBand,
+                src,
                 row: None,
                 from: Some(from),
             })
@@ -1120,6 +1206,43 @@ mod tests {
         let from = r[0].from.expect("the receiver's place");
         assert!((from.lat - grid_to_latlon("IM98wk").unwrap().lat).abs() < 1e-9);
         assert!(pskr_band_url((14_000_000, 14_350_000)).ends_with("&frange=14000000-14350000"));
+    }
+
+    #[test]
+    fn psk_area_reports_every_band_near_the_station_as_paths() {
+        let x = r#"<receptionReports>
+            <receptionReport receiverCallsign="W1AW" receiverLocator="FN31pr" senderCallsign="DL1ABC" senderLocator="JO62"
+              frequency="7074500" flowStartSeconds="1792681200" mode="FT8" sNR="-8" />
+            <receptionReport receiverCallsign="EA5XYZ" receiverLocator="IM98wk" senderCallsign="K2ABC" senderLocator="FN20"
+              frequency="28074900" flowStartSeconds="1792681260" mode="FT8" sNR="-15" />
+            <receptionReport receiverCallsign="VE3XYZ" receiverLocator="FN03" senderCallsign="K3ABC" senderLocator="FN10"
+              frequency="1840100" flowStartSeconds="1792681300" mode="FT8" />
+            <receptionReport receiverCallsign="NOGRID" senderCallsign="K1ABC" senderLocator="FN42" frequency="14075123" flowStartSeconds="1792681200" mode="FT8" />
+            </receptionReports>"#;
+        let r = parse_pskr_area(x);
+        assert_eq!(r.len(), 3);
+        assert!(r.iter().all(|r| r.src == Source::PskArea && r.from.is_some()));
+        assert_eq!(
+            r.iter().map(|r| r.band()).collect::<Vec<_>>(),
+            [Some("40"), Some("10"), Some("160")]
+        );
+        assert_eq!((r[0].call.as_str(), r[0].snr), ("DL1ABC", Some(-8.0)));
+        assert_eq!(r[2].snr, None);
+        assert_eq!(pskr_area_of("fn20xr").as_deref(), Some("FN"));
+        assert_eq!(pskr_area_of(" "), None);
+        assert_eq!(pskr_area_of("Z9"), None);
+        assert_eq!(
+            pskr_area_url("FN"),
+            "https://retrieve.pskreporter.info/query?callsign=FN&modify=grid&flowStartSeconds=-900&rronly=1&noactive=1"
+        );
+    }
+
+    #[test]
+    fn psk_reporter_is_never_asked_twice_within_a_minute() {
+        let t = Instant::now();
+        assert_eq!(pskr_wait(None, t), None);
+        assert_eq!(pskr_wait(Some(t), t + Duration::from_secs(20)), Some(Duration::from_secs(40)));
+        assert_eq!(pskr_wait(Some(t), t + Duration::from_secs(60)), None);
     }
 
     #[test]

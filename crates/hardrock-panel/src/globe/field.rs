@@ -32,6 +32,11 @@ pub(crate) enum Source {
     /// minutes, between other stations. They feed PROP, PATHS, REACH, BEST
     /// and HEARD ≥, not the station list or the map's dots.
     PskBand,
+    /// PSK Reporter: everyone's reports in AJ3G's Maidenhead field (the
+    /// first two characters of his grid), every band, the last 15 minutes
+    /// (PSK AREA, decision 129). Like PSK BAND's, paths between other
+    /// stations, for PROP, PATHS, REACH, BEST and BANDS OPEN on every band.
+    PskArea,
     /// WSPR HEARD ME: the WSPR reports of AJ3G's call in the last hour, from
     /// WSPRnet and wspr.live (WSPRnet's database), with PSK Reporter's WSPR
     /// receptions, merged (decision 93).
@@ -45,6 +50,7 @@ impl Source {
             Source::Skim => "SKIM",
             Source::PskReporter => "PSK REPORTER",
             Source::PskBand => "PSK BAND",
+            Source::PskArea => "PSK AREA",
             Source::WsprHeard => "WSPR",
         }
     }
@@ -53,7 +59,7 @@ impl Source {
     /// nothing more precise is known.
     pub(crate) fn label_site(self) -> &'static str {
         match self {
-            Source::PskReporter | Source::PskBand => "PSK Reporter",
+            Source::PskReporter | Source::PskBand | Source::PskArea => "PSK Reporter",
             Source::WsprHeard => "WSPRnet / wspr.live",
             s => s.label(),
         }
@@ -80,8 +86,9 @@ pub(crate) struct Reception {
     pub src: Source,
     /// Its DECODE line, for SHOW IN DECODE.
     pub row: Option<u64>,
-    /// Where the path starts: `None` is the station itself; PSK BAND's
-    /// reports, between two other stations, carry their receiver's place.
+    /// Where the path starts: `None` is the station itself; PSK BAND's and
+    /// PSK AREA's reports, between two other stations, carry their
+    /// receiver's place.
     pub from: Option<LatLon>,
 }
 

@@ -1,8 +1,8 @@
 //! BANDS OPEN and the BANDS window (decision 127, AJ3G 14 Nov 2026, from
 //! SDRoxide's globe overlay and its BANDS window).
 //!
-//! BANDS OPEN is a small box over the map: one bar a band heard, how much
-//! of the world its paths reach, read from the same field as REACH in BAND
+//! BANDS OPEN is a small box over the map: one bar a band, 160 m to 10 m
+//! and 6 m always (decision 129), how much of the world its paths reach, read from the same field as REACH in BAND
 //! CONDITIONS, so it fades as the paths age. The BANDS window puts the
 //! whole picture in one place: HamQSL's word beside what was heard, the IBP
 //! beacon on each band now, and the meteor showers active today.
@@ -37,10 +37,21 @@ pub(super) fn pct(v: f64) -> String {
     }
 }
 
-/// The bands with reach, 160 m at the top: (band, reach).
-pub(super) fn open_rows(g: &Globe) -> Vec<(&'static str, f64)> {
-    let mut rows: Vec<(&'static str, f64)> =
-        g.fields.iter().filter(|f| f.reach > 0.0).map(|f| (f.band, f.reach)).collect();
+/// The bands BANDS OPEN always lists, as SDRoxide's box does, so a quiet
+/// band shows as quiet rather than missing (AJ3G, 14 Nov 2026: "I want to
+/// see what all the bands are doing").
+const ALWAYS: [&str; 11] = ["160", "80", "60", "40", "30", "20", "17", "15", "12", "10", "6"];
+
+/// Every band of [`ALWAYS`], and any other with reach (2 m), 160 m at the
+/// top: (band, its reach, or `None` with no paths that reach).
+pub(super) fn open_rows(g: &Globe) -> Vec<(&'static str, Option<f64>)> {
+    let reach =
+        |b: &str| g.fields.iter().find(|f| f.band == b).map(|f| f.reach).filter(|r| *r > 0.0);
+    let mut rows: Vec<(&'static str, Option<f64>)> =
+        ALWAYS.iter().map(|b| (*b, reach(b))).collect();
+    for f in g.fields.iter().filter(|f| f.reach > 0.0 && !ALWAYS.contains(&f.band)) {
+        rows.push((f.band, Some(f.reach)));
+    }
     // By wavelength, longest first; a band with no number in metres last.
     rows.sort_by(|a, b| {
         let m = |s: &str| s.parse::<f64>().unwrap_or(0.0);
@@ -59,6 +70,9 @@ fn sources(s: &GlobeSettings) -> String {
     if s.pskr || s.pskr_band {
         v.push("PSK Reporter");
     }
+    if s.pskr_area {
+        v.push("PSK Reporter near you");
+    }
     if s.wspr_heard {
         v.push("WSPR");
     }
@@ -71,16 +85,14 @@ fn sources(s: &GlobeSettings) -> String {
 
 /// BANDS OPEN, in the map's bottom right corner (the VIEW keys are top
 /// left, PROP's legend bottom left, the HEARD ME pop-up top right). Shown
-/// while any band has reach and BANDS OPEN is on.
+/// while BANDS OPEN is on, every band listed: one with no paths has an
+/// empty track and "—".
 pub(super) fn open_box(painter: &egui::Painter, rect: Rect, g: &Globe, s: &GlobeSettings) {
     if !s.bands_open {
         return;
     }
     let rows = open_rows(g);
-    if rows.is_empty() {
-        return;
-    }
-    let sc = scale(rows.iter().map(|r| r.1).fold(0.0, f64::max));
+    let sc = scale(rows.iter().filter_map(|r| r.1).fold(0.0, f64::max));
     let small = egui::FontId::monospace(9.5);
     let font = egui::FontId::monospace(10.5);
     let lay = |t: String, f: &egui::FontId, c: Color32| painter.layout_no_wrap(t, f.clone(), c);
@@ -88,7 +100,11 @@ pub(super) fn open_box(painter: &egui::Painter, rect: Rect, g: &Globe, s: &Globe
         .iter()
         .map(|(b, r)| {
             let hue = rgb(super::picture::band_colour(b));
-            (lay(format!("{b}M"), &small, hue), lay(pct(*r), &font, theme::CYAN()), hue, *r)
+            let (val, c) = match r {
+                Some(r) => (pct(*r), theme::CYAN()),
+                None => ("—".into(), INK_DIM),
+            };
+            (lay(format!("{b}M"), &small, hue), lay(val, &font, c), hue, c, *r)
         })
         .collect();
     let title = lay("BANDS OPEN".into(), &small, theme::CYAN_DIM());
@@ -134,7 +150,7 @@ pub(super) fn open_box(painter: &egui::Painter, rect: Rect, g: &Globe, s: &Globe
     y += th + 5.0;
     let bar_x = panel.left() + pad + key_w + gap;
     let bar_w = (panel.right() - pad - val_w - gap - bar_x).max(MIN_BAR);
-    for (key, val, hue, reach) in laid {
+    for (key, val, hue, val_c, reach) in laid {
         let (ks, vs) = (key.size(), val.size());
         painter.galley(Pos2::new(panel.left() + pad, y + (row_h - ks.y) / 2.0), key, hue);
         let top = y + (row_h - BAR_H) / 2.0;
@@ -144,17 +160,15 @@ pub(super) fn open_box(painter: &egui::Painter, rect: Rect, g: &Globe, s: &Globe
             1.0,
             Color32::from_rgb(0x2a, 0x30, 0x37),
         );
-        let fill = ((reach / sc).clamp(0.0, 1.0) as f32 * bar_w).max(1.0);
-        painter.rect_filled(
-            Rect::from_min_size(Pos2::new(bar_x, top), Vec2::new(fill, BAR_H)),
-            1.0,
-            hue,
-        );
-        painter.galley(
-            Pos2::new(panel.right() - pad - vs.x, y + (row_h - vs.y) / 2.0),
-            val,
-            theme::CYAN(),
-        );
+        if let Some(reach) = reach {
+            let fill = ((reach / sc).clamp(0.0, 1.0) as f32 * bar_w).max(1.0);
+            painter.rect_filled(
+                Rect::from_min_size(Pos2::new(bar_x, top), Vec2::new(fill, BAR_H)),
+                1.0,
+                hue,
+            );
+        }
+        painter.galley(Pos2::new(panel.right() - pad - vs.x, y + (row_h - vs.y) / 2.0), val, val_c);
         y += row_h;
     }
     y += 3.0;
@@ -363,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn bands_open_lists_the_bands_with_reach_longest_first_and_fades_with_them() {
+    fn bands_open_lists_every_band_longest_first_and_fades_with_them() {
         let mut g = Globe::default();
         let f = |band: &'static str, reach: f64| super::super::field::BandField {
             band,
@@ -373,19 +387,35 @@ mod tests {
             paths: 1.0,
             best_db: None,
         };
-        g.fields = vec![f("20", 0.12), f("160", 0.0084), f("40", 0.0), f("10", 0.046)];
-        assert_eq!(open_rows(&g), vec![("160", 0.0084), ("20", 0.12), ("10", 0.046)]);
+        g.fields =
+            vec![f("20", 0.12), f("160", 0.0084), f("40", 0.0), f("10", 0.046), f("2", 0.01)];
+        let rows = open_rows(&g);
+        let bands: Vec<&str> = rows.iter().map(|r| r.0).collect();
+        assert_eq!(bands, ["160", "80", "60", "40", "30", "20", "17", "15", "12", "10", "6", "2"]);
+        let reach = |b: &str| rows.iter().find(|r| r.0 == b).unwrap().1;
+        assert_eq!(reach("160"), Some(0.0084));
+        assert_eq!(reach("20"), Some(0.12));
+        assert_eq!(reach("40"), None);
+        assert_eq!(reach("80"), None);
+        assert_eq!(reach("2"), Some(0.01));
+        // Faded out, every HF band and 6 m stay, empty; 2 m goes.
         g.fields.iter_mut().for_each(|f| f.reach = 0.0);
-        assert!(open_rows(&g).is_empty());
+        let rows = open_rows(&g);
+        assert_eq!(rows.len(), 11);
+        assert!(rows.iter().all(|r| r.1.is_none()));
     }
 
     #[test]
     fn the_footer_names_the_sources_on() {
         let mut s = GlobeSettings::default();
+        assert_eq!(sources(&s), "from own receptions, PSK Reporter and PSK Reporter near you");
+        s.pskr_area = false;
         assert_eq!(sources(&s), "from own receptions and PSK Reporter");
         s.wspr_heard = true;
         assert_eq!(sources(&s), "from own receptions, PSK Reporter and WSPR");
         s.pskr_band = false;
         assert_eq!(sources(&s), "from own receptions and WSPR");
+        s.pskr_area = true;
+        assert_eq!(sources(&s), "from own receptions, PSK Reporter near you and WSPR");
     }
 }

@@ -115,6 +115,9 @@ pub(crate) struct GlobeSettings {
     /// Ask PSK Reporter for everyone's reports on GLOBE's band (31 Oct
     /// 2026, AJ3G: copies "under band conditions", as SDRoxide reads them).
     pub pskr_band: bool,
+    /// Ask PSK Reporter for everyone's reports near the station, every band
+    /// (decision 129, AJ3G: "I want to see what all the bands are doing").
+    pub pskr_area: bool,
     /// WSPR HEARD ME (its chip ASK WSPRNET + WSPR.LIVE): ask both sites who
     /// heard the station's WSPR (off until turned on, as PSK REPORTER is;
     /// turned on by itself when the panel goes to WSPR, decision 93).
@@ -180,6 +183,7 @@ impl Default for GlobeSettings {
             skim: true,
             pskr: false,
             pskr_band: true,
+            pskr_area: true,
             wspr_heard: false,
             proj: Proj::Globe,
             half_life_min: 45.0,
@@ -201,9 +205,24 @@ impl GlobeSettings {
             Source::Skim => self.skim,
             Source::PskReporter => self.pskr,
             Source::PskBand => self.pskr_band,
+            Source::PskArea => self.pskr_area,
             Source::WsprHeard => self.wspr_heard,
         }
     }
+}
+
+/// PSK AREA's paths that count: all of them, but on the band PSK BAND has
+/// just fetched (with it on), whose worldwide answer already holds the
+/// same reports, so they are not counted twice.
+fn area_paths<'a>(got: &'a Fetched, s: &GlobeSettings) -> impl Iterator<Item = Reception> + 'a {
+    let band = got
+        .band_for
+        .filter(|_| s.pskr_band && !got.band_paths.is_empty())
+        .map(|(lo, hi)| (lo as f64, hi as f64));
+    got.area_paths
+        .iter()
+        .filter(move |r| band.is_none_or(|(lo, hi)| r.rf_hz < lo || r.rf_hz > hi))
+        .cloned()
 }
 
 /// What the picture was last painted from.
@@ -217,8 +236,9 @@ struct PicKey {
 }
 
 /// What the field was last built from: the sources on (DECODE, SKIM, PSK
-/// REPORTER, WSPR HEARD ME, PSK BAND) and how many PSK BAND paths.
-type BuildKey = (bool, bool, bool, bool, bool, usize);
+/// REPORTER, WSPR HEARD ME, PSK BAND, PSK AREA) and how many PSK BAND and
+/// PSK AREA paths.
+type BuildKey = ((bool, bool, bool, bool, bool, bool), (usize, usize));
 
 /// GLOBE as it runs.
 pub(crate) struct Globe {
@@ -595,6 +615,10 @@ impl Globe {
             pskr: s.pskr,
             clouds: s.clouds && open,
             pskr_band: edges.filter(|_| s.pskr_band && open),
+            pskr_area: st
+                .grid()
+                .and_then(|g| fetch::pskr_area_of(&g))
+                .filter(|_| s.pskr_area && open),
             wspr: s.wspr_heard,
             wspr_fast: self.beacon,
             open,
@@ -650,7 +674,10 @@ impl Globe {
             self.centre = LatLon { lat: (qth.lat - 15.0).clamp(-60.0, 60.0), lon: qth.lon + 30.0 };
             self.placed = true;
         }
-        let key = (s.decode, s.skim, s.pskr, s.wspr_heard, s.pskr_band, self.got.band_paths.len());
+        let key = (
+            (s.decode, s.skim, s.pskr, s.wspr_heard, s.pskr_band, s.pskr_area),
+            (self.got.band_paths.len(), self.got.area_paths.len()),
+        );
         let hl = (s.half_life_min * 60.0).max(60.0);
         let due = match self.built {
             None => true,
@@ -663,8 +690,10 @@ impl Globe {
         };
         if due {
             let mut recs = self.history.all();
-            // PSK BAND's paths feed PROP and the table, not the list.
+            // PSK BAND's and PSK AREA's paths feed PROP and the table, not
+            // the list.
             recs.extend(self.got.band_paths.iter().cloned());
+            recs.extend(area_paths(&self.got, s));
             self.fields = field::build(&recs, qth, now, hl, &|src| s.source_on(src));
             self.floor = field::heard_floor(
                 &recs.into_iter().filter(|r| s.source_on(r.src)).collect::<Vec<_>>(),
@@ -1090,6 +1119,14 @@ fn toolbar(ui: &mut egui::Ui, g: &mut Globe, s: &mut GlobeSettings) {
                 "Asks PSK Reporter every 15 minutes for everyone's reports on the band GLOBE \
                  shows, the last 15 minutes: real copies between other stations, for PROP, \
                  PATHS, REACH, BEST and HEARD ≥. Only read; nothing is sent",
+            ),
+            (
+                &mut s.pskr_area,
+                "PSK AREA",
+                "Asks PSK Reporter every 15 minutes, while GLOBE is open, for everyone's reports \
+                 in your grid's field (FN for FN20), every band, the last 15 minutes: what all \
+                 the bands are doing near you, for BANDS OPEN, PROP, PATHS, REACH and BEST. \
+                 Needs your grid. Only read; nothing is sent",
             ),
         ] {
             if chrome::chip(ui, *on, label).on_hover_text(tip).clicked() {
@@ -1919,8 +1956,18 @@ fn map(
                     // What is new about them on their band: the rarest
                     // DXCC or grid badge (decision 122).
                     let band = crate::logbook::adif_band(r.rf_hz);
-                    if let Some(t) = g.worked.as_ref().and_then(|ix| ix.worked(&r.call, band, "", Some(&r.grid)).top_award()) {
-                        crate::logbook::novelty::paint(&painter, egui::pos2(tr.right() + 4.0, tr.center().y), t, 9.0, 1.0);
+                    if let Some(t) = g
+                        .worked
+                        .as_ref()
+                        .and_then(|ix| ix.worked(&r.call, band, "", Some(&r.grid)).top_award())
+                    {
+                        crate::logbook::novelty::paint(
+                            &painter,
+                            egui::pos2(tr.right() + 4.0, tr.center().y),
+                            t,
+                            9.0,
+                            1.0,
+                        );
                     }
                 }
                 if let Some(cp) = click {
@@ -2136,7 +2183,7 @@ impl Globe {
         let (latest, wspr) = reports.first().cloned()?;
         let mut decodes: Vec<Reception> = all
             .into_iter()
-            .filter(|r| !r.src.reverse() && r.src != Source::PskBand)
+            .filter(|r| !r.src.reverse() && !matches!(r.src, Source::PskBand | Source::PskArea))
             .filter(|r| r.call.eq_ignore_ascii_case(call))
             .collect();
         decodes.sort_by(|a, b| b.utc.total_cmp(&a.utc));
@@ -2978,8 +3025,8 @@ fn band_conditions(
     let mut notes = vec![format!(
         "CONDX is HamQSL's {} forecast for the whole world; MODEL is FORECAST's for this \
          hour from here. PATHS, REACH (bars to {:.0}%) and BEST are from the stations heard \
-         (own receptions, PSK Reporter and WSPR; no RBN): a dotted row is unheard, not \
-         closed.",
+         (own receptions, PSK Reporter, everyone's reports near you from PSK Reporter on every \
+         band, and WSPR; no RBN): a dotted row is unheard, not closed.",
         if day { "day" } else { "night" },
         scale * 100.0
     )];

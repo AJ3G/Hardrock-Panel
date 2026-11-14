@@ -1079,7 +1079,12 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
   as SDRoxide reads them. They go into PROP, PATHS, REACH, BEST and HEARD ≥
   (a path counts for HEARD ≥ when one of its hops is over your area), but
   not into the station list or the map's dots. It only reads; the panel
-  never sends PSK Reporter anything from it.
+  never sends PSK Reporter anything from it. **PSK AREA** (on to start)
+  does the same for every band at once near you: every 15 minutes, while
+  GLOBE is open and your grid is set, it asks pskreporter.info for everyone's
+  reports in the last 15 minutes in your grid's field (FN for FN20), so
+  BANDS OPEN, PROP, PATHS, REACH and BEST show what all the bands are doing,
+  not only the one you are on. It too only reads.
 - **ASK WSPRNET + WSPR.LIVE** (WSPR HEARD ME; off to start, and turned on
   by itself when the panel goes to WSPR) asks both wsprnet.org and
   wspr.live who heard your WSPR beacon in the last hour, every two minutes
@@ -1136,12 +1141,14 @@ between the globe and a flat map. **POP OUT** puts it in a window of its own.
 - **IBP BEACONS.** Which NCDXF/IARU beacon is on 20, 17, 15, 12 and 10 m
   now, its bearing and distance from you, and the seconds until the next
   one. Hearing one is a path open now. Hover a call for its site.
-- **BANDS OPEN.** A box in the map's bottom right corner while any band has
-  been heard: one bar a band, in the band's colour, 160 m at the top, with
-  the share of the world its paths reach (the same figure as REACH). The
+- **BANDS OPEN.** A box in the map's bottom right corner: one bar a band,
+  160 m to 10 m and 6 m always (and 2 m when heard), in the band's colour,
+  160 m at the top, with the share of the world its paths reach (the same
+  figure as REACH); a band with no paths has an empty bar and "—". The
   bars run to the 1, 3, 10, 30 or 100 % the foot names, and fade as the
   paths age (the memory is HALF-LIFE). It counts your own receptions and the
-  reports fetched (PSK Reporter, WSPR); there is no RBN here. Turn it off
+  reports fetched (PSK Reporter, PSK Reporter near you from PSK AREA,
+  WSPR); there is no RBN here. Turn it off
   with **BANDS OPEN** under LAYERS; the choice is remembered.
 - **BANDS** (on the SHOW row) opens the BANDS window: DAY or NIGHT at your
   grid and how old HamQSL's forecast is, the BAND CONDITIONS table (CONDX
