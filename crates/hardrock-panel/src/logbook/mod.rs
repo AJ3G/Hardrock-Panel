@@ -4,7 +4,8 @@
 //! a delete, an import or a confirmation rewrites it whole.
 //!
 //! Also what the log knows about a station ([`Logbook::worked`]: dupe, new
-//! call, new band, new DXCC, new grid), ADIF import and export (`adif`),
+//! call, new DXCC, DXCC new on the band, new grid, grid new on the band;
+//! `novelty` has the badges, decision 122), ADIF import and export (`adif`),
 //! callsign lookup (`lookup`), the eQSL and LoTW uploads and confirmation
 //! downloads (`upload`), and the LOG window (`window`).
 //!
@@ -18,11 +19,13 @@
 pub(crate) mod adif;
 pub(crate) mod lookup;
 mod net;
+pub(crate) mod novelty;
 pub(crate) mod upload;
 mod window;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -292,9 +295,8 @@ pub(crate) fn adif_band(freq_hz: f64) -> &'static str {
     }
 }
 
-/// What the log says about working a station now.
-// For the TX window and DECODE's badges, not yet wired.
-#[allow(dead_code)]
+/// What the log says about working a station now. A band is a band in
+/// any mode (decision 122); only a dupe is by band and mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Worked {
     /// Already worked on this band and mode.
@@ -307,6 +309,8 @@ pub(crate) struct Worked {
     pub new_dxcc: bool,
     /// Its grid square (the first four characters) has never been worked.
     pub new_grid: bool,
+    /// Its grid square has been worked, but not on this band.
+    pub new_grid_band: bool,
 }
 
 /// What an import did.
@@ -347,9 +351,11 @@ impl ImportReport {
 }
 
 /// What the log has worked, kept up to date as QSOs come and go so
-/// [`Logbook::worked`] costs a few hash lookups per decode row.
-#[derive(Default)]
-struct Index {
+/// [`WorkedIndex::worked`] costs a few hash lookups per decode row. Shared
+/// (an `Arc`, [`Logbook::worked_index`]) with DECODE, the scope's labels
+/// and GLOBE, which draw its badges without the log in hand.
+#[derive(Default, Clone)]
+pub(crate) struct WorkedIndex {
     calls: HashSet<String>,
     /// (call, band, mode shown)
     call_band_mode: HashSet<(String, String, String)>,
@@ -357,12 +363,14 @@ struct Index {
     entities: HashSet<String>,
     entity_band: HashSet<(String, String)>,
     grids: HashSet<String>,
+    /// (grid, band)
+    grid_band: HashSet<(String, String)>,
     /// ADIF DXCC numbers seen with each entity, by primary prefix, and how
     /// often.
     numbers: HashMap<String, HashMap<u16, u32>>,
 }
 
-impl Index {
+impl WorkedIndex {
     fn note(&mut self, r: &QsoRecord) {
         if r.call.is_empty() {
             return;
@@ -377,16 +385,45 @@ impl Index {
             self.entities.insert(e.prefix);
         }
         if let Some(g) = r.grid4() {
+            self.grid_band.insert((g.clone(), r.band.clone()));
             self.grids.insert(g);
         }
     }
 
-    fn build(recs: &[QsoRecord]) -> Index {
-        let mut ix = Index::default();
+    fn build(recs: &[QsoRecord]) -> WorkedIndex {
+        let mut ix = WorkedIndex::default();
         for r in recs {
             ix.note(r);
         }
         ix
+    }
+
+    /// What the log says about working `call` now on `band` in `mode`,
+    /// with `grid` if it sent one. `mode` is compared as shown (`FT4`, not
+    /// `MFSK`), and only for a dupe. With no band (off the amateur bands,
+    /// or not known) nothing is said band by band.
+    pub(crate) fn worked(&self, call: &str, band: &str, mode: &str, grid: Option<&str>) -> Worked {
+        let call = call.trim().to_ascii_uppercase();
+        if call.is_empty() {
+            return Worked::default();
+        }
+        let band = band.trim().to_ascii_lowercase();
+        let mode = mode.trim().to_ascii_uppercase();
+        let per_band = !band.is_empty();
+        let mut w = Worked {
+            dupe: per_band && self.call_band_mode.contains(&(call.clone(), band.clone(), mode)),
+            new_call: !self.calls.contains(&call),
+            ..Worked::default()
+        };
+        if let Some(e) = crate::dxcc::lookup(&call) {
+            w.new_dxcc = !self.entities.contains(&e.prefix);
+            w.new_band = per_band && !w.new_dxcc && !self.entity_band.contains(&(e.prefix, band.clone()));
+        }
+        if let Some(g) = grid.and_then(grid4) {
+            w.new_grid = !self.grids.contains(&g);
+            w.new_grid_band = per_band && !w.new_grid && !self.grid_band.contains(&(g, band));
+        }
+        w
     }
 }
 
@@ -397,7 +434,10 @@ pub(crate) struct Logbook {
     path: Option<PathBuf>,
     recs: Vec<QsoRecord>,
     next_id: u64,
-    index: Index,
+    index: Arc<WorkedIndex>,
+    /// What each QSO added this run brought that was new (decision 122),
+    /// oldest first, for the NEEDED report.
+    session_news: Vec<novelty::New>,
     /// Why the file couldn't be read. While set, nothing is written to it, so
     /// a log that couldn't be read is never replaced by an empty one.
     read_error: Option<String>,
@@ -439,7 +479,8 @@ impl Logbook {
             path: None,
             recs: Vec::new(),
             next_id: 1,
-            index: Index::default(),
+            index: Arc::default(),
+            session_news: Vec::new(),
             read_error: None,
             error: None,
             generation: 0,
@@ -458,7 +499,7 @@ impl Logbook {
                 for r in recs {
                     l.push(r);
                 }
-                l.index = Index::build(&l.recs);
+                l.index = Arc::new(WorkedIndex::build(&l.recs));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if let Err(e) = l.write_all() {
@@ -538,9 +579,11 @@ impl Logbook {
     pub(crate) fn add(&mut self, mut r: QsoRecord) -> u64 {
         r.normalise();
         self.fill_offline(&mut r);
+        let news = self.news(&r);
+        self.session_news.extend(news);
         let id = self.push(r);
         let r = self.recs.last().expect("just pushed");
-        self.index.note(r);
+        Arc::make_mut(&mut self.index).note(r);
         self.generation += 1;
         let line = adif::record(r);
         if let Err(e) = self.append(&line) {
@@ -647,7 +690,7 @@ impl Logbook {
 
     /// After any change but an add: the index again, and the whole file.
     fn changed(&mut self) {
-        self.index = Index::build(&self.recs);
+        self.index = Arc::new(WorkedIndex::build(&self.recs));
         self.generation += 1;
         if let Err(e) = self.write_all() {
             self.error = Some(e);
@@ -659,26 +702,37 @@ impl Logbook {
     /// What the log says about working `call` now on `band` in `mode`, with
     /// `grid` if it sent one. `mode` is compared as shown (`FT4`, not `MFSK`).
     pub(crate) fn worked(&self, call: &str, band: &str, mode: &str, grid: Option<&str>) -> Worked {
-        let call = call.trim().to_ascii_uppercase();
-        if call.is_empty() {
-            return Worked::default();
-        }
-        let band = band.trim().to_ascii_lowercase();
-        let mode = mode.trim().to_ascii_uppercase();
-        let ix = &self.index;
-        let mut w = Worked {
-            dupe: ix.call_band_mode.contains(&(call.clone(), band.clone(), mode)),
-            new_call: !ix.calls.contains(&call),
-            ..Worked::default()
-        };
-        if let Some(e) = crate::dxcc::lookup(&call) {
-            w.new_dxcc = !ix.entities.contains(&e.prefix);
-            w.new_band = !w.new_dxcc && !ix.entity_band.contains(&(e.prefix, band));
-        }
-        if let Some(g) = grid.and_then(grid4) {
-            w.new_grid = !ix.grids.contains(&g);
-        }
-        w
+        self.index.worked(call, band, mode, grid)
+    }
+
+    /// The index [`Logbook::worked`] reads, to share: it is replaced (not
+    /// changed) when the log changes, so a copy taken each frame is current.
+    pub(crate) fn worked_index(&self) -> Arc<WorkedIndex> {
+        Arc::clone(&self.index)
+    }
+
+    /// What logging `r` would add that is new, against the log as it is
+    /// (decision 122): its entity or grid never worked, or not on its band.
+    pub(crate) fn news(&self, r: &QsoRecord) -> Vec<novelty::New> {
+        let w = self.worked(&r.call, &r.band, r.mode_shown(), Some(&r.grid));
+        let entity = crate::dxcc::lookup(&r.call).map(|e| e.name);
+        let grid = grid4(&r.grid);
+        w.tags()
+            .into_iter()
+            .filter_map(|tag| {
+                let what = match tag {
+                    novelty::Tag::Dxcc | novelty::Tag::DxccBand => entity.clone()?,
+                    novelty::Tag::Grid | novelty::Tag::GridBand => grid.clone()?,
+                    _ => return None,
+                };
+                Some(novelty::New { tag, what, band: r.band.clone() })
+            })
+            .collect()
+    }
+
+    /// What the QSOs logged this run brought that was new, oldest first.
+    pub(crate) fn session_news(&self) -> &[novelty::New] {
+        &self.session_news
     }
 
     /// The last QSO with `call`, for "worked before: when and where".

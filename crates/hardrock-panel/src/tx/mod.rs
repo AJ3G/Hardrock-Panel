@@ -128,6 +128,9 @@ pub(crate) struct TxSettings {
     pub tx_even: bool,
     pub auto_seq: bool,
     pub call_first: bool,
+    /// Several answering our CQ at once: ASK, or work the BEST for DX
+    /// (decision 123).
+    pub several: qso::Several,
     pub skip_tx1: bool,
     /// In Wait CQ, call the station as soon as they sign off with another.
     pub call_after_rr73: bool,
@@ -172,6 +175,7 @@ impl Default for TxSettings {
             tx_even: false,
             auto_seq: true,
             call_first: true,
+            several: qso::Several::Ask,
             skip_tx1: false,
             call_after_rr73: true,
             rrr: false,
@@ -204,16 +208,8 @@ impl TxSettings {
     }
 }
 
-/// What the log says of a station, for the list's badges.
-#[derive(Default, Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Badges {
-    pub dupe: bool,
-    pub new_call: bool,
-    /// The country was worked, but not on this band.
-    pub new_band: bool,
-    pub new_dxcc: bool,
-    pub new_grid: bool,
-}
+/// What the log says of a station, for the list's badges (decision 122).
+pub(crate) type Badges = crate::logbook::Worked;
 
 /// A row of the TX window's decode list.
 #[derive(Debug, Clone)]
@@ -508,6 +504,7 @@ impl Tx {
         c.max_tx_repeats = s.max_calls;
         c.skip_tx1 = s.skip_tx1;
         c.call_first = s.call_first;
+        c.several = s.several;
         c.call_after_73 = s.call_after_rr73;
     }
 
@@ -762,6 +759,11 @@ impl Tx {
         let now = env.now;
         let me = env.station.call().unwrap_or_default();
         self.take_feed(s, &env, feed, heard, badges, &me);
+        // Callers to our CQ are chosen among once their slot is all
+        // decoded (decision 123).
+        if s.auto_seq && s.mode == TxMode::Ft8 && self.qso.settle(env.slot_decoded, now as i64, badges) {
+            self.after_rx(s);
+        }
         let tuning = env.rig.and_then(|r| r.tuning);
         // The over: keyed, done, or never keyed.
         if let Some(o) = self.over.as_mut() {
@@ -1007,19 +1009,38 @@ impl Tx {
         dts.sort_by(f32::total_cmp);
         self.dt = dts.get(dts.len() / 2).copied();
         if s.auto_seq && s.mode == TxMode::Ft8 && self.qso.on_rx(&decodes, env.now as i64) {
-            self.take_completed(s.prompt_log);
-            // A station that answered our CQ is now the one worked.
-            self.note_dx_seen();
-            if let Some(c) = self.qso.dx_call().map(str::to_string)
-                && self.lines[0].split_whitespace().next().map(|t| t.trim_matches(['<', '>']))
-                    != Some(c.as_str())
-            {
-                if let Some(e) = self.parity.get(&c) {
-                    self.tx_even = !e;
-                }
-                self.generate(s);
-            }
+            self.after_rx(s);
         }
+    }
+
+    /// After the sequencer heard something: contacts finished, and the
+    /// lines for a station that is now the one worked.
+    fn after_rx(&mut self, s: &TxSettings) {
+        self.take_completed(s.prompt_log);
+        // A station that answered our CQ is now the one worked.
+        self.note_dx_seen();
+        if let Some(c) = self.qso.dx_call().map(str::to_string)
+            && self.lines[0].split_whitespace().next().map(|t| t.trim_matches(['<', '>']))
+                != Some(c.as_str())
+        {
+            if let Some(e) = self.parity.get(&c) {
+                self.tx_even = !e;
+            }
+            self.generate(s);
+        }
+    }
+
+    /// A station picked from those calling us (decision 123): worked as a
+    /// REPLY on their call to us would be; their line, or `None` if it is
+    /// gone from the list.
+    pub(crate) fn pick_caller(&mut self, s: &TxSettings, call: &str, now: f64) -> Option<ListRow> {
+        let r = self
+            .rows
+            .iter()
+            .find(|r| !r.ours && r.to_me && r.d.from.as_deref() == Some(call))
+            .cloned()?;
+        self.reply(s, &r, now);
+        Some(r)
     }
 
     /// Where the station worked was last copied, from the list's newest

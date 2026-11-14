@@ -1,8 +1,9 @@
 //! The LOG window: the QSOs a day at a time, newest first, with + NEW ENTRY,
 //! EDIT and DEL, IMPORT and ADIF export, FILL MISSING, the eQSL and LoTW
 //! uploads and their confirmations, and each QSO's QSL state (↑ sent, ✔
-//! confirmed). Docked over the panel or popped out, like GLOBE and DECODE.
-//! Also SETTINGS → Logbook.
+//! confirmed), and NEEDED: the entities and grids worked band by band and
+//! what this run's QSOs brought that was new (decision 122). Docked over
+//! the panel or popped out, like GLOBE and DECODE. Also SETTINGS → Logbook.
 //!
 //! After SDRoxide's logbook window (`sdroxide-ui/src/app/logbook.rs`,
 //! https://github.com/dividebysandwich/sdroxide, GPL-3.0-or-later).
@@ -218,6 +219,9 @@ pub(crate) struct LogUi {
     /// The list, built for (log generation, search).
     items: Vec<Item>,
     built: Option<(u64, String)>,
+    /// NEEDED shown, and its figures for the log generation.
+    needed: bool,
+    tally: Option<(u64, Vec<super::novelty::BandTally>)>,
 }
 
 /// A FILL MISSING run: its lookups, and the tally for the report at the end.
@@ -1013,8 +1017,71 @@ fn body(
         ui.add_space(4.0);
         form(ui, log, u, s, st);
     }
+    if u.needed {
+        ui.add_space(4.0);
+        needed(ui, log, u);
+    }
     ui.add_space(4.0);
     list(ui, log, u);
+}
+
+/// NEEDED (decision 122): each band's DXCC entities and grids worked, and
+/// of those confirmed (LoTW, eQSL or card), then the whole log's; and what
+/// this run's QSOs brought that was new, entity or grid and band.
+fn needed(ui: &mut egui::Ui, log: &Logbook, u: &mut LogUi) {
+    if u.tally.as_ref().is_none_or(|(g, _)| *g != log.generation()) {
+        u.tally = Some((log.generation(), super::novelty::tally(log.records())));
+    }
+    let Some((_, rows)) = &u.tally else { return };
+    egui::Frame::new().fill(theme::INPUT_BG()).inner_margin(6).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.horizontal_top(|ui| {
+            egui::ScrollArea::vertical().id_salt("log-needed").max_height(190.0).show(ui, |ui| {
+                egui::Grid::new("log-needed-grid").striped(true).spacing([14.0, 2.0]).show(ui, |ui| {
+                    for h in ["BAND", "DXCC", "CONFIRMED", "GRIDS", "CONFIRMED"] {
+                        ui.label(caps(h));
+                    }
+                    ui.end_row();
+                    for t in rows {
+                        let all = t.band == "All";
+                        let cell = |v: String| {
+                            let r = RichText::new(v).monospace().size(11.5);
+                            if all { r.strong().color(theme::TEXT_STRONG()) } else { r.color(theme::TEXT()) }
+                        };
+                        ui.label(cell(t.band.clone()));
+                        ui.label(cell(t.dxcc.to_string()));
+                        ui.label(cell(t.dxcc_conf.to_string()));
+                        ui.label(cell(t.grids.to_string()));
+                        ui.label(cell(t.grids_conf.to_string()));
+                        ui.end_row();
+                    }
+                });
+            });
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.label(caps("NEW THIS SESSION"));
+                let news = log.session_news();
+                if news.is_empty() {
+                    ui.label(
+                        RichText::new("Nothing new logged yet this run.").size(11.0).color(theme::TEXT()),
+                    );
+                }
+                egui::ScrollArea::vertical().id_salt("log-needed-news").max_height(170.0).show(ui, |ui| {
+                    for n in news.iter().rev() {
+                        ui.horizontal(|ui| {
+                            badge(ui, n.tag.label(), n.tag.colour()).on_hover_text(n.tag.tip());
+                            ui.label(
+                                RichText::new(format!("{}  {}", n.what, n.band))
+                                    .monospace()
+                                    .size(11.5)
+                                    .color(theme::TEXT_STRONG()),
+                            );
+                        });
+                    }
+                });
+            });
+        });
+    });
 }
 
 /// FILE's drop-down of .adi files found, and (Windows) BROWSE…. Picking one
@@ -1199,6 +1266,16 @@ fn toolbar(
         if let Err(why) = &u.tqsl(s) {
             ui.add(egui::Label::new(RichText::new("no TQSL").size(10.5).weak()).wrap_mode(egui::TextWrapMode::Extend))
                 .on_hover_text(why);
+        }
+        ui.add_space(10.0);
+        if chrome::chip(ui, u.needed, "NEEDED")
+            .on_hover_text(
+                "DXCC entities and grids worked on each band, and of those confirmed (LoTW, eQSL or \
+                 card), and what this run's QSOs brought that was new",
+            )
+            .clicked()
+        {
+            u.needed = !u.needed;
         }
         let can = (s.eqsl.is_set() || s.lotw.is_set()) && u.confirms.is_none();
         if chrome::chip_enabled(ui, can, false, "QSL ✔")

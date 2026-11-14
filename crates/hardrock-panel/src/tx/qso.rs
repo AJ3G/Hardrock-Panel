@@ -17,7 +17,11 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use serde::{Deserialize, Serialize};
+
+use super::Badges;
 use super::msg::{Decode, fmt_report, is_grid4, wsjtx_form};
+use super::sched::{DECODE_WAIT_S, FT8_PERIOD};
 
 /// Give up waiting for a picked station to call CQ after this long, s.
 const WAIT_CQ_S: i64 = 300;
@@ -98,6 +102,49 @@ pub(crate) struct Queued {
     pub wait_for_cq: bool,
 }
 
+/// What to do when several stations answer our CQ in one slot (decision
+/// 123, AJ3G: "if multiple stations call I should be prompted to pick
+/// one", and "There are cases where I want to work DXCC and not LOCAL
+/// stations").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub(crate) enum Several {
+    /// Pick none: show them for the operator to pick one, and call CQ
+    /// again if none is picked before the next over.
+    #[default]
+    Ask,
+    /// Work the best for DX by itself ([`Qso::rank`]).
+    Best,
+}
+
+impl Several {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Several::Ask => "ASK",
+            Several::Best => "BEST",
+        }
+    }
+}
+
+/// A station answering our CQ, as offered to pick from (decision 123).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Caller {
+    pub call: String,
+    pub grid: Option<String>,
+    pub snr_db: i16,
+    pub audio_hz: f32,
+    /// The slot they called in.
+    pub slot_utc: i64,
+    /// What the log says of them (decision 122).
+    pub badges: Badges,
+    /// How far, km, from their grid or else their country's centre.
+    pub km: Option<f64>,
+    /// 2 on another continent, 1 another country on ours, 0 our own
+    /// country (1 when either is not known).
+    pub reach: u8,
+    /// Their call to us, which the contact starts from.
+    d: Decode,
+}
+
 /// The sequencer's settings.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Config {
@@ -118,6 +165,8 @@ pub(crate) struct Config {
     pub skip_tx1: bool,
     /// Call 1st: adopt the first (best) station answering our CQ by itself.
     pub call_first: bool,
+    /// Several answering our CQ at once: ask, or work the best for DX.
+    pub several: Several,
     /// Call after RR73: in Wait CQ, call the station again as soon as they
     /// sign off with the one they were working, rather than wait for
     /// their next CQ (AJ3G, 11 Nov 2026).
@@ -139,6 +188,7 @@ impl Default for Config {
             max_tx_repeats: 10,
             skip_tx1: false,
             call_first: true,
+            several: Several::Ask,
             call_after_73: true,
         }
     }
@@ -259,7 +309,6 @@ pub(crate) struct Qso {
     /// repeating their report.
     manual_signoff: Option<Step>,
     worked_calls: HashSet<String>,
-    worked_entities: HashSet<String>,
     progress_utc: i64,
     tx_since_progress: u32,
     watchdog: bool,
@@ -270,6 +319,13 @@ pub(crate) struct Qso {
     heard: HashMap<String, i64>,
     /// Stations that answered our CQ while we took another.
     also_calling: Vec<String>,
+    /// Calls to us heard while calling CQ, waiting for the rest of their
+    /// slot to be decoded before one is chosen (decision 123).
+    callers: Vec<Decode>,
+    /// Several callers with ASK (or Call 1st off): the operator's to pick
+    /// one of, best for DX first. Gone once the slot answering our next
+    /// CQ is in, or a contact starts.
+    choices: Vec<Caller>,
     /// Every line to or from us over the last [`EXCHANGE_KEEP_S`], by the
     /// other station's call, whatever the transcript was doing: a QSO
     /// started by a pick begins with what was already said (AJ3G, 12 Nov
@@ -292,7 +348,6 @@ impl Qso {
             manual: None,
             manual_signoff: None,
             worked_calls: HashSet::new(),
-            worked_entities: HashSet::new(),
             progress_utc: 0,
             tx_since_progress: 0,
             watchdog: false,
@@ -300,6 +355,8 @@ impl Qso {
             called_us: HashMap::new(),
             heard: HashMap::new(),
             also_calling: Vec::new(),
+            callers: Vec::new(),
+            choices: Vec::new(),
             exchanged: VecDeque::new(),
         }
     }
@@ -340,6 +397,11 @@ impl Qso {
         &self.also_calling
     }
 
+    /// The stations calling us to pick one of (decision 123).
+    pub(crate) fn choices(&self) -> &[Caller] {
+        &self.choices
+    }
+
     pub(crate) fn watchdog(&self) -> bool {
         self.watchdog
     }
@@ -356,13 +418,11 @@ impl Qso {
             .then(|| (limit - (now_utc - self.progress_utc)).max(0))
     }
 
-    /// Note a contact made earlier (from the log), so a second one with the
-    /// same station waits its turn when several answer our CQ.
-    pub(crate) fn note_worked(&mut self, call: &str, entity: Option<&str>) {
+    /// Note a contact logged this session, so a second one with the same
+    /// station waits its turn when several answer our CQ. Whether its
+    /// entity is new comes from the log ([`Qso::settle`]'s badges).
+    pub(crate) fn note_worked(&mut self, call: &str) {
         self.worked_calls.insert(call.to_ascii_uppercase());
-        if let Some(e) = entity {
-            self.worked_entities.insert(e.to_string());
-        }
     }
 
     fn progress(&mut self) {
@@ -388,6 +448,7 @@ impl Qso {
         self.manual = None;
         self.manual_signoff = None;
         self.also_calling.clear();
+        self.choices.clear();
     }
 
     /// CALL CQ (Tx6).
@@ -580,29 +641,13 @@ impl Qso {
         let answered_us = dx_call.as_deref().is_some_and(|dx| {
             decodes.iter().any(|d| d.from.as_deref() == Some(dx) && d.to.as_deref() == Some(me.as_str()))
         });
-        let answerer = (self.step == Step::CallingCq && self.dx.is_none() && self.cfg.call_first)
-            .then(|| self.pick_answerer(decodes, &me))
-            .flatten();
+        // Calling CQ: who answers is only noted here. The choice waits for
+        // the whole slot ([`Qso::settle`]), so a caller decoded later in it
+        // is weighed with the rest (decision 123).
         if self.step == Step::CallingCq && self.dx.is_none() {
-            let others: Vec<String> = decodes
-                .iter()
-                .filter(|d| is_call_to_us(d, &me))
-                .filter_map(|d| d.from.clone())
-                .filter(|c| Some(c) != answerer.as_ref())
-                .collect();
-            if !others.is_empty() {
-                for o in &others {
-                    if !self.also_calling.contains(o) {
-                        self.also_calling.push(o.clone());
-                    }
-                }
-                let text = if answerer.is_some() {
-                    format!("also calling: {}", others.join(", "))
-                } else {
-                    format!("calling you: {} (Call 1st is off: pick one)", others.join(", "))
-                };
-                self.note(text, now_utc);
-                changed = true;
+            for d in decodes.iter().filter(|d| is_call_to_us(d, &me)) {
+                self.callers.retain(|c| c.from != d.from);
+                self.callers.push(d.clone());
             }
         }
         for d in decodes {
@@ -680,25 +725,6 @@ impl Qso {
                 continue;
             }
 
-            if self.step == Step::CallingCq && self.dx.is_none() && answerer.as_deref() == Some(from.as_str()) {
-                let grid = match &payload {
-                    Payload::Grid(g) => Some(g.clone()),
-                    _ => d.grid.clone(),
-                };
-                self.dx = Some(Dx { call: from.clone(), grid, rpt_sent: Some(d.snr_db), rpt_rcvd: None, started_utc: now_utc });
-                self.logged = false;
-                self.also_calling.retain(|c| *c != from);
-                self.rcvd(&d.message, now_utc);
-                self.progress();
-                self.progress_utc = now_utc;
-                changed |= self.advance(&payload, now_utc);
-                if self.step == Step::CallingCq {
-                    self.step = Step::TxReport;
-                    changed = true;
-                }
-                continue;
-            }
-
             if dx_call.as_deref() != Some(from.as_str()) {
                 continue;
             }
@@ -720,20 +746,140 @@ impl Qso {
         changed
     }
 
-    /// Which of the stations answering our CQ to work first: one not worked
-    /// this session, then (among signals within 6 dB) a new entity, then the
-    /// strongest.
-    fn pick_answerer(&self, decodes: &[Decode], me: &str) -> Option<String> {
-        decodes
-            .iter()
-            .filter(|d| is_call_to_us(d, me))
-            .filter_map(|d| Some((d.from.as_deref().filter(|f| !f.is_empty())?, d.snr_db)))
-            .max_by_key(|(call, snr)| {
-                let fresh = !self.worked_calls.contains(*call);
-                let new_entity = crate::dxcc::lookup(call).is_some_and(|e| !self.worked_entities.contains(&e.name));
-                (fresh, snr.div_euclid(6), new_entity, *snr)
-            })
-            .map(|(c, _)| c.to_string())
+    /// Choose among the stations that answered our CQ, once their slot is
+    /// all decoded (decision 123): `slot_done` is the last slot DECODE has
+    /// finished, and without it the choice is made when the next over
+    /// would be planned anyway. `badges` is what the log says of a station.
+    /// One caller with Call 1st on is worked at once; several are the
+    /// operator's to pick from (ASK) or the best for DX is worked (BEST).
+    /// Returns true if anything changed.
+    pub(crate) fn settle(
+        &mut self,
+        slot_done: Option<i64>,
+        now_utc: i64,
+        badges: &dyn Fn(&str, Option<&str>) -> Badges,
+    ) -> bool {
+        let done = |slot: i64| {
+            slot_done.is_some_and(|d| d >= slot) || now_utc as f64 >= (slot + FT8_PERIOD) as f64 + DECODE_WAIT_S
+        };
+        let mut changed = false;
+        // Choices left unpicked: gone once the slot answering the CQ that
+        // went out after them is in (they call again, or not).
+        if self.choices.first().is_some_and(|c| done(c.slot_utc + 2 * FT8_PERIOD)) {
+            self.choices.clear();
+            changed = true;
+        }
+        if self.callers.is_empty() {
+            return changed;
+        }
+        let (ready, wait): (Vec<Decode>, Vec<Decode>) =
+            std::mem::take(&mut self.callers).into_iter().partition(|d| done(d.slot_utc));
+        self.callers = wait;
+        if ready.is_empty() {
+            return changed;
+        }
+        // A station picked meanwhile (REPLY, the queue): the rest are
+        // "also calling".
+        if self.step != Step::CallingCq || self.dx.is_some() {
+            let dx = self.dx_call().map(str::to_string);
+            let others: Vec<String> =
+                ready.iter().filter_map(|d| d.from.clone()).filter(|c| Some(c) != dx.as_ref()).collect();
+            return self.also(others, now_utc) || changed;
+        }
+        let mut cands: Vec<Caller> = ready.into_iter().map(|d| self.caller(d, badges)).collect();
+        cands.sort_by(|a, b| self.rank(b).partial_cmp(&self.rank(a)).unwrap_or(std::cmp::Ordering::Equal));
+        let calls: Vec<String> = cands.iter().map(|c| c.call.clone()).collect();
+        if self.cfg.call_first && (cands.len() == 1 || self.cfg.several == Several::Best) {
+            let best = cands.remove(0);
+            tracing::info!("TX: {} answered our CQ; working them (of {})", best.call, calls.join(", "));
+            self.adopt(best, now_utc);
+            self.also(calls[1..].to_vec(), now_utc);
+        } else {
+            let text = if self.cfg.call_first {
+                format!("{} calling you: {} (pick one; CQ again if none is picked)", calls.len(), calls.join(", "))
+            } else {
+                format!("calling you: {} (Call 1st is off: pick one)", calls.join(", "))
+            };
+            tracing::info!("TX: {text}");
+            self.note(text, now_utc);
+            self.choices = cands;
+        }
+        true
+    }
+
+    /// Note stations answering our CQ while another is worked.
+    fn also(&mut self, others: Vec<String>, now_utc: i64) -> bool {
+        if others.is_empty() {
+            return false;
+        }
+        for o in &others {
+            if !self.also_calling.contains(o) {
+                self.also_calling.push(o.clone());
+            }
+        }
+        self.note(format!("also calling: {}", others.join(", ")), now_utc);
+        true
+    }
+
+    /// A call to us, as a station to pick: what the log says of them, and
+    /// how far away they are.
+    fn caller(&self, d: Decode, badges: &dyn Fn(&str, Option<&str>) -> Badges) -> Caller {
+        let call = d.from.clone().unwrap_or_default();
+        let grid = match classify(&d.message) {
+            Payload::Grid(g) => Some(g),
+            _ => d.grid.clone(),
+        };
+        let theirs = crate::dxcc::lookup(&call);
+        let ours = crate::dxcc::lookup(&self.cfg.my_call);
+        let reach = match (&ours, &theirs) {
+            (Some(o), Some(t)) if o.prefix == t.prefix => 0,
+            (Some(o), Some(t)) if o.continent == t.continent => 1,
+            (Some(_), Some(_)) => 2,
+            _ => 1,
+        };
+        let here = crate::station::grid_to_latlon(&self.cfg.my_grid);
+        let there = grid
+            .as_deref()
+            .and_then(crate::station::grid_to_latlon)
+            .or_else(|| theirs.as_ref().map(|e| crate::station::LatLon { lat: e.lat, lon: e.lon }));
+        let km = here.zip(there).map(|(a, b)| crate::station::distance_km(a, b));
+        Caller {
+            badges: badges(&call, grid.as_deref()),
+            call,
+            grid,
+            snr_db: d.snr_db,
+            audio_hz: d.audio_hz,
+            slot_utc: d.slot_utc,
+            km,
+            reach,
+            d,
+        }
+    }
+
+    /// BEST's order for the stations answering our CQ, highest first
+    /// (decision 123: "work DXCC and not LOCAL stations"): an entity never
+    /// worked, then one new on this band, then a station not worked this
+    /// session, then the farthest (another continent ahead of our own, our
+    /// own country last, then by distance), the signal last.
+    fn rank(&self, c: &Caller) -> (bool, bool, bool, u8, f64, i16) {
+        let fresh = !self.worked_calls.contains(&c.call);
+        (c.badges.new_dxcc, c.badges.new_band, fresh, c.reach, c.km.unwrap_or(0.0), c.snr_db)
+    }
+
+    /// Work a station that answered our CQ, from their call.
+    fn adopt(&mut self, c: Caller, now_utc: i64) {
+        let payload = classify(&c.d.message);
+        self.dx = Some(Dx { call: c.call.clone(), grid: c.grid, rpt_sent: Some(c.snr_db), rpt_rcvd: None, started_utc: now_utc });
+        self.logged = false;
+        self.also_calling.retain(|x| *x != c.call);
+        self.choices.clear();
+        self.rcvd(&c.d.message, now_utc);
+        self.progress();
+        self.progress_utc = now_utc;
+        self.advance(&payload, now_utc);
+        if self.step == Step::CallingCq {
+            self.step = Step::TxReport;
+        }
     }
 
     /// Call After RR73: the station held for has signed off with `other`,
@@ -799,9 +945,6 @@ impl Qso {
     fn log_now(&mut self, now_utc: i64) {
         let Some(dx) = self.dx.as_ref().filter(|_| !self.logged) else { return };
         self.worked_calls.insert(dx.call.clone());
-        if let Some(e) = crate::dxcc::lookup(&dx.call) {
-            self.worked_entities.insert(e.name.clone());
-        }
         self.completed.push_back(Logged {
             call: dx.call.clone(),
             grid: dx.grid.clone(),
@@ -996,6 +1139,12 @@ mod tests {
         parse(msg, 0, -10, 0.1, 1500.0)
     }
 
+    /// A slot's decodes, the slot then decoded to its end.
+    fn rx(q: &mut Qso, ds: &[Decode], now: i64) -> bool {
+        let a = q.on_rx(ds, now);
+        a | q.settle(Some(now), now, &|_, _| Badges::default())
+    }
+
     #[test]
     fn answering_a_cq_logs_on_their_rr73_and_still_sends_73() {
         let mut q = Qso::new(cfg());
@@ -1098,7 +1247,7 @@ mod tests {
         q.call_cq();
         assert_eq!(q.plan_tx().as_deref(), Some("CQ AJ3G FN20"));
         q.note_tx_sent(0);
-        q.on_rx(&[d("AJ3G K1ABC FN42")], 15);
+        rx(&mut q, &[d("AJ3G K1ABC FN42")], 15);
         assert_eq!(q.plan_tx().as_deref(), Some("K1ABC AJ3G -10"));
         q.note_tx_sent(30);
         q.on_rx(&[d("AJ3G K1ABC R-08")], 45);
@@ -1150,7 +1299,7 @@ mod tests {
         q.call_cq();
         assert_eq!(q.plan_tx().as_deref(), Some("CQ PJ4/AJ3G"));
         q.note_tx_sent(0);
-        q.on_rx(&[d("<PJ4/AJ3G> K1ABC FN42")], 15);
+        rx(&mut q, &[d("<PJ4/AJ3G> K1ABC FN42")], 15);
         assert_eq!(q.plan_tx().as_deref(), Some("K1ABC <PJ4/AJ3G> -10"));
         q.note_tx_sent(30);
         q.on_rx(&[d("<PJ4/AJ3G> K1ABC R-08")], 45);
@@ -1213,16 +1362,119 @@ mod tests {
     }
 
     #[test]
-    fn several_answers_take_the_best_and_list_the_rest() {
-        let mut q = Qso::new(cfg());
+    fn several_answers_on_best_take_the_best_and_list_the_rest() {
+        let mut q = Qso::new(Config { several: Several::Best, ..cfg() });
         q.call_cq();
         let mut a = d("AJ3G K1ABC FN42");
-        a.snr_db = -20;
+        a.snr_db = 2;
         let mut b = d("AJ3G EA8XYZ IL18");
-        b.snr_db = 2;
-        q.on_rx(&[a, b], 15);
+        b.snr_db = -20;
+        rx(&mut q, &[a, b], 15);
+        // Africa is farther than New England, however strong K1ABC is.
         assert_eq!(q.dx_call(), Some("EA8XYZ"));
         assert_eq!(q.also_calling(), &["K1ABC".to_string()]);
+        assert!(q.choices().is_empty());
+    }
+
+    /// Calls to us in `slot`, each with its SNR.
+    fn calls(slot: i64, who: &[(&str, i16)]) -> Vec<Decode> {
+        who.iter().map(|(m, snr)| parse(&format!("AJ3G {m}"), slot, *snr, 0.1, 1500.0)).collect()
+    }
+
+    #[test]
+    fn the_choice_waits_for_the_whole_slot() {
+        // The slot from 15 s: a caller in a first batch, a stronger one in a
+        // later pass of the same slot. Nothing is chosen until DECODE has
+        // finished the slot; then both are weighed.
+        let mut q = Qso::new(Config { several: Several::Best, ..cfg() });
+        q.call_cq();
+        let none = |_: &str, _: Option<&str>| Badges::default();
+        q.on_rx(&calls(15, &[("W1AAA FN30", -18)]), 29);
+        assert!(!q.settle(Some(0), 29, &none), "slot 15 not decoded yet");
+        assert_eq!(q.dx_call(), None);
+        q.on_rx(&calls(15, &[("W2BBB FN30", 5)]), 30);
+        assert!(q.settle(Some(15), 30, &none));
+        assert_eq!(q.dx_call(), Some("W2BBB"), "as near as each other: the stronger");
+        assert_eq!(q.also_calling(), &["W1AAA".to_string()]);
+        // With no word from DECODE, the choice is made as the next over
+        // would be planned: a second after the slot's end.
+        let mut q = Qso::new(Config { several: Several::Best, ..cfg() });
+        q.call_cq();
+        q.on_rx(&calls(15, &[("W1AAA FN42", -18)]), 30);
+        assert!(!q.settle(None, 30, &none));
+        assert!(q.settle(None, 31, &none));
+        assert_eq!(q.dx_call(), Some("W1AAA"));
+    }
+
+    #[test]
+    fn one_caller_with_call_1st_is_worked_at_once_even_on_ask() {
+        let mut q = Qso::new(cfg());
+        assert_eq!(q.cfg.several, Several::Ask, "ASK is the default");
+        q.call_cq();
+        rx(&mut q, &calls(15, &[("K1ABC FN42", -7)]), 30);
+        assert_eq!(q.dx_call(), Some("K1ABC"));
+        assert_eq!(q.plan_tx().as_deref(), Some("K1ABC AJ3G -07"));
+    }
+
+    #[test]
+    fn ask_holds_several_callers_and_calls_cq_again_until_one_is_picked() {
+        let mut q = Qso::new(cfg());
+        q.call_cq();
+        q.record_tx("CQ AJ3G FN20", 0);
+        q.note_tx_sent(13);
+        rx(&mut q, &calls(15, &[("K1ABC FN42", 3), ("EA8XYZ IL18", -15), ("JA1ABC PM95", -20)]), 30);
+        // None chosen: the three are offered, best for DX first, and CQ
+        // goes again.
+        assert_eq!(q.dx_call(), None);
+        let offered: Vec<&str> = q.choices().iter().map(|c| c.call.as_str()).collect();
+        assert_eq!(offered, ["JA1ABC", "EA8XYZ", "K1ABC"]);
+        assert_eq!(q.step(), Step::CallingCq);
+        assert_eq!(q.plan_tx().as_deref(), Some("CQ AJ3G FN20"));
+        let note = q.transcript().last().unwrap();
+        assert!(note.note && note.text.starts_with("3 calling you: JA1ABC, EA8XYZ, K1ABC"), "{note:?}");
+        // Our next CQ goes out; nobody answers it: the offer lapses.
+        q.note_tx_sent(43);
+        rx(&mut q, &[], 60);
+        assert!(q.choices().is_empty());
+        assert_eq!(q.plan_tx().as_deref(), Some("CQ AJ3G FN20"));
+        // They call again, and AJ3G picks one: worked as a REPLY would,
+        // from their call (the report), with what was said kept.
+        rx(&mut q, &calls(75, &[("K1ABC FN42", 3), ("EA8XYZ IL18", -15)]), 90);
+        assert_eq!(q.choices().len(), 2);
+        q.start_qso("EA8XYZ", Some("IL18".into()), -15, false, 91);
+        assert!(q.choices().is_empty());
+        assert_eq!(q.plan_tx().as_deref(), Some("EA8XYZ AJ3G -15"));
+        let t: Vec<&str> = q.transcript().iter().map(|l| l.text.as_str()).collect();
+        assert!(t.contains(&"AJ3G EA8XYZ IL18"), "{t:?}");
+    }
+
+    #[test]
+    fn best_ranks_new_dxcc_then_new_on_the_band_then_fresh_then_far_then_strong() {
+        let mut q = Qso::new(Config { several: Several::Best, ..cfg() });
+        let badges = |call: &str, _: Option<&str>| match call {
+            "W5NEW" => Badges { new_dxcc: true, ..Badges::default() },
+            "W6BND" => Badges { new_band: true, ..Badges::default() },
+            _ => Badges::default(),
+        };
+        let pick = |q: &mut Qso, who: &[(&str, i16)]| {
+            q.call_cq();
+            q.on_rx(&calls(15, who), 30);
+            q.settle(Some(15), 30, &badges);
+            q.dx_call().map(str::to_string)
+        };
+        // A new DXCC beats everything; then new on the band.
+        assert_eq!(pick(&mut q, &[("JA1ABC PM95", 0), ("W6BND CM87", -20), ("W5NEW EM12", -24)]).as_deref(), Some("W5NEW"));
+        assert_eq!(pick(&mut q, &[("JA1ABC PM95", 0), ("W6BND CM87", -20)]).as_deref(), Some("W6BND"));
+        // Then one not worked this session.
+        q.note_worked("JA1ABC");
+        assert_eq!(pick(&mut q, &[("JA1ABC PM95", 0), ("K1ABC FN42", -20)]).as_deref(), Some("K1ABC"));
+        // Then the farthest: another continent ahead of our own, then by
+        // distance; our own country last.
+        assert_eq!(pick(&mut q, &[("K1ABC FN42", 9), ("VE3XYZ FN03", -5), ("G4ABC IO91", -20)]).as_deref(), Some("G4ABC"));
+        assert_eq!(pick(&mut q, &[("K1ABC FN42", 9), ("VE3XYZ FN03", -5)]).as_deref(), Some("VE3XYZ"));
+        assert_eq!(pick(&mut q, &[("W7AAA DN31", -20), ("K1ABC FN42", 9)]).as_deref(), Some("W7AAA"));
+        // The signal last.
+        assert_eq!(pick(&mut q, &[("K2AAA FN30", -20), ("K2BBB FN30", 1)]).as_deref(), Some("K2BBB"));
     }
 
     #[test]

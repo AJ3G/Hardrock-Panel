@@ -772,6 +772,19 @@ fn skim_ink(s: &skim::SkimSpot, alpha: f32) -> Color32 {
     c.gamma_multiply(alpha)
 }
 
+/// A skimmer label's text: its tag in the ink it is painted with, then
+/// what is new about the station on this band, in that badge's colour
+/// (decision 122).
+fn skim_text(sc: &Scope, p: &egui::Painter, s: &skim::SkimSpot, font: FontId, alpha: f32) -> Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(&s.tag(), 0.0, egui::TextFormat::simple(font.clone(), Color32::PLACEHOLDER));
+    if let Some((what, c)) = sc.skim.novel.get(&s.call.to_ascii_uppercase()) {
+        let small = FontId::proportional(font.size * 0.85);
+        job.append(what, 0.6 * font.size, egui::TextFormat::simple(small, c.gamma_multiply(alpha)));
+    }
+    p.layout_job(job)
+}
+
 /// The skimmer's labels up the spectrum's foot: each station's callsign,
 /// standing on its frequency, over the grid's labels.
 fn paint_skim_spectrum(sc: &Scope, p: &egui::Painter, all: Rect, trace: Rect, cx: &Ctx) {
@@ -791,7 +804,7 @@ fn paint_skim_spectrum(sc: &Scope, p: &egui::Painter, all: Rect, trace: Rect, cx
         let mark = skim_mark(sc, i);
         let on = mark.is_some();
         let col = if on { ink() } else { skim_ink(s, *a) };
-        let g = p.layout_no_wrap(s.tag(), font.clone(), col);
+        let g = skim_text(sc, p, s, font.clone(), *a);
         let (w, h) = (g.size().x, g.size().y);
         // A bold tick on the station's frequency (AJ3G: easy to read).
         let tick = if let Some(c) = mark {
@@ -852,7 +865,7 @@ fn paint_skim_waterfall(sc: &mut Scope, ui: &egui::Ui, p: &egui::Painter, rect: 
         .iter()
         .map(|&i| {
             let (s, a) = &sc.skim_shown[i];
-            p.layout_no_wrap(s.tag(), font.clone(), skim_ink(s, *a))
+            skim_text(sc, p, s, font.clone(), *a)
         })
         .collect();
     let boxes: Vec<(f32, f32)> = vis

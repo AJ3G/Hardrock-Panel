@@ -563,16 +563,7 @@ impl App {
             scope_mode,
         };
         let log = &self.logbook;
-        let badges = |call: &str, grid: Option<&str>| {
-            let w = log.worked(call, band, "FT8", grid);
-            tx::Badges {
-                dupe: w.dupe,
-                new_call: w.new_call,
-                new_band: w.new_band,
-                new_dxcc: w.new_dxcc,
-                new_grid: w.new_grid,
-            }
-        };
+        let badges = |call: &str, grid: Option<&str>| log.worked(call, band, "FT8", grid);
         // TX freq AUTO's ear on the receiver's audio, only while it is in
         // use (decision 115).
         let auto = self.saved.show_tx
@@ -640,10 +631,15 @@ impl App {
                 ..Default::default()
             };
             let adif = logbook::adif::record(&rec);
+            // What it brings that is new, against the log before it
+            // (decision 122): "New on 20m: Italy (DXCC·BAND), JN61 (GRID·BAND)".
+            let news = self.logbook.news(&rec);
             let id = self.logbook.add(rec);
             tracing::info!("log: {} logged from TX (#{id})", l.call);
-            let entity = dxcc::lookup(&l.call).map(|e| e.name);
-            self.tx.qso.note_worked(&l.call, entity.as_deref());
+            if let Some(line) = logbook::novelty::news_line(logbook::adif_band(rf), &news) {
+                tracing::info!("log: {line}");
+            }
+            self.tx.qso.note_worked(&l.call);
             if let Some(u) = self.outside.wsjtx.as_ref() {
                 u.logged_adif(&adif);
             }
@@ -953,6 +949,8 @@ impl App {
         let keyed = rig.filter(|r| r.connected).map_or(transmitting, |r| r.transmitting());
         self.decode.note_keyed(decoders::slot::utc_now(), keyed);
         self.tx.occ.set_keyed(keyed);
+        // What the log has worked, for DECODE's badges (decision 122).
+        self.decode.worked = Some(self.logbook.worked_index());
         self.decode.frame(
             &self.saved.decode,
             &self.saved.station,
@@ -968,6 +966,22 @@ impl App {
         self.scope.decode_slots(self.decode.slots());
         // And its labels, DECODE's decodes (decision 54).
         let mut feed = self.decode.skim_feed(&self.saved.decode);
+        // What is new about each station labelled, on its band: the rarest
+        // DXCC or grid badge (decision 122).
+        if let Some(f) = feed.as_mut() {
+            let ix = self.logbook.worked_index();
+            for s in &f.spots {
+                let key = s.call.to_ascii_uppercase();
+                if f.novel.contains_key(&key) {
+                    continue;
+                }
+                let band = logbook::adif_band(s.hz + xvtr as f64);
+                let grid = station::sender_of(&s.text).1;
+                if let Some(t) = ix.worked(&s.call, band, "", grid.as_deref()).top_award() {
+                    f.novel.insert(key, (t.label(), t.colour()));
+                }
+            }
+        }
         let fakes = self.rx.demo_fakes();
         if !fakes.is_empty() {
             let f = feed
@@ -1142,6 +1156,7 @@ impl App {
     ) {
         let mut open = true;
         let rx_hz = self.heard_hz(rig, xvtr).map(|f| f as f64);
+        self.globe.worked = Some(self.logbook.worked_index());
         let o = globe::window(
             ctx,
             &mut open,

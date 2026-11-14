@@ -149,6 +149,96 @@ fn worked_says_what_is_new() {
 }
 
 #[test]
+fn entities_and_grids_are_new_band_by_band_in_any_mode() {
+    use novelty::Tag;
+    let mut log = Logbook::in_memory();
+    let mut a = qso("I1ABC", "20m", "CW", T);
+    a.grid = "JN45".into();
+    log.add(a);
+    // Italy and JN45 were worked on 20 m in CW: on 20 m in FT8 they are
+    // not new (any mode counts), and only the call is.
+    let w = log.worked("I2XYZ", "20m", "FT8", Some("JN45"));
+    assert_eq!(w, Worked { new_call: true, ..Worked::default() });
+    assert_eq!(w.tags(), [Tag::Call]);
+    // On 40 m both are new on the band, and the entity outranks the grid.
+    let w = log.worked("I2XYZ", "40m", "FT8", Some("JN45ab"));
+    assert!(w.new_band && w.new_grid_band && !w.new_dxcc && !w.new_grid);
+    assert_eq!(w.tags(), [Tag::DxccBand, Tag::GridBand, Tag::Call]);
+    assert_eq!(w.top_award(), Some(Tag::DxccBand));
+    assert!(w.is_new());
+    // A grid never worked is GRID, not GRID·BAND.
+    let w = log.worked("I2XYZ", "40m", "FT8", Some("JN61"));
+    assert!(w.new_grid && !w.new_grid_band);
+    // A new entity is DXCC alone: not also new on the band, and no NEW.
+    let w = log.worked("JA1ABC", "40m", "FT8", Some("PM95"));
+    assert_eq!(w.tags(), [Tag::Dxcc, Tag::Grid]);
+    // With no band known, nothing is said band by band.
+    let w = log.worked("I2XYZ", "", "FT8", Some("JN45"));
+    assert!(!w.new_band && !w.new_grid_band && !w.dupe);
+    // Worked again on 40 m: nothing new there now but the call.
+    let mut b = qso("I3QQQ", "40m", "FT4", T + 600);
+    b.grid = "JN45".into();
+    log.add(b);
+    let w = log.worked("I2XYZ", "40m", "FT8", Some("JN45"));
+    assert_eq!(w.tags(), [Tag::Call]);
+    // The shared index says the same as the log.
+    assert_eq!(log.worked_index().worked("I2XYZ", "40m", "FT8", Some("JN45")), w);
+}
+
+#[test]
+fn a_qso_logged_names_what_it_brought_that_was_new() {
+    let mut log = Logbook::in_memory();
+    let mut a = qso("I1ABC", "20m", "FT8", T);
+    a.grid = "JN45".into();
+    log.add(a.clone());
+    let mut b = qso("I1ABC", "40m", "FT8", T + 600);
+    b.grid = "JN61".into();
+    b.normalise();
+    let news = log.news(&b);
+    let line = novelty::news_line("40m", &news).unwrap();
+    assert_eq!(line, "New on 40m: Italy (DXCC·BAND), JN61 (GRID)");
+    log.add(b);
+    // The same again: nothing new.
+    let mut c = qso("I1ABC", "40m", "FT8", T + 1200);
+    c.grid = "JN61".into();
+    assert!(novelty::news_line("40m", &log.news(&c)).is_none());
+    // The run's news, oldest first: the first QSO's, then the second's.
+    let s: Vec<(novelty::Tag, &str, &str)> =
+        log.session_news().iter().map(|n| (n.tag, n.what.as_str(), n.band.as_str())).collect();
+    assert_eq!(
+        s,
+        [
+            (novelty::Tag::Dxcc, "Italy", "20m"),
+            (novelty::Tag::Grid, "JN45", "20m"),
+            (novelty::Tag::DxccBand, "Italy", "40m"),
+            (novelty::Tag::Grid, "JN61", "40m"),
+        ]
+    );
+}
+
+#[test]
+fn the_needed_report_counts_entities_and_grids_per_band_and_confirmed() {
+    let mut log = Logbook::in_memory();
+    let mut a = qso("I1ABC", "20m", "FT8", T);
+    a.grid = "JN45".into();
+    a.lotw.rcvd = true;
+    log.add(a);
+    let mut b = qso("I2XYZ", "20m", "FT8", T + 60);
+    b.grid = "JN61".into();
+    log.add(b);
+    let mut c = qso("JA1ABC", "40m", "FT8", T + 120);
+    c.grid = "PM95".into();
+    log.add(c);
+    let t = novelty::tally(log.records());
+    let bands: Vec<&str> = t.iter().map(|b| b.band.as_str()).collect();
+    assert_eq!(bands, ["40m", "20m", "All"], "by frequency, then the whole log");
+    let twenty = &t[1];
+    assert_eq!((twenty.dxcc, twenty.dxcc_conf, twenty.grids, twenty.grids_conf), (1, 1, 2, 1));
+    let all = &t[2];
+    assert_eq!((all.dxcc, all.dxcc_conf, all.grids, all.grids_conf), (2, 1, 3, 1));
+}
+
+#[test]
 fn import_skips_what_the_log_has_within_two_minutes() {
     let mut log = Logbook::in_memory();
     log.add(qso("JA1ABC", "20m", "FT8", T));
