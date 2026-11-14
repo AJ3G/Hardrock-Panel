@@ -253,6 +253,7 @@ pub(crate) fn tone_blocked(rig: &RigStatus, device: Option<&str>) -> Option<Stri
 /// TX TUNE and RIG TUNE judge SWR by [`TuneSwr`] instead, and a TX window
 /// over or an outside program's by [`OverSwr`]; this one-reading rule is
 /// kept for the tests that compare against it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn tune_must_stop(
     amp: &AmpStatus,
     rig: &RigStatus,
