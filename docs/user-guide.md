@@ -921,8 +921,8 @@ transcript says "Left K1ABC for W9XYZ". Click a queued call to drop it. Picking 
   on this band), **GRID** (a grid never worked), **GRID·BAND** (not on this
   band), **NEW** (a call never worked), **DUPE** (dupes fade). Any mode
   counts for a band. **New only** keeps the rows with any of the first five.
-  DECODE's list shows the same badges after each line, the scope's skimmer
-  labels and GLOBE's spots the rarest DXCC or grid one; magenta and purple
+  DECODE's list shows the same badges after each line, and GLOBE's spots
+  the rarest DXCC or grid one (the scope's labels carry none); magenta and purple
   are DXCC, cyan grids. A station calling you has a blue
   band, ▶ and bold text, at the top of its turn; a CQ you can answer is green
   (a directed CQ only when it includes you); your own overs are orange.

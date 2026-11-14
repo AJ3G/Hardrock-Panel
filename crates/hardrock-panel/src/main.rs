@@ -966,22 +966,6 @@ impl App {
         self.scope.decode_slots(self.decode.slots());
         // And its labels, DECODE's decodes (decision 54).
         let mut feed = self.decode.skim_feed(&self.saved.decode);
-        // What is new about each station labelled, on its band: the rarest
-        // DXCC or grid badge (decision 122).
-        if let Some(f) = feed.as_mut() {
-            let ix = self.logbook.worked_index();
-            for s in &f.spots {
-                let key = s.call.to_ascii_uppercase();
-                if f.novel.contains_key(&key) {
-                    continue;
-                }
-                let band = logbook::adif_band(s.hz + xvtr as f64);
-                let grid = station::sender_of(&s.text).1;
-                if let Some(t) = ix.worked(&s.call, band, "", grid.as_deref()).top_award() {
-                    f.novel.insert(key, (t.label(), t.colour()));
-                }
-            }
-        }
         let fakes = self.rx.demo_fakes();
         if !fakes.is_empty() {
             let f = feed

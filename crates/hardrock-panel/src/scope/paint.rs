@@ -772,16 +772,12 @@ fn skim_ink(s: &skim::SkimSpot, alpha: f32) -> Color32 {
     c.gamma_multiply(alpha)
 }
 
-/// A skimmer label's text: its tag in the ink it is painted with, then
-/// what is new about the station on this band, in that badge's colour
-/// (decision 122).
-fn skim_text(sc: &Scope, p: &egui::Painter, s: &skim::SkimSpot, font: FontId, alpha: f32) -> Arc<egui::Galley> {
+/// A skimmer label's text: its tag in the ink it is painted with. No
+/// DXCC or grid badges on the scope (AJ3G, 14 Nov 2026: "Remove the DXCC
+/// and BAND stuff from the scope"); DECODE, TX and GLOBE carry them.
+fn skim_text(_sc: &Scope, p: &egui::Painter, s: &skim::SkimSpot, font: FontId, _alpha: f32) -> Arc<egui::Galley> {
     let mut job = egui::text::LayoutJob::default();
-    job.append(&s.tag(), 0.0, egui::TextFormat::simple(font.clone(), Color32::PLACEHOLDER));
-    if let Some((what, c)) = sc.skim.novel.get(&s.call.to_ascii_uppercase()) {
-        let small = FontId::proportional(font.size * 0.85);
-        job.append(what, 0.6 * font.size, egui::TextFormat::simple(small, c.gamma_multiply(alpha)));
-    }
+    job.append(&s.tag(), 0.0, egui::TextFormat::simple(font, Color32::PLACEHOLDER));
     p.layout_job(job)
 }
 
