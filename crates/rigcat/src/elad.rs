@@ -193,7 +193,7 @@ pub const CONTROLS: &[Control] = &[
     ctl("NB", "NB;", "", None, "NB", "Noise blanker", Receive, OFF_ON),
     ctl(
         "NK",
-        "NK;",
+        "NK0;",
         "0",
         None,
         "NB LEVEL",
@@ -204,7 +204,7 @@ pub const CONTROLS: &[Control] = &[
     ctl("NR", "NR;", "", None, "NR", "Noise reduction", Receive, OFF_ON),
     ctl(
         "NC",
-        "NC;",
+        "NC0;",
         "0",
         None,
         "NR LEVEL",
@@ -212,8 +212,8 @@ pub const CONTROLS: &[Control] = &[
         Receive,
         range(0, 10, 1, 2, ""),
     ),
-    ctl("NO", "NO;", "0", None, "NOTCH", "Automatic notch, 0 off", Receive, range(0, 2, 1, 2, "")),
-    ctl("SQ", "SQ;", "0", None, "SQUELCH", "Squelch, 0 off", Receive, range(0, 10, 1, 2, "")),
+    ctl("NO", "NO0;", "0", None, "NOTCH", "Automatic notch, 0 off", Receive, range(0, 2, 1, 2, "")),
+    ctl("SQ", "SQ0;", "0", None, "SQUELCH", "Squelch, 0 off", Receive, range(0, 10, 1, 2, "")),
     ctl("RF", "RF;", "", None, "RX FILTER", "Receive filter, per mode", Receive, RO),
     ctl(
         "MT",
@@ -335,7 +335,7 @@ pub const CONTROLS: &[Control] = &[
     ),
     ctl(
         "TB",
-        "TB;",
+        "TB0;",
         "0",
         Some(35),
         "TX BW",
@@ -369,7 +369,7 @@ pub const CONTROLS: &[Control] = &[
     ),
     ctl(
         "NT",
-        "NT;",
+        "NT0;",
         "0",
         Some(51),
         "NOISE GATE",
@@ -379,7 +379,7 @@ pub const CONTROLS: &[Control] = &[
     ),
     ctl(
         "CG",
-        "CG;",
+        "CG0;",
         "0",
         Some(52),
         "COMP",
@@ -389,7 +389,7 @@ pub const CONTROLS: &[Control] = &[
     ),
     ctl(
         "FD",
-        "FD;",
+        "FD0;",
         "0",
         Some(53),
         "FM DEV",
@@ -504,6 +504,17 @@ const NEVER_SET: &[&str] = &["BR"];
 
 pub fn control(cmd: &str) -> Option<&'static Control> {
     CONTROLS.iter().find(|c| c.cmd == cmd)
+}
+
+/// Menu 35 TX BW as last read: the low and high edges of the radio's
+/// transmit audio filter, Hz. Audio near or past the high edge comes out
+/// with little power (AJ3G, 14 Nov 2026: an FT8 tone at 2760 Hz on
+/// 100-2700), so the TX window keeps its tone clear of it (decision 125).
+pub fn tx_bw_hz(s: &RigStatus) -> Option<(u32, u32)> {
+    let c = control("TB")?;
+    let (_, label) = c.choice_of(c.value_of(s.value("TB")?))?;
+    let (lo, hi) = label.split_once('-')?;
+    Some((lo.parse().ok()?, hi.parse().ok()?))
 }
 
 /// Everything read every few seconds: the settings above plus the RIT offset,
@@ -1196,6 +1207,54 @@ mod tests {
         assert_eq!(describe("SP", "0").unwrap(), "Off");
         assert!(describe("TP", "12").is_none());
         assert!(describe("ZZ", "1").is_none());
+    }
+
+    #[test]
+    fn settings_with_a_fixed_p1_read_with_it_and_parse_either_way() {
+        // The manual gives these a P1 of 0 on the read as well; SDR Console
+        // reads `TB0;` and `CG0;`. Read without it, the DUO leaves TX BW
+        // blank (AJ3G, 14 Nov 2026).
+        for k in ["NK", "NC", "NO", "SQ", "NT", "CG", "FD", "TB"] {
+            let c = control(k).unwrap();
+            assert_eq!(c.prefix, "0");
+            assert_eq!(c.read, format!("{k}0;"), "{k}");
+            assert!(is_read(c.read));
+        }
+        let tb = control("TB").unwrap();
+        for body in ["005", "05", "5", "0005"] {
+            assert_eq!(tb.label(tb.value_of(body)), "200-2700", "TB{body}");
+        }
+        assert_eq!(describe("TB", "003").unwrap(), "100-3500");
+        assert_eq!(describe("TB", "012").unwrap(), "300-4000");
+        assert_eq!(describe("TB", "12").unwrap(), "300-4000");
+        assert_eq!(describe("TB", "000").unwrap(), "50-4000");
+        assert_eq!(describe("TB", "00").unwrap(), "50-4000");
+        // Not a code: shown as answered, not taken for the first choice.
+        assert_eq!(describe("TB", "0?").unwrap(), "0?");
+        let fd = control("FD").unwrap();
+        assert_eq!(fd.label(fd.value_of("01")), "5 kHz");
+        assert_eq!(fd.label(fd.value_of("1")), "5 kHz");
+        assert_eq!(fd.label(fd.value_of("0")), "2.5 kHz");
+        assert_eq!(fd.label(fd.value_of("00")), "2.5 kHz");
+        let nk = control("NK").unwrap();
+        for body in ["003", "03", "3"] {
+            assert_eq!(nk.value_of(body).parse::<i32>().unwrap(), 3, "NK{body}");
+        }
+        // A choice sent as a number however padded goes out as its code.
+        let d = FdmDuo::default();
+        let set = |v: &str| String::from_utf8(d.set_control(tb, v, None).unwrap().bytes).unwrap();
+        assert_eq!(set("05"), "TB005;");
+        assert_eq!(set("5"), "TB005;");
+        assert!(d.set_control(tb, "13", None).is_err());
+        // The edges, for the TX window's AUTO (decision 125).
+        let mut s = RigStatus::default();
+        assert_eq!(tx_bw_hz(&s), None);
+        for (body, want) in [("001", (100, 2700)), ("03", (100, 3500)), ("000", (50, 4000))] {
+            d.apply(&mut s, &Reply { key: "TB".into(), body: body.into() });
+            assert_eq!(tx_bw_hz(&s), Some(want), "TB{body}");
+        }
+        d.apply(&mut s, &Reply { key: "TB".into(), body: "?".into() });
+        assert_eq!(tx_bw_hz(&s), None);
     }
 
     #[test]

@@ -1212,9 +1212,10 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, sp
         };
         if chrome::chip(ui, s.freq != FreqMode::Manual, s.freq.label())
             .on_hover_text(
-                "AUTO picks the clearest gap in your own period before each over; MANUAL follows the bar and \
-                 a decode clicked; HOLD moves only by a drag or a typed value. Dragging the bar on AUTO \
-                 switches to MANUAL.",
+                "AUTO picks the clearest gap in your own period before each over, inside what menu 35 TX BW \
+                 passes cleanly; MANUAL follows the bar, a decode clicked or a typed value (the bar moves \
+                 to it); HOLD moves only by a drag or a typed value. Dragging the bar on AUTO switches to \
+                 MANUAL.",
             )
             .clicked()
         {
@@ -1228,6 +1229,10 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, sp
         );
         drive(ui, c, s.ft8_level);
     });
+    // The tone near the edge of the radio's transmit filter (decision 125).
+    if let Some(n) = &tx.filter_note {
+        ui.label(RichText::new(n).size(11.0).color(theme::YELLOW()));
+    }
     // The queue.
     ui.horizontal_wrapped(|ui| {
         caption(ui, "QUEUE");

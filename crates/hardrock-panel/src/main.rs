@@ -581,6 +581,9 @@ impl App {
             && rx_dial.is_some();
         self.tx.occ.tap(&self.rx.taps, auto);
         let mut out = self.tx.frame(&mut self.saved.tx, env, feed, &self.decode.heard, &badges);
+        // In split, VFO B is the TX window's while its overs use it
+        // (decision 125), so TX follows RX doesn't pull it back.
+        self.rx.split.tx_window_b = out.split_b;
         // The bar and the busy shading are TX's only while its window is
         // open: elsewhere the bar is the operator's measuring cursor.
         let tx_shown = self.saved.show_tx;
