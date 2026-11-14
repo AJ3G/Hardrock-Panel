@@ -202,6 +202,8 @@ struct App {
     /// TX TUNE's and RIG TUNE's SWR rule (interlock #6): the run of high
     /// readings it is timing.
     tune_swr: tune::TuneSwr,
+    /// SWR over the warning in this TX window or outside over (#6).
+    over_swr: tune::OverSwr,
     /// The over (by when it was keyed) whose stop has been logged, so each
     /// stop's reason goes in the log once.
     stop_logged: Option<Instant>,
@@ -321,6 +323,7 @@ impl App {
             usb_audio_set: false,
             amp_hold: tune::AmpHold::default(),
             tune_swr: tune::TuneSwr::default(),
+            over_swr: tune::OverSwr::default(),
             stop_logged: None,
             tone_asked: None,
             tx_sources: (String::new(), None),
@@ -410,6 +413,9 @@ impl App {
         if !tuning.is_some_and(|t| matches!(t.keying, Keying::Audio | Keying::Carrier)) {
             self.tune_swr.reset();
         }
+        if !tuning.is_some_and(|t| outside || t.keying == Keying::Data) {
+            self.over_swr.reset();
+        }
         let (Some(link), Some(r), Some(t)) = (&self.rig, rig, tuning) else { return };
         // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): an over in
         // progress is judged by the amplifier's last readings for up to 5 s
@@ -429,14 +435,18 @@ impl App {
             }
         };
         let amp = &held;
+        let keyed_for = now.saturating_duration_since(t.since);
         if outside {
             // SAFETY INTERLOCK (docs/safety-interlocks.md, #8 with #6): an
             // outside program's transmission is watched as TUNE is, at the
             // radio's full power setting (its audio can bring it that high),
             // and stopped when transmitting from outside is turned off.
             let watts = tune::planned_watts(r, Keying::Carrier, 1.0);
-            let why =
-                tune::tune_must_stop(amp, r, self.saved.swr_warn, watts, false).or_else(|| {
+            // SWR by `tune::OverSwr`: 1 s to settle, 0.5 s over the warning.
+            let why = self
+                .over_swr
+                .must_stop(amp, r, self.saved.swr_warn, watts, false, keyed_for, now)
+                .or_else(|| {
                     (!self.outside.allow_tx())
                         .then(|| "transmitting from outside programs was turned off".to_string())
                 });
@@ -451,7 +461,13 @@ impl App {
             // and the window's own (its audio, WSPR's temperature, #12).
             let level = self.tx.over_mode().map_or(1.0, |m| self.saved.tx.level(m));
             let watts = tune::planned_watts(r, Keying::Data, level);
-            let why = tune::tune_must_stop(amp, r, self.saved.swr_warn, watts, false)
+            // SAFETY INTERLOCK (docs/safety-interlocks.md, #6): SWR by
+            // `tune::OverSwr` (decision 121): not for the first second, nor
+            // off a fraction of a watt, and only once held 0.5 s over the
+            // warning; twice the warning on the amplifier stops it at once.
+            let why = self
+                .over_swr
+                .must_stop(amp, r, self.saved.swr_warn, watts, false, keyed_for, now)
                 .map(Some)
                 .or_else(|| self.tx.keep(decoders::slot::utc_now()));
             match why {
@@ -476,7 +492,6 @@ impl App {
         // is raised past it), or the SWR stays high past the tuner's
         // sweep (`tune::TuneSwr`: the limit doubled, 5 s to settle, and
         // never the radio's while the amplifier's tuner is tuning).
-        let keyed_for = now.saturating_duration_since(t.since);
         let why = self
             .tune_swr
             .must_stop(amp, r, self.saved.swr_warn, watts, self.trip_carried, keyed_for, now)

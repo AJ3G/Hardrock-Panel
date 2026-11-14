@@ -250,8 +250,9 @@ pub(crate) fn tone_blocked(rig: &RigStatus, device: Option<&str>) -> Option<Stri
 /// started and hasn't cleared since: that one doesn't stop it, since keying
 /// is what clears it. Any other trip does.
 ///
-/// This is the rule for an ordinary over (a TX window over, an outside
-/// program's). TX TUNE and RIG TUNE judge SWR by [`TuneSwr`] instead.
+/// TX TUNE and RIG TUNE judge SWR by [`TuneSwr`] instead, and a TX window
+/// over or an outside program's by [`OverSwr`]; this one-reading rule is
+/// kept for the tests that compare against it.
 pub(crate) fn tune_must_stop(
     amp: &AmpStatus,
     rig: &RigStatus,
@@ -392,6 +393,113 @@ impl TuneSwr {
         };
         let since = *self.over_since.get_or_insert(now);
         (now.saturating_duration_since(since) >= TUNE_SWR_DWELL).then_some(why)
+    }
+}
+
+/// How long after keying an ordinary over's SWR is not believed: the radio's
+/// key-down and the audio's ramp, when the meters read SWR off almost no
+/// power.
+pub(crate) const OVER_SWR_SETTLE: Duration = Duration::from_secs(1);
+/// How long the SWR must stay at or over the warning before it stops an
+/// ordinary over: several of the radio's readings (50 to 150 ms apart keyed)
+/// and more than one of the amplifier's.
+pub(crate) const OVER_SWR_DWELL: Duration = Duration::from_millis(500);
+/// Below this forward power from the amplifier in line, its SWR is not
+/// believed: the ratio of two readings near zero.
+pub(crate) const OVER_SWR_MIN_AMP_W: f32 = 5.0;
+/// Below this forward power from the radio, its SWR is not believed.
+pub(crate) const OVER_SWR_MIN_RIG_W: f32 = 0.5;
+
+/// The SWR rule for an ordinary over: a TX window over, or an outside
+/// program's.
+///
+/// SAFETY INTERLOCK (docs/safety-interlocks.md, #6): one reading at the
+/// warning stopped the over, and FT8 overs were cut short for a high SWR the
+/// antenna didn't have (AJ3G, 14 Nov 2026). A reading taken at key-down, as
+/// the audio ramps, or off a fraction of a watt is the ratio of two numbers
+/// near zero. So, for an ordinary over:
+/// - SWR is not judged for the first [`OVER_SWR_SETTLE`] after keying, nor
+///   while the amplifier says its tuner is tuning and for
+///   [`OVER_SWR_SETTLE`] after (it protects itself then, and a tuner
+///   switching makes the SWR jump; AJ3G: "its not getting enough time to let
+///   the Tuner run"), nor
+///   while the forward power it is read from is under [`OVER_SWR_MIN_AMP_W`]
+///   (amplifier in line) or [`OVER_SWR_MIN_RIG_W`] (radio).
+/// - After that, SWR at or over the warning stops the over once it has stayed
+///   there for [`OVER_SWR_DWELL`].
+/// - SWR at or over twice the warning ([`swr_tune_limit`]) on the amplifier
+///   in line, with its power above the floor and past the settle, still stops
+///   it on one reading.
+///
+/// Everything else in [`tune_must_stop`] still stops it at once.
+#[derive(Default)]
+pub(crate) struct OverSwr {
+    over_since: Option<Instant>,
+    /// When the amplifier's tuner last said it was tuning in this over.
+    atu_at: Option<Instant>,
+}
+
+impl OverSwr {
+    /// Forget the last run of high readings: when no ordinary over is keyed.
+    pub(crate) fn reset(&mut self) {
+        self.over_since = None;
+        self.atu_at = None;
+    }
+
+    /// Why an ordinary over keyed for `keyed_for` must stop now, or `None`;
+    /// once a frame while it is keyed. The other arguments are
+    /// [`tune_must_stop`]'s.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn must_stop(
+        &mut self,
+        amp: &AmpStatus,
+        rig: &RigStatus,
+        swr_warn: f32,
+        watts: Option<f32>,
+        carried_trip: bool,
+        keyed_for: Duration,
+        now: Instant,
+    ) -> Option<String> {
+        let r = match stop_but_swr(amp, rig, watts, carried_trip) {
+            Err(why) => return Some(why),
+            Ok(r) => r?,
+        };
+        if amp.atu.as_ref().is_some_and(|a| a.tuning) {
+            self.atu_at = Some(now);
+        }
+        let tuner_settling =
+            self.atu_at.is_some_and(|t| now.saturating_duration_since(t) < OVER_SWR_SETTLE);
+        if keyed_for < OVER_SWR_SETTLE || tuner_settling {
+            self.over_since = None;
+            return None;
+        }
+        let mut over = None;
+        if r.ptt && r.fwd_w >= OVER_SWR_MIN_AMP_W && r.swr >= swr_warn {
+            let at =
+                format!("{:.1}:1 (forward {:.0} W, reflected {:.0} W)", r.swr, r.fwd_w, r.rfl_w);
+            if r.swr >= swr_tune_limit(swr_warn) {
+                return Some(format!("The amplifier's SWR reached {at}."));
+            }
+            over = Some(format!("The amplifier's SWR stayed at {at}."));
+        }
+        let rig_fwd = rig.fwd_w();
+        if over.is_none()
+            && rig_fwd.is_none_or(|w| w >= OVER_SWR_MIN_RIG_W)
+            && let Some(s) = rig.swr_ratio().filter(|s| *s >= swr_warn)
+        {
+            over = Some(match (rig_fwd, rig.rfl_w()) {
+                (Some(f), Some(rf)) => format!(
+                    "The radio's SWR stayed at {s:.1}:1 (forward {f:.1} W, reflected {rf:.1} W)."
+                ),
+                _ => format!("The radio's SWR stayed at {s:.1}:1."),
+            });
+        }
+        let Some(why) = over else {
+            self.over_since = None;
+            return None;
+        };
+        let since = *self.over_since.get_or_insert(now);
+        (now.saturating_duration_since(since) >= OVER_SWR_DWELL).then_some(why)
     }
 }
 
@@ -1019,5 +1127,122 @@ mod tests {
         let mut r = duo(14_074_000, 2);
         r.swr = elad::parse_swr("0 03.50");
         assert!(tune_must_stop(&amp(false, 5), &r, 3.0, w(&r), false).is_some());
+    }
+
+    /// An ordinary over's SWR rule, read once at each of `steps` (time since
+    /// keying, the amplifier, the radio's SWR, the radio's forward watts).
+    fn over_run(steps: &[(u64, &AmpStatus, f32, Option<f32>)]) -> Vec<Option<String>> {
+        let t0 = Instant::now();
+        let mut g = OverSwr::default();
+        steps
+            .iter()
+            .map(|(ms, a, swr, fwd)| {
+                let mut r = duo(14_074_000, 2);
+                r.swr = elad::parse_swr(&format!("0 {swr:05.2}"));
+                r.fwd = fwd.map(|w| rigcat::Watts { w, valid: true });
+                r.rfl = fwd.map(|_| rigcat::Watts { w: 0.5, valid: true });
+                let at = Duration::from_millis(*ms);
+                g.must_stop(a, &r, 3.0, w(&r), false, at, t0 + at)
+            })
+            .collect()
+    }
+
+    fn amp_swr(swr: f32, fwd_w: f32) -> AmpStatus {
+        let mut a = amp(true, 5);
+        let r = a.readings.as_mut().unwrap();
+        (r.swr, r.fwd_w, r.rfl_w) = (swr, fwd_w, fwd_w / 10.0);
+        a
+    }
+
+    #[test]
+    fn an_over_ignores_swr_at_key_down() {
+        let a = amp_swr(9.9, 400.0);
+        let out = over_run(&[
+            (0, &a, 9.9, Some(4.0)),
+            (500, &a, 9.9, Some(4.0)),
+            (900, &a, 9.9, Some(4.0)),
+        ]);
+        assert!(out.iter().all(Option::is_none), "{out:?}");
+    }
+
+    #[test]
+    fn an_over_ignores_swr_read_off_almost_no_power() {
+        // The radio's ratio with 0.1 W forward, the amplifier's with 2 W.
+        let quiet = amp_swr(9.9, 2.0);
+        let out = over_run(&[
+            (1000, &quiet, 9.9, Some(0.1)),
+            (2000, &quiet, 9.9, Some(0.1)),
+            (3000, &quiet, 9.9, Some(0.1)),
+        ]);
+        assert!(out.iter().all(Option::is_none), "{out:?}");
+    }
+
+    #[test]
+    fn a_one_reading_spike_no_longer_stops_an_over() {
+        let a = amp(false, 5);
+        let out = over_run(&[
+            (1000, &a, 3.5, Some(4.0)),
+            (1100, &a, 1.2, Some(4.0)),
+            (1200, &a, 3.5, Some(4.0)),
+            (1300, &a, 1.2, Some(4.0)),
+        ]);
+        assert!(out.iter().all(Option::is_none), "{out:?}");
+    }
+
+    #[test]
+    fn swr_held_over_the_warning_still_stops_an_over() {
+        let a = amp(false, 5);
+        let out = over_run(&[
+            (1000, &a, 3.5, Some(4.0)),
+            (1200, &a, 3.5, Some(4.0)),
+            (1500, &a, 3.5, Some(4.0)),
+        ]);
+        assert_eq!(out[..2], [None, None]);
+        let why = out[2].as_deref().unwrap();
+        assert!(
+            why.contains("radio's SWR stayed at 3.5:1") && why.contains("forward 4.0 W"),
+            "{why}"
+        );
+        // With no forward reading from the radio its SWR is still believed.
+        let out = over_run(&[(1000, &a, 3.5, None), (1600, &a, 3.5, None)]);
+        assert!(out[1].is_some(), "{out:?}");
+        // The amplifier's own, held, in line with real power.
+        let a = amp_swr(3.5, 400.0);
+        let out = over_run(&[(1000, &a, 1.1, Some(4.0)), (1500, &a, 1.1, Some(4.0))]);
+        assert!(out[1].as_deref().unwrap().contains("amplifier's SWR stayed at 3.5:1"), "{out:?}");
+    }
+
+    #[test]
+    fn twice_the_warning_on_the_amplifier_stops_an_over_at_once() {
+        let a = amp_swr(6.5, 400.0);
+        let out = over_run(&[(1000, &a, 1.1, Some(4.0))]);
+        assert!(out[0].as_deref().unwrap().contains("amplifier's SWR reached 6.5:1"), "{out:?}");
+    }
+
+    #[test]
+    fn an_over_waits_for_the_amplifiers_tuner() {
+        let tuning = atu_tuning(amp_swr(9.9, 400.0));
+        let done = amp_swr(1.2, 400.0);
+        let out = over_run(&[
+            (1000, &tuning, 9.9, Some(4.0)),
+            (3000, &tuning, 9.9, Some(4.0)),
+            (3500, &done, 3.5, Some(4.0)),
+            (3900, &done, 3.5, Some(4.0)),
+        ]);
+        assert!(out.iter().all(Option::is_none), "{out:?}");
+        // A second after the tuner finished, SWR is judged again.
+        let out = over_run(&[
+            (1000, &tuning, 9.9, Some(4.0)),
+            (4100, &done, 3.5, Some(4.0)),
+            (4700, &done, 3.5, Some(4.0)),
+        ]);
+        assert!(out[2].is_some(), "{out:?}");
+    }
+
+    #[test]
+    fn a_trip_still_stops_an_over_at_once() {
+        let mut a = amp(true, 5);
+        a.alerts.tripped = true;
+        assert!(over_run(&[(0, &a, 1.0, Some(4.0))])[0].as_deref().unwrap().contains("tripped"));
     }
 }
