@@ -893,6 +893,18 @@ transcript says "Left K1ABC for W9XYZ". Click a queued call to drop it. Picking 
 - The **TRANSCRIPT** holds the whole QSO and stays at its newest line; drag
   the grip under it to make it taller or shorter (it remembers), and a taller
   window gives it the extra room.
+- **Several stations answering your CQ.** The panel waits until the whole
+  slot is decoded, then: one caller with **Call 1st** on is worked at once.
+  Several, with **Several: ASK** (the start), are shown under the transcript
+  as **N STATIONS CALLING YOU: PICK ONE**, a button each with the call, the
+  SNR, the flag and the log's badges, best for DX first; click one to work
+  it, as REPLY on their call would. If you pick none before your next over,
+  CQ goes again (they will usually call again). **Several: BEST** works one
+  by itself, favouring DX: a DXCC never worked, then a DXCC new on this band,
+  then a station not worked this session, then the farthest (another
+  continent ahead of your own, your own country last), the signal last. The
+  others are listed as ALSO CALLING. With Call 1st off they are always
+  offered to pick from.
 - **Call after RR73** (on to start): when the station you picked is working
   someone else, the panel waits; with this on, it calls them in your next
   slot as soon as they send that station RR73, RRR or 73, rather than waiting
@@ -904,8 +916,14 @@ transcript says "Left K1ABC for W9XYZ". Click a queued call to drop it. Picking 
   SETTINGS → Logbook's "Log a finished QSO without asking" off, the window
   asks first.
 - **The decode list**: the country's flag left of the SNR, country,
-  continent, heading and distance (dimmer when only the country is known), and badges from your log: **DXCC**, **BAND**,
-  **GRID**, **NEW**, **DUPE** (dupes fade). A station calling you has a blue
+  continent, heading and distance (dimmer when only the country is known), and badges from your log, the two
+  rarest: **DXCC** (an entity never worked), **DXCC·BAND** (worked, but not
+  on this band), **GRID** (a grid never worked), **GRID·BAND** (not on this
+  band), **NEW** (a call never worked), **DUPE** (dupes fade). Any mode
+  counts for a band. **New only** keeps the rows with any of the first five.
+  DECODE's list shows the same badges after each line, the scope's skimmer
+  labels and GLOBE's spots the rarest DXCC or grid one; magenta and purple
+  are DXCC, cyan grids. A station calling you has a blue
   band, ▶ and bold text, at the top of its turn; a CQ you can answer is green
   (a directed CQ only when it includes you); your own overs are orange.
 - **The station you are working** is marked on SCOPE in green, as boldly as
@@ -995,6 +1013,13 @@ entered is ever changed. **eQSL ↑** and **LoTW ↑** upload only when you pres
 them; LoTW needs ARRL's TQSL installed with your certificate. **QSL ✔**
 downloads confirmations. The logins are kept in the panel's settings file as
 plain text.
+
+**NEEDED** shows, band by band and for the whole log, how many DXCC entities
+and grids you have worked and how many of those are confirmed (LoTW, eQSL or
+card), and beside it what each QSO logged this run brought that was new
+(the entity or grid, its badge and band). Each QSO logged from the TX window
+also writes a line in the panel log (COPY LOG), for example *New on 20m:
+Italy (DXCC·BAND), JN61 (GRID·BAND)*.
 
 ## The globe
 

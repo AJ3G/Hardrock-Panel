@@ -447,6 +447,9 @@ pub(crate) struct Decode {
     keyed: KeyedLog,
     /// The last slot dropped for that, for the slot line.
     keyed_drop: Option<i64>,
+    /// What the log has worked, for the rows' badges (decision 122): the
+    /// panel hands it over each frame.
+    pub(crate) worked: Option<std::sync::Arc<crate::logbook::WorkedIndex>>,
 }
 
 /// One FT8 decode as TX reads it.
@@ -2338,13 +2341,30 @@ fn rows(ui: &mut egui::Ui, d: &mut Decode, fam: Family, st: &StationSettings) {
                 col,
             );
             let rest = row_rest(r, fam, &d.heard, st);
-            p.text(
+            let text = p.text(
                 rect.left_center() + egui::vec2(rest_at, 0.0),
                 egui::Align2::LEFT_CENTER,
                 rest,
                 font.clone(),
                 col,
             );
+            // What the log says of its sender on this band, after the
+            // text: the two rarest (decision 122).
+            if fam == Family::Wsjt
+                && let (Some(ix), Some(call)) = (&d.worked, &r.call)
+            {
+                let band = r.rf_hz.map_or("", crate::logbook::adif_band);
+                let mode = d.running_kind().map_or("", |k| k.label().split('-').next().unwrap_or(""));
+                let mut x = text.right() + 10.0;
+                for t in ix.worked(call, band, mode, r.grid.as_deref()).tags().into_iter().take(2) {
+                    if x + crate::logbook::novelty::width(p, t, 9.5) > rect.right() - 2.0 {
+                        break;
+                    }
+                    x = crate::logbook::novelty::paint(p, egui::pos2(x, rect.center().y), t, 9.5, 1.0)
+                        .right()
+                        + 4.0;
+                }
+            }
             if resp.clicked() {
                 click = Some((r.id, ui.input(|i| i.modifiers)));
             }

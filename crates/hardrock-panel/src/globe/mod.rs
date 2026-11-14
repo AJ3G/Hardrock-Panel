@@ -254,6 +254,9 @@ pub(crate) struct Globe {
     rx_band: Option<&'static str>,
     /// The FT8 strobe, while a QSO is under way.
     strobe: Option<Strobe>,
+    /// What the log has worked, for the spots' badges (decision 122): the
+    /// panel hands it over each frame.
+    pub(crate) worked: Option<std::sync::Arc<crate::logbook::WorkedIndex>>,
     /// A QSO's station with no reception to pick: turn to its path when
     /// GLOBE is next drawn.
     qso_fly: bool,
@@ -301,6 +304,7 @@ impl Default for Globe {
             followed: None,
             rx_band: None,
             strobe: None,
+            worked: None,
             qso_fly: false,
             mode: None,
             wspr_merged: Vec::new(),
@@ -1885,13 +1889,19 @@ fn map(
                 let first = !named.iter().any(|c| c.eq_ignore_ascii_case(&r.call));
                 if (selected || age <= 3.0) && first {
                     named.push(&r.call);
-                    painter.text(
+                    let tr = painter.text(
                         at + Vec2::new(8.0, -9.0),
                         egui::Align2::LEFT_CENTER,
                         &r.call,
                         egui::FontId::monospace(if selected { 12.0 } else { 10.0 }),
                         if selected { INK } else { INK_DIM },
                     );
+                    // What is new about them on their band: the rarest
+                    // DXCC or grid badge (decision 122).
+                    let band = crate::logbook::adif_band(r.rf_hz);
+                    if let Some(t) = g.worked.as_ref().and_then(|ix| ix.worked(&r.call, band, "", Some(&r.grid)).top_award()) {
+                        crate::logbook::novelty::paint(&painter, egui::pos2(tr.right() + 4.0, tr.center().y), t, 9.0, 1.0);
+                    }
                 }
                 if let Some(cp) = click {
                     let d = cp.distance(at);

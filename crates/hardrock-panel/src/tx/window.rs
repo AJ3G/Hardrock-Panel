@@ -6,6 +6,7 @@
 use eframe::egui::{self, Color32, RichText, Sense, vec2};
 use rigcat::RigLink;
 
+use super::qso::Several;
 use super::{
     FreqMode, ListRow, Sort, Tx, TxMode, TxSettings, WsprKey, WsprRow, WsprSort, sched, wave,
 };
@@ -370,7 +371,7 @@ fn decode_list(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, 
             let rows = &tx.rows;
             idx.retain(|&i| {
                 let r = &rows[i];
-                r.to_me || r.ours || ((!s.cq_only || r.d.is_cq) && (!s.new_only || r.badges.new_call || r.badges.new_dxcc || r.badges.new_grid || r.badges.new_band))
+                r.to_me || r.ours || ((!s.cq_only || r.d.is_cq) && (!s.new_only || r.badges.is_new()))
             });
             if idx.is_empty() {
                 continue;
@@ -926,30 +927,14 @@ fn row_ui(
         let col = if guess { ink.gamma_multiply(0.6) } else { ink };
         put(format!("{brg:3.0}° {km:5.0} km"), col, 106.0);
     }
-    // Badges.
-    let b = r.badges;
-    let tags: Vec<&str> = [
-        (b.new_dxcc, "DXCC"),
-        (b.new_band && !b.new_dxcc, "BAND"),
-        (b.new_grid, "GRID"),
-        (b.new_call && !b.new_dxcc, "NEW"),
-        (b.dupe, "DUPE"),
-    ]
-    .into_iter()
-    .filter(|t| t.0)
-    .map(|t| t.1)
-    .collect();
+    // Badges: the two rarest things new about them (decision 122).
     let right = rect.right() - 76.0;
     let mut bx = x.get().min(right - 4.0);
-    for t in tags.iter().take(2) {
-        let g = p.layout_no_wrap(t.to_string(), egui::FontId::monospace(10.0), theme::INK_ON_CYAN());
-        let br = egui::Rect::from_min_size(egui::pos2(bx, y - 7.0), g.size() + vec2(6.0, 2.0));
-        if br.right() > right {
+    for t in r.badges.tags().into_iter().take(2) {
+        if bx + crate::logbook::novelty::width(&p, t, 9.5) > right {
             break;
         }
-        let fill = if *t == "DUPE" { theme::LINE() } else { theme::CYAN_DIM() };
-        p.rect_filled(br, 2.0, fill);
-        p.galley(br.min + vec2(3.0, 1.0), g, theme::INK_ON_CYAN());
+        let br = crate::logbook::novelty::paint(&p, egui::pos2(bx, y), t, 9.5, 1.0);
         bx = br.right() + 4.0;
     }
     // REPLY and +.
@@ -1042,6 +1027,7 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, sp
             ui.label(RichText::new("No station picked: REPLY on a decode, or CALL CQ.").size(11.5).color(theme::TEXT()));
         }
     }
+    pick_one(ui, tx, s, c);
     if tx.qso.watchdog() {
         ui.label(RichText::new("The TX watchdog stopped the run. Pick a line or REPLY to go on.").size(11.5).color(theme::YELLOW()));
     }
@@ -1192,6 +1178,21 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, sp
                 *v = !*v;
             }
         }
+        let several = format!("Several: {}", s.several.label());
+        if chrome::chip(ui, s.several == Several::Best, &several)
+            .on_hover_text(
+                "Several stations answering your CQ at once. ASK: none is worked until you pick one \
+                 (CQ goes again if you don't). BEST: the best for DX is worked by itself: a new DXCC, \
+                 then one new on this band, then one not worked this session, then the farthest, \
+                 then the strongest",
+            )
+            .clicked()
+        {
+            s.several = match s.several {
+                Several::Ask => Several::Best,
+                Several::Best => Several::Ask,
+            };
+        }
         if chrome::chip(ui, false, "LOG THIS").on_hover_text("Log the contact in hand now").clicked() {
             tx.log_this(c.now);
         }
@@ -1261,6 +1262,83 @@ fn qso_panel(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>, sp
         });
     }
     shown_h
+}
+
+/// Several stations answering our CQ, with ASK or Call 1st off (decision
+/// 123): one button each, best for DX first, under a clear prompt.
+/// Clicking one works them as REPLY on their call would; with none picked,
+/// CQ goes again.
+fn pick_one(ui: &mut egui::Ui, tx: &mut Tx, s: &mut TxSettings, c: &Ctx<'_>) {
+    let choices = tx.qso.choices().to_vec();
+    if choices.is_empty() {
+        return;
+    }
+    let mut picked = None;
+    egui::Frame::new()
+        .stroke(egui::Stroke::new(1.0, theme::CYAN()))
+        .fill(theme::CYAN().gamma_multiply(0.08))
+        .inner_margin(egui::Margin::symmetric(6, 4))
+        .corner_radius(2)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(
+                RichText::new(format!("{} STATIONS CALLING YOU: PICK ONE", choices.len()))
+                    .strong()
+                    .size(12.0)
+                    .color(theme::CYAN()),
+            );
+            ui.horizontal_wrapped(|ui| {
+                for ch in &choices {
+                    let tags = ch.badges.tags();
+                    let text = format!("{}  {}", ch.call, crate::tx::msg::fmt_report(ch.snr_db));
+                    let r = ui
+                        .scope(|ui| {
+                            ui.horizontal(|ui| {
+                                if let Some(f) = crate::dxcc::flag_of(&ch.call) {
+                                    tx.flags.show(ui, f.0, 12.0);
+                                }
+                                let b = ui.add(egui::Button::new(mono(text).strong().color(theme::TEXT_STRONG())));
+                                // The log's news, rarest first, at most two.
+                                for t in tags.iter().take(2) {
+                                    let w = crate::logbook::novelty::width(ui.painter(), *t, 9.5);
+                                    let (rect, resp) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
+                                    crate::logbook::novelty::paint(ui.painter(), rect.left_center(), *t, 9.5, 1.0);
+                                    resp.on_hover_text(t.tip());
+                                }
+                                b
+                            })
+                            .inner
+                        })
+                        .inner;
+                    let km = ch.km.map_or(String::new(), |k| format!(", {:.0} {}", c.station.dist_unit.of_km(k), c.station.dist_unit.label()));
+                    let r = r.on_hover_text(format!(
+                        "Work {}{}{km}: as REPLY on their call",
+                        ch.call,
+                        ch.grid.as_deref().map_or(String::new(), |g| format!(" in {g}")),
+                    ));
+                    if r.clicked() {
+                        picked = Some(ch.call.clone());
+                    }
+                    ui.add_space(6.0);
+                }
+            });
+            ui.label(
+                RichText::new("None picked before your next over: CQ goes again.")
+                    .size(10.5)
+                    .color(theme::CYAN_DIM()),
+            );
+        });
+    if let Some(call) = picked
+        && let Some(r) = tx.pick_caller(s, &call, c.now)
+    {
+        if s.mode == TxMode::Ft8 {
+            tx.enable(s);
+        }
+        tx.picked = Some(r.row);
+        if s.freq == FreqMode::Manual {
+            s.audio_hz = r.d.audio_hz.round();
+        }
+    }
 }
 
 /// The drive a LEVEL gives, beside its slider: "≈ 2.5 W", or "— W" before

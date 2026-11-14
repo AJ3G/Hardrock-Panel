@@ -81,6 +81,9 @@ pub struct SkimFeed {
     /// DECODE's audio frequency for PSK31 and RTTY: a keyboard label
     /// clicked tunes so its signal lands there.
     pub key_audio_hz: f64,
+    /// What is new about a station on this band, by its call (upper case):
+    /// the badge's text and colour, drawn after its label (decision 122).
+    pub novel: std::collections::HashMap<String, (&'static str, eframe::egui::Color32)>,
 }
 
 /// How long a keyboard signal's label fades once it stops, s: CW's twice

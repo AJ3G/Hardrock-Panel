@@ -1721,6 +1721,7 @@ mod tests {
                 key("KB1XYZ", 14_110_000.0, skim::KeyMode::Psk),
             ],
             key_audio_hz: 1500.0,
+            ..Default::default()
         };
         sc.skim(Some(feed));
         frames(&mut sc, ft8_rig(false), vec![vec![]]);
