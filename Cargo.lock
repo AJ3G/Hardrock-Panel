@@ -3690,6 +3690,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tmate2"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "libc",
+ "serde",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
