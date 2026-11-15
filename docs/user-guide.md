@@ -194,7 +194,8 @@ These are safety interlocks #5, #6 and #7.
 
 **SWR while tuning.** A tuner sweeping its relays makes the SWR jump for a
 moment, so TX TUNE and RIG TUNE judge it more loosely than an ordinary over:
-the limit is twice the SWR warning (10:1 at most), the first 5 s are not
+the limit is twice the SWR warning (6.1:1 at most, just past where the HR500's
+tuner gives up at 6:1), the first 5 s are not
 judged at all, and after that the SWR must stay at or over the limit for
 0.3 s to stop it. While the HR500's own tuner says it is tuning, the radio's
 SWR doesn't stop TUNE at all (the amplifier protects itself), and with the
@@ -369,6 +370,14 @@ tuner is bypassed, the drawing shows the bypass relays instead.
   the tuner saw under 0.5 W* (the carrier dropped or was too weak during the
   tune), *SWR above 6:1: too far off for the tuner* or *Power too high for
   the tuner to tune*; hover over it or over TUNE for what to do.
+- **How the tuner tunes** (from its designer, WA2EUJ): it aims for 1.3:1 and
+  keeps the best match it has seen, so a tune never ends worse than it
+  started. A load already under 1.3:1 is left bypassed, and the line reads
+  *Tuned: under 1.3:1, bypassed* in green; that is the expected result. A load
+  over about 6:1 isn't tuned at all. The SWR beside the tuner's state is the
+  tuner's own reading; the SWR meter reads another coupler, so the two can
+  differ by up to about 0.2. Hover over the state line for this. The details
+  are in [atu-values.md](atu-values.md).
 - **ON / BYP** puts the tuner in line or bypasses it. With RF on, the
   amplifier refuses it (interlock #1), and a yellow line says so for a few
   seconds: *Unkey first: the tuner can't switch to BYP with RF on.* BYP while

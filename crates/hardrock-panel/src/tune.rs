@@ -300,8 +300,15 @@ fn stop_but_swr(
 /// How far a TUNE raises the SWR limit: twice the warning, as SDRoxide's
 /// `swr_tune_limit`, but never past [`TUNE_SWR_MAX`].
 const TUNE_SWR_SCALE: f32 = 2.0;
-/// The top of the scale the radios report; a TUNE's limit stops here.
-const TUNE_SWR_MAX: f32 = 10.0;
+/// Just past where the HR500's tuner gives up, and so where a TUNE's limit
+/// and an over's single-reading stop sit at most. WA2EUJ (14 Nov 2026,
+/// docs/atu-values.md): under 2.5 dB return loss, about 6:1, the ATU-500
+/// doesn't try to tune; it stays bypassed and reports an error. Past that a
+/// high SWR is never a tune still working, only a fault. 6.1 rather than 6.0
+/// so that at 6:1 the tuner bypasses by itself first (AJ3G). It was 10:1,
+/// the top of the scale the radios report, so with the 5.0 default warning
+/// the single-reading stop sat at 10:1.
+const TUNE_SWR_MAX: f32 = 6.1;
 /// How long after keying a TUNE's SWR is not believed at all: SDRoxide's
 /// 150 meter samples (about 5 s), the time a tuner takes to sweep.
 pub(crate) const TUNE_SWR_SETTLE: Duration = Duration::from_secs(5);
@@ -311,9 +318,11 @@ pub(crate) const TUNE_SWR_SETTLE: Duration = Duration::from_secs(5);
 /// keyed, so one spike never covers it alone.
 pub(crate) const TUNE_SWR_DWELL: Duration = Duration::from_millis(300);
 
-/// The SWR limit while tuning: the warning doubled, capped at 10:1.
+/// The SWR limit while tuning: the warning doubled, capped at 6.1:1, just
+/// past the tuner's 6:1, and never under the warning itself.
+// SAFETY INTERLOCK (docs/safety-interlocks.md, #6)
 pub(crate) fn swr_tune_limit(swr_warn: f32) -> f32 {
-    (swr_warn * TUNE_SWR_SCALE).min(TUNE_SWR_MAX)
+    (swr_warn * TUNE_SWR_SCALE).min(TUNE_SWR_MAX).max(swr_warn)
 }
 
 /// The SWR rule for TX TUNE and RIG TUNE, ported from SDRoxide's
@@ -325,8 +334,8 @@ pub(crate) fn swr_tune_limit(swr_warn: f32) -> f32 {
 /// reading, the carrier dropped mid-cycle, the HR500's tuner then reported
 /// "Lo power" and the TUNE light went red (AJ3G, 11 Nov 2026). So, during a
 /// TUNE:
-/// - The radio's SWR is judged against the warning doubled (10:1 at most,
-///   [`swr_tune_limit`]), not at all for the first [`TUNE_SWR_SETTLE`], and
+/// - The radio's SWR is judged against the warning doubled (6.1:1 at most,
+///   just past where the HR500's tuner gives up, [`swr_tune_limit`]), not at all for the first [`TUNE_SWR_SETTLE`], and
 ///   stops it only after staying at or over that for [`TUNE_SWR_DWELL`].
 ///   While the amplifier says its tuner is tuning, the radio's SWR doesn't
 ///   stop it at all: the amplifier protects itself then.
@@ -428,7 +437,7 @@ pub(crate) const OVER_SWR_MIN_RIG_W: f32 = 0.5;
 ///   (amplifier in line) or [`OVER_SWR_MIN_RIG_W`] (radio).
 /// - After that, SWR at or over the warning stops the over once it has stayed
 ///   there for [`OVER_SWR_DWELL`].
-/// - SWR at or over twice the warning ([`swr_tune_limit`]) on the amplifier
+/// - SWR at or over twice the warning, 6.1:1 at most ([`swr_tune_limit`]), on the amplifier
 ///   in line, with its power above the floor and past the settle, still stops
 ///   it on one reading.
 ///
@@ -1062,10 +1071,14 @@ mod tests {
     }
 
     #[test]
-    fn the_tune_limit_is_twice_the_warning_up_to_ten() {
+    fn the_tune_limit_is_twice_the_warning_up_to_just_past_the_tuners_six() {
         assert_eq!(swr_tune_limit(2.5), 5.0);
         assert_eq!(swr_tune_limit(3.0), 6.0);
-        assert_eq!(swr_tune_limit(6.0), 10.0);
+        // The 5.0 default: 6.1:1, just past where the ATU-500 gives up at
+        // 6:1, not 10:1.
+        assert_eq!(swr_tune_limit(5.0), 6.1);
+        // Never under the warning itself.
+        assert_eq!(swr_tune_limit(8.0), 8.0);
     }
 
     #[test]
@@ -1218,6 +1231,20 @@ mod tests {
         let a = amp_swr(6.5, 400.0);
         let out = over_run(&[(1000, &a, 1.1, Some(4.0))]);
         assert!(out[0].as_deref().unwrap().contains("amplifier's SWR reached 6.5:1"), "{out:?}");
+    }
+
+    #[test]
+    fn past_the_tuners_six_to_one_an_over_stops_at_once() {
+        // At the 5.0 default warning twice the warning is 10:1; the ATU-500
+        // gives up at about 6:1 (WA2EUJ), so past 6.1:1, 7:1 is a fault,
+        // stopped on one reading.
+        let a = amp_swr(7.0, 400.0);
+        let mut r = duo(14_074_000, 2);
+        r.swr = elad::parse_swr("0 01.10");
+        let t0 = Instant::now();
+        let at = Duration::from_millis(1000);
+        let why = OverSwr::default().must_stop(&a, &r, 5.0, w(&r), false, at, t0 + at);
+        assert!(why.as_deref().unwrap().contains("amplifier's SWR reached 7.0:1"), "{why:?}");
     }
 
     #[test]

@@ -1145,9 +1145,11 @@ fn panel_look(
                     Tone::Blue => theme::CYAN(),
                     _ => theme::GREEN(),
                 };
-                ui.label(RichText::new(state).size(14.0 * s).strong().color(col));
+                ui.label(RichText::new(state).size(14.0 * s).strong().color(col))
+                    .on_hover_text(ATU_STATE_HOVER);
                 if let Some(swr) = swr {
-                    ui.label(RichText::new(swr).size(14.0 * s).color(theme::TEXT()));
+                    ui.label(RichText::new(swr).size(14.0 * s).color(theme::TEXT()))
+                        .on_hover_text(ATU_STATE_HOVER);
                 }
             });
         }
@@ -1309,7 +1311,8 @@ fn keys(sh: &Shown) -> Keys {
             tone,
             enabled: live,
             hover: failure.map_or(
-                "Start a tune — then key a steady carrier (CW, FM or RTTY). Press again to stop.",
+                "Start a tune — then key a steady carrier (CW, FM or RTTY). Press again to stop. \
+                 The tuner aims for 1.3:1 and keeps the best match it has seen.",
                 |f| f.hover,
             ),
             why_not: off_line(),
@@ -1379,8 +1382,8 @@ fn atu_failure(atu: &AtuReadout) -> Option<AtuFailure> {
     } else if res.starts_with("SWR above") {
         (
             "SWR above 6:1: too far off for the tuner",
-            "SWR above 6:1: the load is beyond what the tuner can match. Check the antenna and \
-             its feed line, then press TUNE to try again.",
+            "SWR above 6:1: the load is beyond what the tuner can match, so it didn't try and \
+             stayed bypassed. Check the antenna and its feed line, then press TUNE to try again.",
         )
     } else if res.starts_with("Failed (above 2:1)") {
         (
@@ -1402,12 +1405,26 @@ fn atu_failure(atu: &AtuReadout) -> Option<AtuFailure> {
     Some(AtuFailure { line, hover })
 }
 
+/// What the tuner's state says after a tune that left it bypassed.
+const ATU_UNDER_1_3: &str = "Tuned: under 1.3:1, bypassed";
+
+/// The hover on the tuner's state line: how it tunes and whose SWR it shows.
+const ATU_STATE_HOVER: &str = "The tuner aims for 1.3:1 and always keeps the best match it has \
+     seen, so a tune never ends worse than it started. A load already under 1.3:1 is left \
+     bypassed. The SWR here is from the tuner's own coupler; the SWR meter reads the low-pass \
+     filter board's, so the two can differ by up to about 0.2.";
+
 /// The tuner's state in words, its tone, and the SWR it tuned to, while it
-/// tunes or is in line.
+/// tunes or is in line, or after a tune that left it bypassed.
 fn atu_words(atu: &AtuReadout) -> Option<(String, Tone, Option<String>)> {
     let bypassed = atu_bypassed(atu);
     if !atu.tuning && bypassed {
-        return None;
+        // ON, tuned, and the tuner left itself bypassed: the load was already
+        // under 1.3:1, which a stepped L/C tuner can rarely better, so it is
+        // the expected end of a tune, not a failure (WA2EUJ, 14 Nov 2026,
+        // docs/atu-values.md).
+        return (atu.active && atu.last_result.as_deref() == Some("Tuned"))
+            .then(|| (ATU_UNDER_1_3.to_string(), Tone::Green, None));
     }
     let (failed, _) = atu_result(atu);
     let state = if atu.tuning {
@@ -2602,6 +2619,25 @@ mod tests {
         atu.network = Some(AtuNetwork { swr: Some(12.0), ..Default::default() });
         let (_, tone, swr) = atu_words(&atu).unwrap();
         assert_eq!((tone, swr.as_deref()), (Tone::Red, Some("> 10:1")));
+    }
+
+    #[test]
+    fn a_tune_that_leaves_the_tuner_bypassed_says_the_load_was_already_good() {
+        let mut atu = AtuReadout {
+            active: true,
+            last_result: Some("Tuned".into()),
+            network: Some(AtuNetwork { bypassed: true, swr: Some(1.2), ..Default::default() }),
+            ..Default::default()
+        };
+        let (state, tone, swr) = atu_words(&atu).unwrap();
+        assert_eq!((state.as_str(), tone, swr), (ATU_UNDER_1_3, Tone::Green, None));
+        // Put on BYP by hand, it says nothing.
+        atu.active = false;
+        assert_eq!(atu_words(&atu), None);
+        // A failed tune that stayed bypassed isn't called good.
+        atu.active = true;
+        atu.last_result = Some("SWR above 6:1".into());
+        assert_eq!(atu_words(&atu), None);
     }
 
     #[test]
