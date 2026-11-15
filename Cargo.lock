@@ -1642,6 +1642,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serialport",
+ "tmate2",
  "tracing",
  "tracing-subscriber",
  "ureq",
@@ -3687,6 +3688,17 @@ dependencies = [
  "quick-error",
  "weezl",
  "zune-jpeg",
+]
+
+[[package]]
+name = "tmate2"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "libc",
+ "serde",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

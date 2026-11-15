@@ -65,6 +65,7 @@ mod slices;
 mod slotclock;
 mod spots;
 mod station;
+mod tm2;
 mod tune;
 mod tx;
 
@@ -129,6 +130,8 @@ struct Saved {
     show_tx: bool,
     /// LOG and SETTINGS → Logbook (decision 69).
     log: logbook::LogSettings,
+    /// SETTINGS → ELAD TMate 2.
+    tm2: tm2::Tm2Settings,
 }
 
 impl Default for Saved {
@@ -154,6 +157,7 @@ impl Default for Saved {
             tx: tx::TxSettings::default(),
             show_tx: false,
             log: logbook::LogSettings::default(),
+            tm2: tm2::Tm2Settings::default(),
         }
     }
 }
@@ -243,6 +247,8 @@ struct App {
     /// The look the command line asks for (`--theme`, or `--demo`'s ELAD
     /// look), over the one the chosen radio gives (decision 39).
     forced_look: Option<theme::StationLook>,
+    /// The ELAD TMate 2 controller's worker.
+    tm2: tm2::Tm2,
 }
 
 /// How long the radio is given to show a TUNE keyed before its tone is
@@ -285,7 +291,9 @@ impl App {
         }
         let mut outside = outside::Outside::default();
         outside.apply(&saved.outside, &rx.taps);
+        let tm2 = tm2::Tm2::start(&cc.egui_ctx, saved.tm2.enabled);
         App {
+            tm2,
             render_state,
             scope,
             rx,
@@ -361,6 +369,62 @@ impl App {
             tone_error: self.tone_error.clone(),
             panel_vol: (!self.rx.sound_via_radio(&self.saved.rx)).then_some(self.saved.rx.volume),
             rx_dbm: self.rx.meter_dbm(r),
+        }
+    }
+
+    /// The TMate 2: what its dials and keys asked for, sent as the radio
+    /// window's and the AMP panel's own controls send it (so every
+    /// interlock holds), and its LCD brought up to date. `st` is the
+    /// amplifier as the AMP panel shows it.
+    fn run_tm2(
+        &mut self,
+        ctx: &egui::Context,
+        st: &AmpStatus,
+        rig: Option<&RigStatus>,
+        transmitting: bool,
+    ) {
+        self.tm2.set_enabled(self.saved.tm2.enabled);
+        if !self.saved.tm2.enabled {
+            return;
+        }
+        let out = self.tm2.poll(ctx, &mut self.saved.tm2, st, tm2::hold_s(rig));
+        if let Some(link) = &self.link {
+            for &a in &out.amp {
+                link.action(a);
+            }
+        }
+        if let Some(why) = &out.note {
+            tracing::info!("TMate 2: amplifier key refused: {why}");
+        }
+        let panel_vol =
+            (!self.rx.sound_via_radio(&self.saved.rx)).then_some(self.saved.rx.volume);
+        let o = radio::hardware::apply(ctx, rig, panel_vol, &out.hw);
+        if let Some(on) = o.tx_follows_rx {
+            self.saved.rx.tx_follows_rx = on;
+        }
+        // As for the radio window's E1 (see there).
+        if !transmitting {
+            follow_e1(&o.frames, &mut self.saved.rx);
+        }
+        if let Some(v) = o.panel_volume {
+            self.saved.rx.volume = v;
+        }
+        if let Some(link) = &self.rig
+            && !o.frames.is_empty()
+        {
+            // Read back after each; refused while transmitting (#5).
+            link.set(o.frames);
+        }
+        let view = radio::hardware::view(ctx);
+        let rx_dbm = rig.and_then(|r| self.rx.meter_dbm(r));
+        let d = tm2::display(rig, st, transmitting, &view, &self.saved.tm2, rx_dbm);
+        self.tm2.show(d);
+        if self.tm2.connected() {
+            // The S-meter and power keep moving with nothing else drawing.
+            ctx.request_repaint_after(Duration::from_millis(100));
+            if let Some(t) = tm2::repaint_for(&view) {
+                ctx.request_repaint_after(t);
+            }
         }
     }
 
@@ -1408,6 +1472,10 @@ impl App {
                         ui.add_space(10.0);
                         ui.separator();
                         ui.add_space(6.0);
+                        tm2::settings_ui(ui, &mut self.saved.tm2, Some(&self.tm2));
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
                         if settings::settings_receiver_tab(
                             ui,
                             &mut self.draft_source,
@@ -1721,6 +1789,7 @@ impl eframe::App for App {
         if self.show_settings {
             self.settings_window(ctx, &st, rig.as_ref());
         }
+        self.run_tm2(ctx, &st, rig.as_ref(), transmitting);
         if self.show_radio {
             let mut open = true;
             let popped = self.saved.radio_popped;

@@ -1338,6 +1338,52 @@ fn keys(sh: &Shown) -> Keys {
     Keys { ptt, ant, dn, up, tune, atu }
 }
 
+/// One of the amplifier's keys, pressed on a hardware controller (the
+/// TMate 2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AmpKey {
+    /// PTT ON or OFF.
+    Ptt,
+    /// The tuner's TUNE.
+    Tune,
+    /// The tuner in line or bypassed.
+    Atu,
+    Antenna,
+}
+
+/// What pressing `k` sends, as the panel's own key would, or why it can't
+/// now. It comes from the same [`keys`] the panel draws, so the same
+/// interlocks hold: no relay switched with RF on it (#2), no PTT ON while
+/// overdriven (#4). The link checks again before sending.
+pub(crate) fn amp_key(st: &AmpStatus, k: AmpKey) -> Result<AmpAction, String> {
+    let sh = Shown {
+        st,
+        r: st.readings.unwrap_or_default(),
+        limits: st.model.limits(),
+        rig: RigFill::default(),
+        live: st.connected && st.readings.is_some(),
+        past: false,
+        range: PowerRange::Full,
+        now: 0.0,
+        s: 1.0,
+        width: 720.0,
+        nominal: 720.0,
+        transmitting: false,
+    };
+    let ks = keys(&sh);
+    let key = match k {
+        AmpKey::Ptt => Some(&ks.ptt),
+        AmpKey::Tune => ks.tune.as_ref(),
+        AmpKey::Atu => ks.atu.as_ref(),
+        AmpKey::Antenna => ks.ant.as_ref(),
+    };
+    match key {
+        None => Err("This amplifier has no such key.".into()),
+        Some(key) if key.enabled => Ok(key.action),
+        Some(key) => Err(key.why_not.clone()),
+    }
+}
+
 /// Whether the drive is over the amplifier's limit in bypass, so that going
 /// in line now would overdrive it (safety interlock #4).
 fn ptt_overdriven(r: &AmpReadings, limits: &AmpLimits) -> bool {
