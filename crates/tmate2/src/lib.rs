@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded, unbounded};
 use tracing::{debug, info, warn};
 
-pub use protocol::{Display, ModeIcon, TxReadout};
+pub use protocol::{Backlights, Display, Look, ModeIcon, Rgb, TxReadout};
 
 /// The panel's controls: the big main dial, the two small dials printed E1
 /// (left) and E2 (right), their push switches, and keys F1 to F6.

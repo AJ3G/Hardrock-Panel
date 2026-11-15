@@ -232,6 +232,57 @@ the same way, and drag it smaller again and it shrinks back. The settings are re
 CAT command, such as 37 `CW IN` and 45 keyer speed, can only be read on the
 radio.
 
+### The ELAD TMate 2
+
+An **ELAD TMate 2** on USB works as a second face for the RADIO window. It
+works with the window open or closed, and the two always agree.
+
+1. Close any other program using the TMate 2 (SDRoxide, SDR Console, ELAD's
+   own software). Only one program can hold it.
+2. In **Settings**, under **ELAD TMate 2**, tick **Enable**. The line under it
+   reads *Connected: TMate 2* once it is found. It is looked for once a
+   second, so it can be plugged in or out at any time. Its USB light is on
+   while the panel drives it.
+
+**The dials** are the RADIO window's knobs, pushes and holds included (see
+*The knobs* above):
+
+- **Main dial** tunes by the step, which is underlined on the TMate 2's
+  display. A push switches to choosing the step (1 Hz to 1 MHz) and back; a
+  hold starts digit by digit.
+- **E1** turns VOL, SQL, AGC, NR or NB; a push picks the next. While it is
+  turned, its setting shows on the small display for two seconds.
+- **E2** turns the filter, CW pitch or RIT offset; a push picks the next.
+- **Holding E1 or E2** locks the dials and the radio keys, and lights LOCK.
+  Hold either again to unlock.
+
+Each dial can be reversed under **Reverse**.
+
+**F1 to F6** each do what you choose in Settings. They start as band down,
+band up, mode back, mode on, amplifier PTT ON/OFF and the tuner's TUNE. The
+choices are band down or up (at the band's last frequency and mode, and
+from between bands to the nearest band that way; the HR500 follows the
+radio), mode back or on, tuning step finer or coarser, VFO A/B, A=B, SPLIT,
+RIT on/off, RIT clear, lock, amplifier PTT ON/OFF, tuner TUNE, tuner ON/BYP,
+amplifier antenna, and the transmit readout.
+
+**The display** shows the DUO's dial (with the transverter offset, as on the
+RADIO window's LCD), mode, VFO, NB, NR, RIT and S-meter in dBm. While the
+station transmits, the bargraph shows the amplifier's forward power and the
+small display shows forward power, reflected power or SWR (13 is 1.3:1),
+picked under **While transmitting** or with a key set to *TX readout*. With
+the amplifier in bypass these come from the radio, as on the AMP panel.
+
+**The backlight** has a receive colour and a transmit colour. Tick **Receive
+colour by mode** to give SSB, CW, AM and FM, and data modes a colour each.
+**Contrast** sets the LCD's contrast. **DEFAULT COLOURS** puts back ELAD's
+blue.
+
+Everything the TMate 2 asks for is sent as the panel's own controls send it,
+so the same rules apply: nothing goes to the radio while it transmits, no
+amplifier relay is switched with RF on it, and PTT ON is refused while the
+drive is over the amplifier's limit.
+
 ## Band switching
 
 SETTINGS, Radio, **Amplifier band** says where the amplifier's band comes from:

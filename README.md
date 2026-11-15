@@ -27,6 +27,10 @@ from the radio, it reads from the radio's CAT port itself. It does the following
   interlocks that unkey on a trip, high SWR, overdrive or a time limit, and
   TX TUNE only with the radio's input on USB audio. Nothing else is ever sent
   to the radio but reads.
+- Takes an ELAD TMate 2 on USB as a second face for the RADIO window: its
+  dials are the window's knobs, its six keys do what you pick, and its LCD
+  shows the DUO's dial and S-meter and the amplifier's power, with the
+  backlight's colour set by transmit and mode.
 - Shows the DUO's I/Q (over its USB lead, or a demo band) in a SCOPE window:
   a GPU waterfall and 3D FFT, a band plan, markers and the panel's own
   receiver, played on any sound output, with the radio put in split so it

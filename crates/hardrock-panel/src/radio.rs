@@ -16,6 +16,7 @@
 
 mod controls;
 mod face;
+pub(crate) mod hardware;
 mod knobs;
 pub(crate) mod logic;
 mod rigtheme;

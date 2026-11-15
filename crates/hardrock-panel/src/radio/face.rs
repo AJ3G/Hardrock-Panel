@@ -634,6 +634,14 @@ fn silver_knob(
     }
 }
 
+/// One knob's turn and press this frame, from the pointer or from a
+/// hardware controller's dial (the TMate 2).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Turn {
+    pub steps: i64,
+    pub press: Option<knobs::Press>,
+}
+
 /// One knob's input this frame.
 struct KnobIn {
     resp: Response,
@@ -737,7 +745,7 @@ fn move_digit(f: &mut Face<'_>, n: usize, by: i64) {
 
 /// The main knob: tune, or in MEM pick the channel; in STEP change the
 /// step; digit by digit change the selected digit.
-fn main_knob(f: &mut Face<'_>, n: usize, input: &KnobIn) {
+fn main_knob(f: &mut Face<'_>, n: usize, input: &Turn) {
     use knobs::{MainMode, Press};
     let ks = f.st.knobs.main;
     if input.steps != 0 {
@@ -780,7 +788,7 @@ fn main_knob(f: &mut Face<'_>, n: usize, input: &KnobIn) {
 
 /// E1: change its setting, or push for the next one; digit by digit, move
 /// the selected digit.
-fn e1_knob(f: &mut Face<'_>, n: usize, input: &KnobIn) {
+fn e1_knob(f: &mut Face<'_>, n: usize, input: &Turn) {
     use knobs::{E1, MainMode, Press};
     let digit = f.st.knobs.main == MainMode::Digit;
     match input.press {
@@ -829,7 +837,7 @@ fn e1_knob(f: &mut Face<'_>, n: usize, input: &KnobIn) {
 
 /// E2: change the filter, CW pitch or RIT offset, or push for the next;
 /// digit by digit, move the selected digit.
-fn e2_knob(f: &mut Face<'_>, n: usize, input: &KnobIn) {
+fn e2_knob(f: &mut Face<'_>, n: usize, input: &Turn) {
     use knobs::{E2, MainMode, Press};
     let digit = f.st.knobs.main == MainMode::Digit;
     match input.press {
@@ -882,6 +890,35 @@ fn e2_knob(f: &mut Face<'_>, n: usize, input: &KnobIn) {
     }
 }
 
+/// The three knobs turned and pressed: main, E1, E2. The face's own knobs
+/// and the TMate 2's dials both come here, so they do the same.
+///
+/// SAFETY INTERLOCK (#5, panel side): nothing while the radio transmits or
+/// isn't connected; the link would refuse the frames anyway.
+pub(crate) fn turn_knobs(f: &mut Face<'_>, n: usize, t: [Turn; 3]) {
+    if f.lock.is_some() {
+        return;
+    }
+    if f.st.knobs.locked {
+        // Locked, only a hold of E1 or E2 does anything: it unlocks.
+        let hold = Some(knobs::Press::Hold);
+        if t[1].press == hold || t[2].press == hold {
+            f.st.knobs.locked = false;
+        }
+        return;
+    }
+    if logic::dial_hz(f.s).is_some() {
+        main_knob(f, n, &t[0]);
+    }
+    e1_knob(f, n, &t[1]);
+    e2_knob(f, n, &t[2]);
+}
+
+/// The dial's place value the main knob tunes by, in Hz.
+pub(crate) fn tuning_step(f: &Face<'_>, n: usize) -> u64 {
+    tune_step(f, n)
+}
+
 /// E2's setting in words, as its caption shows it.
 fn e2_text(f: &Face<'_>) -> String {
     use knobs::E2;
@@ -928,21 +965,8 @@ pub(crate) fn knobs(ui: &mut Ui, f: &mut Face<'_>, prefs: &RadioPrefs, height: f
     let main_in = knob_input(ui, f, 0, main_c, d_main / 2.0, live && tuning, true);
     let e1_in = knob_input(ui, f, 1, e1_c, d_small / 2.0, live, true);
     let e2_in = knob_input(ui, f, 2, e2_c, d_small / 2.0, live, true);
-    if live {
-        if f.st.knobs.locked {
-            // Locked, only a hold of E1 or E2 does anything: it unlocks.
-            let hold = Some(knobs::Press::Hold);
-            if e1_in.press == hold || e2_in.press == hold {
-                f.st.knobs.locked = false;
-            }
-        } else {
-            if tuning {
-                main_knob(f, n, &main_in);
-            }
-            e1_knob(f, n, &e1_in);
-            e2_knob(f, n, &e2_in);
-        }
-    }
+    let turn = |k: &KnobIn| Turn { steps: k.steps, press: k.press };
+    turn_knobs(f, n, [turn(&main_in), turn(&e1_in), turn(&e2_in)]);
 
     // Draw.
     let p = ui.painter_at(rect.expand(z(4.0)));

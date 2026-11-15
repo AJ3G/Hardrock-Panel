@@ -237,7 +237,7 @@ pub enum ModeIcon {
 
 /// What the small display shows while transmitting. The bargraph is output
 /// power whichever is picked.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TxReadout {
     /// [`Display::tx_mw`], in W (mW below 1 W); [`Display::tx_po_pct`] where
     /// there is no power reading.
@@ -288,6 +288,84 @@ pub struct Display {
     /// underlined.
     pub step_digit: Option<u8>,
     pub lock_led: bool,
+    /// A setting just turned (volume, squelch…), shown on the small display
+    /// in receive in place of the signal figure, without a unit.
+    pub small: Option<u32>,
+    /// Backlight colour and LCD contrast.
+    pub look: Look,
+}
+
+/// Backlight colour (0–255 each) and LCD contrast. The default is what
+/// ELAD's own software sends: a light blue at contrast 40.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Look {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+    pub contrast: u8,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Look { red: 0x00, green: 0x32, blue: 0xFF, contrast: 0x28 }
+    }
+}
+
+/// A backlight colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Rgb(pub u8, pub u8, pub u8);
+
+/// The operator's backlight choices: one colour in receive and one in
+/// transmit, and, if `by_mode`, a receive colour for each kind of mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Backlights {
+    pub rx: Rgb,
+    pub tx: Rgb,
+    pub by_mode: bool,
+    pub ssb: Rgb,
+    pub cw: Rgb,
+    pub am_fm: Rgb,
+    pub data: Rgb,
+    pub contrast: u8,
+}
+
+impl Default for Backlights {
+    fn default() -> Self {
+        let blue = Rgb(0x00, 0x32, 0xFF);
+        Backlights {
+            rx: blue,
+            tx: Rgb(0xFF, 0x20, 0x00),
+            by_mode: false,
+            ssb: blue,
+            cw: Rgb(0x00, 0xC0, 0x40),
+            am_fm: Rgb(0xFF, 0xA0, 0x00),
+            data: Rgb(0xA0, 0x00, 0xFF),
+            contrast: 0x28,
+        }
+    }
+}
+
+impl Backlights {
+    /// What the panel shows now: the transmit colour while transmitting,
+    /// else the mode's colour (when chosen by mode) or the receive colour.
+    pub fn pick(&self, tx: bool, mode: Option<ModeIcon>) -> Look {
+        let c = if tx {
+            self.tx
+        } else if self.by_mode {
+            match mode {
+                Some(ModeIcon::Lsb | ModeIcon::Usb) => self.ssb,
+                Some(ModeIcon::Cw) => self.cw,
+                Some(ModeIcon::Am | ModeIcon::Sam | ModeIcon::Fm | ModeIcon::Dsb) => self.am_fm,
+                Some(ModeIcon::Drm | ModeIcon::Dig) => self.data,
+                None => self.rx,
+            }
+        } else {
+            self.rx
+        };
+        Look { red: c.0, green: c.1, blue: c.2, contrast: self.contrast }
+    }
 }
 
 /// The underline under main digit `d` (1 = rightmost): bit 3 of the digit's
@@ -380,12 +458,12 @@ pub fn po_bars(pct: u8) -> usize {
 
 /// The settings part of every report: backlight, contrast, the dial
 /// acceleration ELAD ships (1, 5 and 10 counts per detent) and the LEDs.
-fn settings(r: &mut [u8; REPORT_LEN], lock: bool) {
+fn settings(r: &mut [u8; REPORT_LEN], lock: bool, look: Look) {
     r[STATUS] = LED_USB | if lock { LED_LOCK } else { 0 };
-    r[BACKLIGHT_R] = 0x00;
-    r[BACKLIGHT_G] = 0x32;
-    r[BACKLIGHT_B] = 0xFF;
-    r[CONTRAST] = 0x28;
+    r[BACKLIGHT_R] = look.red;
+    r[BACKLIGHT_G] = look.green;
+    r[BACKLIGHT_B] = look.blue;
+    r[CONTRAST] = look.contrast;
     // In 10 ms units. ELAD's DLL sends 40 (400 ms), which leaves the S-meter
     // visibly behind the signal; 100 ms keeps up with it.
     r[REFRESH] = LCD_REFRESH_10MS;
@@ -397,7 +475,7 @@ fn settings(r: &mut [u8; REPORT_LEN], lock: bool) {
 /// The full output report for `d`.
 pub fn output(d: &Display) -> [u8; REPORT_LEN] {
     let mut r = [0u8; REPORT_LEN];
-    settings(&mut r, d.lock_led);
+    settings(&mut r, d.lock_led, d.look);
 
     if let Some(hz) = d.freq_hz {
         if hz <= 999_999_999 {
@@ -477,9 +555,16 @@ pub fn output(d: &Display) -> [u8; REPORT_LEN] {
         for s in seg::BARS.iter().take(smeter_bars(dbm)) {
             set(&mut r, *s, true);
         }
-        small_digits(&mut r, dbm.unsigned_abs());
-        set(&mut r, seg::DB_MINUS, dbm < 0);
-        set(&mut r, seg::DBM, true);
+        if d.small.is_none() {
+            small_digits(&mut r, dbm.unsigned_abs());
+            set(&mut r, seg::DB_MINUS, dbm < 0);
+            set(&mut r, seg::DBM, true);
+        }
+    }
+    if !d.tx
+        && let Some(v) = d.small
+    {
+        small_digits(&mut r, v.min(999));
     }
     r
 }
@@ -496,6 +581,23 @@ pub fn closing_output() -> [u8; REPORT_LEN] {
     let mut r = idle_output();
     r[STATUS] = 0;
     r
+}
+
+#[cfg(test)]
+mod backlight_tests {
+    use super::*;
+
+    #[test]
+    fn transmit_wins_then_mode_then_receive() {
+        let b = Backlights { by_mode: true, ..Backlights::default() };
+        assert_eq!(b.pick(true, Some(ModeIcon::Cw)).red, b.tx.0);
+        assert_eq!(b.pick(false, Some(ModeIcon::Cw)).green, b.cw.1);
+        assert_eq!(b.pick(false, None).blue, b.rx.2);
+        let plain = Backlights::default();
+        assert_eq!(plain.pick(false, Some(ModeIcon::Cw)), plain.pick(false, None));
+        // The default receive colour is ELAD's own.
+        assert_eq!(plain.pick(false, None), Look::default());
+    }
 }
 
 #[cfg(test)]

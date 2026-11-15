@@ -1642,6 +1642,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serialport",
+ "tmate2",
  "tracing",
  "tracing-subscriber",
  "ureq",

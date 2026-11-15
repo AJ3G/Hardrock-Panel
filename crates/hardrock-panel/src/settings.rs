@@ -314,7 +314,7 @@ pub(crate) fn settings_radio_tab(
     });
 }
 
-fn enum_combo<T: PartialEq + Copy>(
+pub(crate) fn enum_combo<T: PartialEq + Copy>(
     ui: &mut egui::Ui,
     id: &str,
     cur: &mut T,
